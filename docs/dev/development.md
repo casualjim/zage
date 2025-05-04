@@ -93,7 +93,7 @@ The development will proceed in phases, each building on the previous:
 - [x] Basic error handling
 - [x] Configuration system
 - [x] Shell history parsing (Bash, Zsh)
-- [ ] SQLite database schema and operations
+- [x] SQLite database schema and operations  # Completed: includes schema init, insert_invocation, and tests
 - [ ] Command collection system
 
 ### Phase 2: Simple Prediction
@@ -265,10 +265,9 @@ eval "$(zage init bash)"
 
 The project currently has shell history parsing implemented. The next steps are:
 
-1. Complete the database schema implementation
-2. Implement command collection system
-3. Create a simple N-gram prediction model
-4. Implement Zsh plugin integration
+1. Complete the command collection system
+2. Create a simple N-gram prediction model
+3. Implement Zsh plugin integration
 
 ## Contributing
 

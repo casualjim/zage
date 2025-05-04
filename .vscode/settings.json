@@ -1,0 +1,17 @@
+{
+    "dbcode.connections": [
+        {
+            "connectionId": "aRlsHLSUD6hMPjucu4xCr",
+            "name": "zage",
+            "driver": "sqlite",
+            "socket": "/Users/ivan/Library/Application Support/zage/zage.db",
+            "readOnly": false,
+            "driverOptions": {
+                "extensions": [
+                    "sqlite-vec"
+                ]
+            },
+            "connectionType": "socket"
+        }
+    ]
+}

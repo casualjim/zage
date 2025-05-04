@@ -11,6 +11,25 @@ mod zsh;
 pub use bash::parse_history_file as parse_bash_history;
 pub use zsh::parse_history_file as parse_zsh_history;
 
+/// Which shell history format to import
+#[derive(Clone, Copy, Debug)]
+pub enum Shell {
+  Bash,
+  Zsh,
+}
+
+impl std::str::FromStr for Shell {
+  type Err = String;
+  fn from_str(s: &str) -> std::result::Result<Self, Self::Err> {
+    let name = s.rsplit('/').next().unwrap_or(s);
+    match name {
+      "bash" => Ok(Shell::Bash),
+      "zsh" => Ok(Shell::Zsh),
+      other => Err(format!("Unknown shell: {}", other)),
+    }
+  }
+}
+
 #[derive(Debug, Default, Serialize, Deserialize)]
 pub struct Invocation {
   pub command: BString,
