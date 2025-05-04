@@ -5,6 +5,7 @@ This document outlines the development plan and architecture for Zage, an intell
 ## Project Overview
 
 Zage aims to predict the next shell command a user is likely to run based on:
+
 - Command history
 - Current working directory
 - Recent command sequences
@@ -15,7 +16,7 @@ Unlike simple history search tools, Zage uses LSTM neural networks to identify a
 
 ## Current Project Structure
 
-```
+```rust
 zage/
 ├── src/
 │   ├── config.rs          # Configuration management
@@ -34,7 +35,7 @@ zage/
 
 ## Target Architecture
 
-```
+```rust
 zage/
 ├── src/
 │   ├── cli.rs             # Command-line interface handling
@@ -83,6 +84,21 @@ zage/
    - Rank predictions by confidence score
    - Automatically suggest the next command
 
+## CLI Usage
+
+Zage provides a command-line interface with the following subcommands:
+
+```bash
+# Import shell history
+zage import [OPTIONS]
+
+Options:
+  --file <FILE>       Path to history file (defaults to $HISTFILE env var)
+  --hostname <NAME>   Override hostname for import
+  --username <NAME>   Override username for import
+  --shell <SHELL>     Shell type (bash or zsh); defaults to $SHELL env var
+```
+
 ## Implementation Plan
 
 The development will proceed in phases, each building on the previous:
@@ -94,7 +110,7 @@ The development will proceed in phases, each building on the previous:
 - [x] Configuration system
 - [x] Shell history parsing (Bash, Zsh)
 - [x] SQLite database schema and operations  # Completed: includes schema init, insert_invocation, and tests
-- [ ] Command collection system
+- [x] Command collection system with CLI import command
 
 ### Phase 2: Simple Prediction
 
@@ -122,167 +138,106 @@ The development will proceed in phases, each building on the previous:
 ## Database Schema
 
 ```sql
-CREATE TABLE commands (
-    id BLOB PRIMARY KEY,
+CREATE TABLE shell_history (
+    id TEXT PRIMARY KEY,
     command TEXT NOT NULL,
-    command_template TEXT,
+    shellname TEXT NOT NULL,
     working_directory TEXT,
+    hostname TEXT,
+    username TEXT,
     exit_status INTEGER,
-    start_timestamp INTEGER NOT NULL,
-    end_timestamp INTEGER,
-    terminal_id TEXT,
-    session_id TEXT
+    start_unix_timestamp INTEGER,
+    end_unix_timestamp INTEGER,
+    session_id INTEGER
 );
 
+CREATE UNIQUE INDEX idx_shell_history_unique ON shell_history (
+    command,
+    shellname,
+    working_directory,
+    hostname,
+    username,
+    exit_status,
+    start_unix_timestamp,
+    end_unix_timestamp,
+    session_id
+);
+```
+
+Future tables for sequence detection and model training:
+
+```sql
 CREATE TABLE sequences (
-    id BLOB PRIMARY KEY,
+    id TEXT PRIMARY KEY,
     name TEXT,
     context TEXT,
     detected_count INTEGER DEFAULT 1
 );
 
 CREATE TABLE sequence_commands (
-    sequence_id BLOB,
-    command_id BLOB,
+    sequence_id TEXT,
+    command_id TEXT,
     position INTEGER,
     PRIMARY KEY (sequence_id, position),
     FOREIGN KEY (sequence_id) REFERENCES sequences(id),
-    FOREIGN KEY (command_id) REFERENCES commands(id)
-);
-
-CREATE TABLE predictions (
-    id BLOB PRIMARY KEY,
-    context TEXT,
-    predicted_command_id BLOB,
-    actual_command_id BLOB,
-    confidence REAL,
-    was_used BOOLEAN,
-    timestamp INTEGER,
-    FOREIGN KEY (predicted_command_id) REFERENCES commands(id),
-    FOREIGN KEY (actual_command_id) REFERENCES commands(id)
+    FOREIGN KEY (command_id) REFERENCES shell_history(id)
 );
 ```
 
-## Model Details
+## Development Notes
 
-### LSTM Architecture
+### Shell History Format
 
-```
-Input Layer (Features) → Embedding Layer → LSTM Layer(s) → Dense Layer → Output (Command Prediction)
-```
+#### Zsh History Format
 
-- **Input Features**:
-  - Command embeddings (tokenized commands)
-  - Directory embeddings
-  - Time features (hour of day, day of week)
-  - Exit status encoding
-  - Session/terminal ID
+The Zsh history format consists of lines with the following structure:
 
-- **LSTM Configuration**:
-  - Hidden size: 128
-  - Number of layers: 2
-  - Dropout: 0.2 (for regularization)
-
-- **Training Parameters**:
-  - Loss: Cross-entropy
-  - Optimizer: Adam
-  - Learning rate: 0.001
-  - Batch size: 64
-  - Epochs: Dynamic based on validation performance
-
-### Feature Engineering
-
-Commands will be processed as follows:
-
-1. **Command Tokenization**:
-   - Split into command, subcommand, flags, arguments
-   - Handle special characters and quotes
-
-2. **Directory Processing**:
-   - Full path
-   - Parent directory
-   - Project root detection (based on .git, etc.)
-
-3. **Temporal Features**:
-   - Time of day (hour)
-   - Day of week
-   - Working hours vs. non-working hours
-
-4. **Contextual Features**:
-   - Exit status of previous command (success/failure)
-   - Command type (git, docker, etc.)
-
-## Shell Integration
-
-Shell integration will be implemented as plugins:
-
-### Zsh Integration (Primary)
-
-```zsh
-# Initialization (to be added to .zshrc)
-eval "$(zage init zsh)"
-
-# Key components:
-# 1. precmd and preexec hooks for capturing commands
-# 2. Automatic prediction display
-# 3. Integration with Zsh line editor
+```text
+: <timestamp>:<elapsed seconds>;<command>
 ```
 
-### Bash Integration (Potential Future Support)
+For example:
 
-```bash
-# Initialization (to be added to .bashrc)
-eval "$(zage init bash)"
-
-# Key components:
-# 1. PROMPT_COMMAND to record executed commands
-# 2. Hooks for capturing exit status
-# 3. Prediction integration
+```text
+: 1610000000:0;echo hello
 ```
 
-## Development Guidelines
+#### Bash History Format
 
-1. **Code Structure**:
-   - Keep modules small and focused
-   - Use Rust's type system to enforce correctness
-   - Document public APIs
+The Bash history format can have two forms:
 
-2. **Error Handling**:
-   - Use thiserror/anyhow for error types
-   - Graceful degradation on failures
+1. Simple commands:
 
-3. **Testing**:
-   - Unit tests for all components
-   - Integration tests for end-to-end flows
-   - Test with real-world shell history data
+```text
+echo hello
+```
 
-4. **Performance**:
-   - Profile database operations
-   - Optimize model inference for fast predictions
-   - Ensure predictions are generated quickly enough for real-time use
+1. With timestamps (when HISTTIMEFORMAT is set):
 
-## Current Status and Next Steps
+```text
+#1610000000
+echo hello
+```
 
-The project currently has shell history parsing implemented. The next steps are:
+### Async Implementation
 
-1. Complete the command collection system
-2. Create a simple N-gram prediction model
-3. Implement Zsh plugin integration
+This project uses Tokio for asynchronous operations:
 
-## Contributing
+- Database operations are performed asynchronously
+- Shell integration uses async channels for communication
+- Model training and prediction run in background tasks
 
-When contributing to Zage:
+## Testing Strategy
 
-1. Ensure code follows Rust style guidelines
-2. Add tests for new functionality
-3. Update this development document with design decisions
-4. Keep the README.md updated with user-facing changes
+- Unit tests for individual components
+- Integration tests for end-to-end functionality
+- Fuzzing tests for history parsing to handle edge cases
+- Performance benchmarks for critical paths
 
-## Future Directions
+## Future Considerations
 
-After the core functionality is complete, possible extensions include:
-
-- Support for additional shells (Fish, etc.)
-- Team sharing of command sequences
-- Integration with other development tools
-- More advanced sequence prediction models
+- Containerized deployment for CI/CD
+- Cross-platform support (Windows, macOS, Linux)
+- Plugin system for custom prediction strategies
+- Privacy controls and sensitive command filtering
+- Remote synchronization between machines

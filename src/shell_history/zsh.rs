@@ -20,7 +20,7 @@ pub fn parse_history_file(
 
   let username = username
     .or_else(|| {
-      users::get_current_username()
+      uzers::get_current_username()
         .as_ref()
         .map(|v| BString::from(v.as_encoded_bytes()))
     })

@@ -24,4 +24,8 @@ pub enum ZageError {
   #[error("Invalid utf-8 bytes")]
   #[diagnostic(code(zage::invalid_utf8))]
   InvalidUtf8(#[from] std::str::Utf8Error),
+  
+  #[error("Serialization error")]
+  #[diagnostic(code(zage::serialization_error))]
+  SerializationError(#[from] serde_json::Error),
 }

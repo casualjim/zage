@@ -4,7 +4,6 @@ use bstr::BString;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
-use users;
 
 /// Parse bash history file into a vector of Invocations
 /// Handles potential binary/non-UTF8 content by reading line by line
@@ -20,7 +19,7 @@ pub fn parse_history_file(
 
   let username = username
     .or_else(|| {
-      users::get_current_username()
+      uzers::get_current_username()
         .as_ref()
         .map(|v| BString::from(v.as_encoded_bytes()))
     })
