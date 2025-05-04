@@ -201,7 +201,7 @@ fn main() -> Result<()> {
         "ngram" => {
           // Create a new model or load existing one
           let mut model = NGramModel::load_from_db(&mut conn, *n)?;
-          model.set_use_dir_context(*use_dir_context);
+          model.set_use_context(*use_dir_context);
 
           // Train the model
           model.train(invocations)?;

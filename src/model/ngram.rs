@@ -18,11 +18,11 @@
 //! 2. **Frequency Tables**:
 //!    - The model maintains two tables:
 //!      - **Global Frequency Table**: Maps each context to a map of possible next commands and how often each occurred.
-//!      - **Directory-specific Frequency Table**: Like the global table, but also keyed by the working directory, to capture context-sensitive command habits.
+//!      - **Context-specific Frequency Table**: Like the global table, but also keyed by the context, to capture context-sensitive command habits.
 //!
 //! 3. **Prediction**:
-//!    - Given the most recent N-1 commands (and optionally the current directory), the model ranks possible next commands by their observed frequency.
-//!    - Directory-specific matches are weighted higher, so predictions are more relevant to the user's current context.
+//!    - Given the most recent N-1 commands (and optionally the current context), the model ranks possible next commands by their observed frequency.
+//!    - Context-specific matches are weighted higher, so predictions are more relevant to the user's current context.
 //!
 //! ## Concrete Example
 //!
@@ -46,19 +46,19 @@
 //!   ["echo foo", "cd project"] => { "ls": 1 }
 //!   ["cd project", "ls"]      => { "cargo build": 1 }
 //!
-//! **Directory-specific frequencies:**
+//! **Context-specific frequencies:**
 //!   ("/home/user/project", ["echo foo", "cd project"]) => { "ls": 1 }
 //!   ("/home/user/project", ["cd project", "ls"])      => { "cargo build": 1 }
 //!
 //! ## How Predictions are Made
 //!
-//! - When predicting, the model first checks for directory-specific matches (if enabled), giving them higher weight.
+//! - When predicting, the model first checks for context-specific matches (if enabled), giving them higher weight.
 //! - If not enough matches are found, it falls back to the global table.
 //! - Results are sorted by probability and the top-N are returned.
 //!
-//! ## Why Directory Context?
+//! ## Why Context?
 //!
-//! Many commands are only relevant in certain directories (e.g., `cargo build` in a Rust project). By tracking directory-specific habits, the model gives more accurate, context-aware predictions.
+//! Many commands are only relevant in certain contexts (e.g., `cargo build` in a Rust project). By tracking context-specific habits, the model gives more accurate, context-aware predictions.
 //!
 //! ## Intended Audience
 //!
@@ -75,6 +75,7 @@ use tracing::{debug, info};
 use super::PredictionModel;
 use crate::Result;
 use crate::db::{load_model, save_model};
+use crate::model::context::Context;
 use crate::shell_history::Invocation;
 
 /// N-gram model for predicting shell commands based on command history
@@ -85,40 +86,38 @@ pub struct NGramModel {
   /// Frequency table for n-grams
   /// Maps from a sequence of n-1 commands to a map of possible next commands and their frequencies
   frequencies: BTreeMap<Vec<String>, HashMap<String, usize>>,
-  /// Directory-specific frequency table
-  /// Maps from (working_directory, context) to next commands and their frequencies
-  dir_frequencies: BTreeMap<(String, Vec<String>), HashMap<String, usize>>,
+  /// Context-specific frequency table
+  /// Maps from (Context, context slice) to next commands and their frequencies
+  context_frequencies: BTreeMap<(Context, Vec<String>), HashMap<String, usize>>,
   /// Total number of commands seen
   total_commands: usize,
-  /// Whether to use working directory context for predictions
-  use_dir_context: bool,
+  /// Whether to use context for predictions
+  use_context: bool,
 }
 
-// Serializable version of the model that uses only JSON-compatible types
-#[derive(Serialize, Deserialize)]
-struct SerializableNGramModel {
-  n: usize,
-  // Store frequencies as a list of entries to avoid complex keys
-  frequencies: Vec<FrequencyEntry>,
-  // Store directory context as a list of entries
-  dir_contexts: Vec<SerializableDirContextEntry>,
-  total_commands: usize,
-  use_dir_context: bool,
-}
-
-// Entry for frequency table serialization
+/// Entry for frequency table serialization
 #[derive(Serialize, Deserialize)]
 struct FrequencyEntry {
   context: Vec<String>,
   next_commands: HashMap<String, usize>,
 }
 
-// Entry for directory context serialization
+/// Entry for context-specific frequency table serialization
 #[derive(Serialize, Deserialize)]
-struct SerializableDirContextEntry {
-  dir: String,
-  context: Vec<String>,
+struct SerializableContextFrequencyEntry {
+  context: Context,
+  context_slice: Vec<String>,
   next_commands: HashMap<String, usize>,
+}
+
+/// Serializable version of the model using entry lists
+#[derive(Serialize, Deserialize)]
+pub struct SerializableNGramModel {
+  n: usize,
+  frequencies: Vec<FrequencyEntry>,
+  total_commands: usize,
+  use_context: bool,
+  context_frequencies: Vec<SerializableContextFrequencyEntry>,
 }
 
 impl NGramModel {
@@ -131,9 +130,9 @@ impl NGramModel {
     Self {
       n,
       frequencies: BTreeMap::new(),
-      dir_frequencies: BTreeMap::new(),
+      context_frequencies: BTreeMap::new(),
       total_commands: 0,
-      use_dir_context: true,
+      use_context: true,
     }
   }
 
@@ -142,16 +141,16 @@ impl NGramModel {
     self.n
   }
 
-  /// Enable or disable directory context for predictions
-  pub fn set_use_dir_context(&mut self, use_dir_context: bool) {
-    self.use_dir_context = use_dir_context;
+  /// Enable or disable context for predictions
+  pub fn set_use_context(&mut self, use_context: bool) {
+    self.use_context = use_context;
   }
 
   /// Save the N-gram model to the database
   pub fn save_to_db(&self, conn: &mut Connection) -> Result<()> {
     let model_type = format!("ngram_n{}", self.n);
 
-    // Convert to serializable format
+    // Convert to serializable entry lists
     let serializable = SerializableNGramModel {
       n: self.n,
       frequencies: self
@@ -162,19 +161,19 @@ impl NGramModel {
           next_commands: next_commands.clone(),
         })
         .collect(),
-      dir_contexts: self
-        .dir_frequencies
+      total_commands: self.total_commands,
+      use_context: self.use_context,
+      context_frequencies: self
+        .context_frequencies
         .iter()
         .map(
-          |((dir, context), next_commands)| SerializableDirContextEntry {
-            dir: dir.clone(),
-            context: context.clone(),
+          |((ctx, slice), next_commands)| SerializableContextFrequencyEntry {
+            context: ctx.clone(),
+            context_slice: slice.clone(),
             next_commands: next_commands.clone(),
           },
         )
         .collect(),
-      total_commands: self.total_commands,
-      use_dir_context: self.use_dir_context,
     };
 
     // Serialize to JSON
@@ -190,27 +189,26 @@ impl NGramModel {
     let model_type = format!("ngram_n{}", n);
 
     if let Some(model_data) = load_model(conn, &model_type)? {
-      // Deserialize from JSON
+      // Deserialize entry lists and rebuild maps
       let serializable: SerializableNGramModel = serde_json::from_slice(&model_data)?;
 
-      // Convert back to NGramModel
-      let mut frequencies = BTreeMap::new();
-      for entry in serializable.frequencies {
-        frequencies.insert(entry.context, entry.next_commands);
-      }
+      let mut model = NGramModel::new(serializable.n);
+      // Frequencies
+      model.frequencies = serializable
+        .frequencies
+        .into_iter()
+        .map(|e| (e.context, e.next_commands))
+        .collect();
+      model.total_commands = serializable.total_commands;
+      model.use_context = serializable.use_context;
+      // Context-specific frequencies
+      model.context_frequencies = serializable
+        .context_frequencies
+        .into_iter()
+        .map(|e| ((e.context, e.context_slice), e.next_commands))
+        .collect();
 
-      let mut dir_frequencies = BTreeMap::new();
-      for entry in serializable.dir_contexts {
-        dir_frequencies.insert((entry.dir, entry.context), entry.next_commands);
-      }
-
-      Ok(Self {
-        n: serializable.n,
-        frequencies,
-        dir_frequencies,
-        total_commands: serializable.total_commands,
-        use_dir_context: serializable.use_dir_context,
-      })
+      Ok(model)
     } else {
       // No model found, create a new one
       Ok(Self::new(n))
@@ -222,45 +220,42 @@ impl NGramModel {
     String::from_utf8_lossy(&invocation.command).to_string()
   }
 
-  /// Get the working directory from an invocation, or a default value
-  fn get_working_directory(invocation: &Invocation) -> String {
-    if let Some(ref wd) = invocation.working_directory {
-      String::from_utf8_lossy(wd).to_string()
-    } else {
-      "unknown".to_string()
-    }
-  }
-
-  /// Find a directory context entry or create a new one
-  fn find_or_create_dir_entry(
+  /// Find a context frequency entry or create a new one
+  fn find_or_create_context_entry(
     &mut self,
-    dir: String,
-    context: Vec<String>,
+    context: Context,
+    context_slice: Vec<String>,
   ) -> &mut HashMap<String, usize> {
     // Clone the keys for lookup
-    let key = (dir.clone(), context.clone());
+    let key = (context.clone(), context_slice.clone());
 
     // Check if the entry exists and insert if not
-    if !self.dir_frequencies.contains_key(&key) {
-      self.dir_frequencies.insert(key.clone(), HashMap::new());
+    if !self.context_frequencies.contains_key(&key) {
+      self.context_frequencies.insert(key.clone(), HashMap::new());
     }
 
     // Return a mutable reference to the entry
-    self.dir_frequencies.get_mut(&key).unwrap()
+    self.context_frequencies.get_mut(&key).unwrap()
   }
 
-  /// Find directory context entries that match the given directory and context
-  fn find_dir_entries(&self, dir: &str, context: &[String]) -> Vec<&HashMap<String, usize>> {
+  /// Find context frequency entries that match the given context and context slice
+  fn find_context_entries(
+    &self,
+    context: &Context,
+    context_slice: &[String],
+  ) -> Vec<&HashMap<String, usize>> {
     self
-      .dir_frequencies
+      .context_frequencies
       .iter()
-      .filter(|((dir_entry, context_entry), _)| dir_entry == dir && context_entry == context)
+      .filter(|((context_entry, context_slice_entry), _)| {
+        context_entry == context && context_slice_entry == context_slice
+      })
       .map(|(_, next_commands)| next_commands)
       .collect()
   }
 
   /// Extract n-grams from a sequence of commands
-  fn extract_ngrams<I>(&self, invocations: I) -> Vec<(Vec<String>, String, Option<String>)>
+  fn extract_ngrams<I>(&self, invocations: I) -> Vec<(Vec<String>, String, Context)>
   where
     I: IntoIterator<Item = Invocation>,
   {
@@ -279,55 +274,61 @@ impl NGramModel {
     for i in 0..=(commands.len() - self.n) {
       let context = commands[i..(i + self.n - 1)].to_vec();
       let next = commands[i + self.n - 1].clone();
-      let working_dir = Self::get_working_directory(&invocations_vec[i + self.n - 1]);
-      ngrams.push((context, next, Some(working_dir)));
+      let ctx = Context::from_invocation(&invocations_vec[i + self.n - 1]);
+      ngrams.push((context, next, ctx));
     }
 
     ngrams
   }
 
   /// Update the frequency table with a single n-gram
-  fn update_frequency(&mut self, context: Vec<String>, next: String, working_dir: Option<String>) {
+  fn update_frequency(
+    &mut self,
+    context_slice: Vec<String>,
+    next: String,
+    context_value: Option<Context>,
+  ) {
     // Update global frequency table
     let entry = self
       .frequencies
-      .entry(context.clone())
+      .entry(context_slice.clone())
       .or_insert_with(HashMap::new);
     *entry.entry(next.clone()).or_insert(0) += 1;
 
-    // Update directory-specific frequency table if working directory is provided
-    if let Some(dir) = working_dir {
-      let dir_entry = self.find_or_create_dir_entry(dir, context);
-      *dir_entry.entry(next).or_insert(0) += 1;
+    // Update context-specific frequency table if provided
+    if let Some(ctx) = context_value {
+      let context_entry = self.find_or_create_context_entry(ctx, context_slice.clone());
+      *context_entry.entry(next).or_insert(0) += 1;
     }
   }
 
-  /// Get the most likely next commands given a context and optional working directory
+  /// Get the most likely next commands given a context and optional context
   fn get_predictions(
     &self,
-    context: &[String],
-    working_dir: Option<&str>,
+    context_slice: &[String],
+    context_value: Option<&Context>,
     max_predictions: usize,
   ) -> Vec<(String, f64)> {
     let mut predictions = Vec::new();
 
-    // If we have directory-specific predictions and directory context is enabled, use them
-    if self.use_dir_context && working_dir.is_some() {
-      let dir = working_dir.unwrap();
-      let dir_entries = self.find_dir_entries(dir, context);
+    // If we have context-specific predictions and context is enabled, use them
+    if self.use_context {
+      if let Some(ctx) = context_value {
+        let context_entries = self.find_context_entries(ctx, context_slice);
 
-      for entry in dir_entries {
-        for (cmd, count) in entry {
-          let probability = *count as f64 / self.total_commands as f64 * 2.0; // Give higher weight to directory-specific predictions
-          predictions.push((cmd.clone(), probability));
+        for entry in context_entries {
+          for (cmd, count) in entry {
+            let probability = *count as f64 / self.total_commands as f64 * 2.0;
+            predictions.push((cmd.clone(), probability));
+          }
         }
       }
     }
 
     // Add global predictions
-    if let Some(next_commands) = self.frequencies.get(&context.to_vec()) {
+    if let Some(next_commands) = self.frequencies.get(&context_slice.to_vec()) {
       for (cmd, count) in next_commands {
-        // If we already have this command from directory-specific predictions, skip it
+        // If we already have this command from context-specific predictions, skip it
         if predictions.iter().any(|(c, _)| c == cmd) {
           continue;
         }
@@ -349,7 +350,7 @@ impl NGramModel {
   pub fn stats(&self) -> ModelStats {
     let mut context_count = 0;
     let mut command_count = 0;
-    let dir_context_count = self.dir_frequencies.len();
+    let context_frequency_count = self.context_frequencies.len();
 
     for (_, commands) in &self.frequencies {
       context_count += 1;
@@ -361,7 +362,8 @@ impl NGramModel {
       total_commands: self.total_commands,
       context_count,
       command_count,
-      dir_context_count,
+      context_frequency_count,
+      dir_context_count: context_frequency_count,
     }
   }
 }
@@ -377,7 +379,9 @@ pub struct ModelStats {
   pub context_count: usize,
   /// Number of unique commands
   pub command_count: usize,
-  /// Number of directory-specific contexts
+  /// Number of context-specific frequencies
+  pub context_frequency_count: usize,
+  /// Number of directory contexts (alias for context_frequency_count)
   pub dir_context_count: usize,
 }
 
@@ -395,8 +399,8 @@ impl PredictionModel for NGramModel {
 
     info!("Training N-gram model with {} n-grams", ngrams.len());
 
-    for (context, next, working_dir) in ngrams {
-      self.update_frequency(context, next, working_dir);
+    for (context, next, ctx) in ngrams {
+      self.update_frequency(context, next, Some(ctx));
     }
 
     Ok(())
@@ -412,26 +416,24 @@ impl PredictionModel for NGramModel {
     }
 
     // Extract the most recent n-1 commands as context
-    let context: Vec<String> = recent_history
+    let context_slice: Vec<String> = recent_history
       .iter()
       .skip(recent_history.len() - (self.n - 1))
       .map(|inv| Self::invocation_to_command(inv))
       .collect();
 
-    // Get the working directory of the most recent command
-    let working_dir = recent_history.last().and_then(|inv| {
-      inv
-        .working_directory
-        .as_ref()
-        .map(|wd| String::from_utf8_lossy(wd).to_string())
-    });
+    // Get the context of the most recent command
+    let context_val: Option<Context> = recent_history
+      .last()
+      .map(|inv| Context::from_invocation(inv));
+    let context_value_ref = context_val.as_ref();
 
     debug!(
-      "Predicting based on context: {:?}, working_dir: {:?}",
-      context, working_dir
+      "Predicting based on context: {:?}, context_value: {:?}",
+      context_slice, context_value_ref
     );
 
-    let predictions = self.get_predictions(&context, working_dir.as_deref(), max_predictions);
+    let predictions = self.get_predictions(&context_slice, context_value_ref, max_predictions);
 
     Ok(predictions.into_iter().map(|(cmd, _)| cmd).collect())
   }
@@ -444,8 +446,8 @@ impl PredictionModel for NGramModel {
 
     debug!("Updating N-gram model with {} new n-grams", ngrams.len());
 
-    for (context, next, working_dir) in ngrams {
-      self.update_frequency(context, next, working_dir);
+    for (context, next, ctx) in ngrams {
+      self.update_frequency(context, next, Some(ctx));
     }
 
     Ok(())
@@ -455,6 +457,7 @@ impl PredictionModel for NGramModel {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::model::context::Context;
   use bstr::BString;
   use rusqlite::Connection;
 
@@ -534,10 +537,10 @@ mod tests {
   }
 
   #[test]
-  fn test_directory_context() -> Result<()> {
+  fn test_context() -> Result<()> {
     let mut model = NGramModel::new(2);
 
-    // Train with commands in different directories
+    // Train with commands in different contexts
     let invocations = vec![
       // In /project1, "ls" is followed by "cd src"
       create_test_invocation("ls", Some("/project1")),
@@ -592,22 +595,40 @@ mod tests {
       map
     });
 
-    // Update directory-specific frequencies
-    model
-      .dir_frequencies
-      .insert(("~/project".to_string(), context1), {
+    // Update context-specific frequencies
+    model.context_frequencies.insert(
+      (
+        Context {
+          cwd: "/home".to_string(),
+          hostname: None,
+          username: None,
+          exit_status: None,
+        },
+        context1,
+      ),
+      {
         let mut map = HashMap::new();
         map.insert("commit".to_string(), 4);
         map
-      });
+      },
+    );
 
-    model
-      .dir_frequencies
-      .insert(("~/home".to_string(), context2), {
+    model.context_frequencies.insert(
+      (
+        Context {
+          cwd: "/home".to_string(),
+          hostname: None,
+          username: None,
+          exit_status: None,
+        },
+        context2,
+      ),
+      {
         let mut map = HashMap::new();
         map.insert("-la".to_string(), 3);
         map
-      });
+      },
+    );
 
     model.total_commands = 24;
 
@@ -634,7 +655,7 @@ mod tests {
     // Check that the deserialized model matches the original
     assert_eq!(model.n, deserialized_model.n);
     assert_eq!(model.total_commands, deserialized_model.total_commands);
-    assert_eq!(model.use_dir_context, deserialized_model.use_dir_context);
+    assert_eq!(model.use_context, deserialized_model.use_context);
 
     // Check frequencies
     assert_eq!(
@@ -650,15 +671,15 @@ mod tests {
       }
     }
 
-    // Check directory frequencies
+    // Check context-specific frequencies
     assert_eq!(
-      model.dir_frequencies.len(),
-      deserialized_model.dir_frequencies.len()
+      model.context_frequencies.len(),
+      deserialized_model.context_frequencies.len()
     );
-    for ((dir, context), commands) in &model.dir_frequencies {
+    for ((context, context_slice), commands) in &model.context_frequencies {
       let deserialized_commands = deserialized_model
-        .dir_frequencies
-        .get(&(dir.clone(), context.clone()))
+        .context_frequencies
+        .get(&(context.clone(), context_slice.clone()))
         .unwrap();
       assert_eq!(commands.len(), deserialized_commands.len());
 
@@ -754,7 +775,115 @@ mod tests {
     assert_eq!(stats.total_commands, 3);
     assert_eq!(stats.context_count, 2);
     assert_eq!(stats.command_count, 2);
+    assert_eq!(stats.context_frequency_count, 2);
     assert_eq!(stats.dir_context_count, 2);
+    Ok(())
+  }
+
+  #[test]
+  fn test_context_aware_predictions() -> Result<()> {
+    let mut model = NGramModel::new(2);
+    model.set_use_context(true);
+    let invocations = vec![
+      create_test_invocation("ls", Some("/dir1")),
+      create_test_invocation("cmd1", Some("/dir1")),
+      create_test_invocation("ls", Some("/dir2")),
+      create_test_invocation("cmd2", Some("/dir2")),
+    ];
+    model.train(invocations)?;
+    let recent1 = vec![create_test_invocation("ls", Some("/dir1"))];
+
+    let predictions = model.predict(&recent1, 1)?;
+
+    assert!(!predictions.is_empty());
+    assert_eq!(predictions[0], "cmd1".to_string());
+
+    let recent2 = vec![create_test_invocation("ls", Some("/dir2"))];
+
+    let predictions = model.predict(&recent2, 1)?;
+
+    assert!(!predictions.is_empty());
+    assert_eq!(predictions[0], "cmd2".to_string());
+
+    Ok(())
+  }
+
+  #[test]
+  fn test_multi_dimensional_context_and_fallback() -> Result<()> {
+    let mut model = NGramModel::new(2);
+    model.set_use_context(true);
+    // Context A: dir=/proj, host=h1, user=u1, exit=0 -> next = cmdA
+    let mut inv1 = create_test_invocation("ls", Some("/proj"));
+    inv1.hostname = Some(BString::from("h1".as_bytes()));
+    inv1.username = Some(BString::from("u1".as_bytes()));
+    inv1.exit_status = Some(0);
+    let mut inv2 = create_test_invocation("cmdA", Some("/proj"));
+    inv2.hostname = inv1.hostname.clone();
+    inv2.username = inv1.username.clone();
+    inv2.exit_status = inv1.exit_status;
+    // Context B: same dir, host=h2, user=u2, exit=1 -> next = cmdB
+    let mut inv3 = create_test_invocation("ls", Some("/proj"));
+    inv3.hostname = Some(BString::from("h2".as_bytes()));
+    inv3.username = Some(BString::from("u2".as_bytes()));
+    inv3.exit_status = Some(1);
+    let mut inv4 = create_test_invocation("cmdB", Some("/proj"));
+    inv4.hostname = inv3.hostname.clone();
+    inv4.username = inv3.username.clone();
+    inv4.exit_status = inv3.exit_status;
+    // Train both contexts
+    model.train(vec![inv1.clone(), inv2.clone(), inv3.clone(), inv4.clone()])?;
+    // Predict for Context A
+    let preds_a = model.predict(&[inv1.clone()], 1)?;
+    assert_eq!(preds_a, vec!["cmdA".to_string()]);
+    // Predict for Context B
+    let preds_b = model.predict(&[inv3.clone()], 1)?;
+    assert_eq!(preds_b, vec!["cmdB".to_string()]);
+    // Fallback: context not seen (e.g. missing hostname)
+    let unknown = create_test_invocation("ls", Some("/proj"));
+    let preds_fallback = model.predict(&[unknown], 2)?;
+    // Should include both cmdA and cmdB from global frequencies
+    assert!(preds_fallback.contains(&"cmdA".to_string()));
+    assert!(preds_fallback.contains(&"cmdB".to_string()));
+    Ok(())
+  }
+
+  #[test]
+  fn test_username_exit_status_context_and_fallback() -> Result<()> {
+    let mut model = NGramModel::new(2);
+    model.set_use_context(true);
+    // Context X: host=h1, user=u1, exit=0 -> next=out1
+    let mut invx = create_test_invocation("run", Some("/proj"));
+    invx.hostname = Some(BString::from("h1".as_bytes()));
+    invx.username = Some(BString::from("u1".as_bytes()));
+    invx.exit_status = Some(0);
+    let mut outx = create_test_invocation("out1", Some("/proj"));
+    outx.hostname = invx.hostname.clone();
+    outx.username = invx.username.clone();
+    outx.exit_status = invx.exit_status;
+    // Context Y: host=h1, user=u2, exit=1 -> next=out2
+    let mut invy = create_test_invocation("run", Some("/proj"));
+    invy.hostname = Some(BString::from("h1".as_bytes()));
+    invy.username = Some(BString::from("u2".as_bytes()));
+    invy.exit_status = Some(1);
+    let mut outy = create_test_invocation("out2", Some("/proj"));
+    outy.hostname = invy.hostname.clone();
+    outy.username = invy.username.clone();
+    outy.exit_status = invy.exit_status;
+    model.train(vec![invx.clone(), outx.clone(), invy.clone(), outy.clone()])?;
+    // Predict for X
+    let predx = model.predict(&[invx.clone()], 1)?;
+    assert_eq!(predx, vec!["out1".to_string()]);
+    // Predict for Y
+    let predy = model.predict(&[invy.clone()], 1)?;
+    assert_eq!(predy, vec!["out2".to_string()]);
+    // Partial context: same host/user but missing exit -> fallback to global
+    let mut inv_partial = create_test_invocation("run", Some("/proj"));
+    inv_partial.hostname = Some(BString::from("h1".as_bytes()));
+    inv_partial.username = Some(BString::from("u1".as_bytes())); // no exit_status
+    let preds_partial = model.predict(&[inv_partial], 2)?;
+    // Should include both out1 and out2 globally
+    assert!(preds_partial.contains(&"out1".to_string()));
+    assert!(preds_partial.contains(&"out2".to_string()));
     Ok(())
   }
 }

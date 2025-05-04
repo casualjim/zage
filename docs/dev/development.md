@@ -138,8 +138,9 @@ The development will proceed in phases, each building on the previous:
 
 - [x] Implement N-gram model for baseline predictions
   - [x] Core N-gram implementation with frequency tracking
-  - [x] Directory-aware context for improved predictions
+  - [x] Context-aware predictions (directory, hostname, username, exit status)
   - [x] Serialization and database persistence
+  - [x] Refactored JSON serialization format to entry lists to avoid map-key issues
   - [x] Comprehensive test suite for model validation
 - [x] Add Markov chain model with context awareness
 - [x] Zsh plugin integration  # Shell hook script with debug logging and silent background recording
@@ -149,6 +150,7 @@ The development will proceed in phases, each building on the previous:
 
 - [ ] Command embedding generation
 - [ ] Feature extraction from commands and context
+  - [ ] Command output (stdout/stderr) feature extraction
 - [ ] LSTM model implementation using tch-rs
 - [ ] Training pipeline
 - [ ] Prediction pipeline
@@ -158,10 +160,12 @@ The development will proceed in phases, each building on the previous:
 - [x] Context enhancement with directory, exit status
   - [x] Directory-aware predictions implemented in N-gram model
   - [ ] Exit status awareness for improved context
+- [ ] Command output awareness (stdout/stderr)
 - [ ] Time-based patterns detection
 - [ ] Multi-terminal awareness
 - [ ] Performance optimizations
 - [x] Bash plugin integration (if feasible)  # Added `bash.sh` using bash-preexec hooks
+- [ ] BitNet model exploration (alternative to LSTM)
 
 ## Database Schema
 
@@ -176,7 +180,10 @@ CREATE TABLE shell_history (
     exit_status INTEGER,
     start_unix_timestamp INTEGER,
     end_unix_timestamp INTEGER,
-    session_id INTEGER
+    session_id INTEGER,
+    stdout_summary TEXT,
+    stderr_summary TEXT,
+    has_output BOOLEAN
 );
 
 CREATE UNIQUE INDEX idx_shell_history_unique ON shell_history (
@@ -189,6 +196,13 @@ CREATE UNIQUE INDEX idx_shell_history_unique ON shell_history (
     start_unix_timestamp,
     end_unix_timestamp,
     session_id
+);
+
+CREATE TABLE command_outputs (
+    history_id TEXT PRIMARY KEY,
+    stdout BLOB,
+    stderr BLOB,
+    FOREIGN KEY(history_id) REFERENCES shell_history(id)
 );
 
 CREATE TABLE models (
@@ -272,7 +286,7 @@ The N-gram model works by:
 
 1. **Analyzing command sequences**: It tracks sequences of N commands and calculates the frequency of each command following a specific context of N-1 commands.
 
-2. **Directory-aware predictions**: The model maintains separate frequency tables for different working directories, allowing it to make context-specific predictions.
+2. **Context-aware predictions**: The model maintains separate frequency tables for different working directories, hostnames, usernames, and exit statuses, allowing it to make context-specific predictions.
 
 3. **Efficient storage**: The model uses BTreeMap for storing frequency data, which provides a good balance between performance and memory usage for potentially large datasets.
 
@@ -304,6 +318,135 @@ While the current N-gram model provides good baseline predictions, future enhanc
 - Fuzzing tests for history parsing to handle edge cases
 - Performance benchmarks for critical paths
 
+## Command Output Capture Implementation
+
+Incorporating stdout and stderr from commands can significantly enhance prediction accuracy, as users often run the same commands when they see specific outputs (error messages, successful results, etc.).
+
+### Capture Approach
+
+1. **Shell Integration**:
+   ```bash
+   # Example of command output capture in shell hooks
+   command_exec_hook() {
+     local cmd="$1"
+     local tmp_stdout=$(mktemp)
+     local tmp_stderr=$(mktemp)
+     
+     # Capture stdout and stderr while still displaying them
+     eval "$cmd" > >(tee "$tmp_stdout") 2> >(tee "$tmp_stderr" >&2)
+     local exit_status=$?
+     
+     # Process the captured output
+     zage_record_output "$cmd" "$tmp_stdout" "$tmp_stderr" "$exit_status"
+     
+     # Cleanup
+     rm "$tmp_stdout" "$tmp_stderr"
+   }
+   ```
+
+2. **Rust Implementation**:
+   ```rust
+   // Function to process and store command outputs
+   pub async fn store_command_output(
+       db: &DB,
+       history_id: &str,
+       stdout_path: &Path,
+       stderr_path: &Path
+   ) -> Result<()> {
+       // Read files
+       let stdout = tokio::fs::read(stdout_path).await?;
+       let stderr = tokio::fs::read(stderr_path).await?;
+       
+       // Generate summaries
+       let stdout_summary = summarize_output(&stdout)?;
+       let stderr_summary = summarize_output(&stderr)?;
+       
+       // Update history with summaries
+       let has_output = !stdout.is_empty() || !stderr.is_empty();
+       db.execute(
+           "UPDATE shell_history SET stdout_summary = ?, stderr_summary = ?, has_output = ? WHERE id = ?",
+           params![stdout_summary, stderr_summary, has_output, history_id],
+       ).await?;
+       
+       // Store full output if significant
+       if has_output {
+           db.execute(
+               "INSERT INTO command_outputs (history_id, stdout, stderr) VALUES (?, ?, ?)",
+               params![history_id, stdout, stderr],
+           ).await?;
+       }
+       
+       Ok(())
+   }
+   
+   // Function to summarize output (limit length, extract key patterns)
+   fn summarize_output(output: &[u8]) -> Result<String> {
+       // Implementation depends on your specific needs
+       // Could use regex patterns to extract errors, important results, etc.
+       // Or just truncate to a reasonable length
+       let output_str = String::from_utf8_lossy(output);
+       Ok(output_str.chars().take(200).collect())
+   }
+   ```
+
+### Feature Extraction
+
+1. **Basic Text Features**:
+   - Error message presence/absence
+   - Output length
+   - Common patterns (file lists, error codes, etc.)
+
+2. **Advanced Features**:
+   - Text embeddings of output using a small language model
+   - Classification of output types (error, normal output, empty, etc.)
+   - Pattern matching for specific command types
+
+## BitNet Model Exploration
+
+BitNet with ternary weights (-1, 0, +1) offers an efficient alternative to LSTMs for command prediction, potentially providing similar accuracy with lower resource usage.
+
+### Implementation Considerations
+
+1. **Model Architecture**:
+   - Custom BitLinear layers replacing standard linear layers
+   - Ternary weight quantization during forward pass
+   - Efficient matrix operations that avoid multiplication
+
+2. **Integration Strategy**:
+   ```rust
+   pub struct BitNetModel {
+       // Model architecture fields
+       weights: Vec<TernaryWeights>,
+       // Other model parameters
+   }
+   
+   impl BitNetModel {
+       pub fn new(config: ModelConfig) -> Self {
+           // Initialize model with ternary weights
+       }
+       
+       pub fn predict(&self, features: &[Feature]) -> Vec<Prediction> {
+           // Implement efficient prediction using ternary weights
+       }
+       
+       pub fn train(&mut self, training_data: &[TrainingExample]) -> Result<()> {
+           // Train model with ternary weight constraints
+       }
+   }
+   ```
+
+3. **Comparison Benchmarks**:
+   - Memory usage: BitNet vs. LSTM
+   - Prediction speed: BitNet vs. LSTM
+   - Prediction accuracy: BitNet vs. LSTM
+   - Training time: BitNet vs. LSTM
+
+### Phased Approach
+
+1. Implement and test LSTM model with stdout/stderr features first
+2. Develop BitNet model in parallel as an experimental feature
+3. Benchmark both approaches and determine the best fit for Zage
+
 ## Future Considerations
 
 - Containerized deployment for CI/CD
@@ -311,3 +454,4 @@ While the current N-gram model provides good baseline predictions, future enhanc
 - Plugin system for custom prediction strategies
 - Privacy controls and sensitive command filtering
 - Remote synchronization between machines
+- Pre-trained models for common command patterns
