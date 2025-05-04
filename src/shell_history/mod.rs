@@ -59,7 +59,7 @@ fn generate_import_session_id(histfile: &Path) -> i64 {
   }
 }
 
-fn get_hostname() -> BString {
+pub fn get_hostname() -> BString {
   env::var_os("ZAGE_HOSTNAME")
     .unwrap_or_else(|| hostname::get().unwrap_or_default())
     .as_bytes()

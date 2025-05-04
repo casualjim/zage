@@ -142,7 +142,7 @@ The development will proceed in phases, each building on the previous:
   - [x] Serialization and database persistence
   - [x] Comprehensive test suite for model validation
 - [ ] Add Markov chain model with context awareness
-- [ ] Zsh plugin integration
+- [x] Zsh plugin integration  # Shell hook script with debug logging and silent background recording
 - [ ] Initial sequence detection algorithm
 
 ### Phase 3: LSTM Implementation
@@ -161,7 +161,7 @@ The development will proceed in phases, each building on the previous:
 - [ ] Time-based patterns detection
 - [ ] Multi-terminal awareness
 - [ ] Performance optimizations
-- [ ] Bash plugin integration (if feasible)
+- [x] Bash plugin integration (if feasible)  # Added `bash.sh` using bash-preexec hooks
 
 ## Database Schema
 

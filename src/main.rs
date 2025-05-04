@@ -9,9 +9,10 @@ use tracing::debug;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
-use zage::db::{connect, get_recent_invocations, import_history, init};
+use uzers;
+use zage::db::{connect, get_recent_invocations, import_history, init, insert_invocation};
 use zage::model::{PredictionModel, ngram::NGramModel};
-use zage::shell_history::{Shell, parse_bash_history, parse_zsh_history};
+use zage::shell_history::{Invocation, Shell, get_hostname, parse_bash_history, parse_zsh_history};
 
 /// CLI for Zage
 #[derive(Parser)]
@@ -89,6 +90,28 @@ enum Commands {
     /// N-gram size for ngram model (default: 2)
     #[arg(long, default_value = "2")]
     n: usize,
+  },
+
+  /// (Internal) Record a single command invocation (used by shell hooks)
+  Record {
+    /// The command string that was executed
+    #[arg(long)]
+    command: String,
+    /// The working directory where the command was executed
+    #[arg(long)]
+    working_directory: String,
+    /// The exit status of the command
+    #[arg(long)]
+    exit_status: i64,
+    /// The timestamp when the command started (Unix epoch seconds)
+    #[arg(long)]
+    start_timestamp: i64,
+    /// The timestamp when the command finished (Unix epoch seconds)
+    #[arg(long)]
+    end_timestamp: i64,
+    /// The shell session ID
+    #[arg(long)]
+    session_id: Option<i64>, // Optional for now
   },
 }
 
@@ -290,6 +313,61 @@ fn main() -> Result<()> {
           println!("Unsupported model type: {}", model_type);
         }
       }
+    }
+
+    Some(Commands::Record {
+      command,
+      working_directory,
+      exit_status,
+      start_timestamp,
+      end_timestamp,
+      session_id,
+    }) => {
+      info!("Recording command invocation");
+
+      let mut conn = connect(&db_path)?;
+      let mut tx = conn.transaction()?;
+
+      // Get hostname and username (best effort)
+      let hostname = get_hostname();
+      let username = uzers::get_current_username()
+        .as_ref()
+        .map(|v| BString::from(v.as_encoded_bytes()))
+        .unwrap_or_else(|| BString::from("unknown"));
+
+      // Generate a session ID if none provided (e.g., using PID)
+      // For now, use a placeholder or default.
+      // A better approach might involve Zsh sending a unique session ID.
+      let session_id = session_id.unwrap_or_else(|| std::process::id() as i64);
+
+      // Create Invocation struct
+      let invocation = Invocation {
+        command: BString::from(command.as_bytes()),
+        shellname: "zsh".to_string(), // Assume zsh for now
+        working_directory: Some(BString::from(working_directory.as_bytes())),
+        hostname: Some(hostname),
+        username: Some(username),
+        exit_status: Some(*exit_status),
+        start_unix_timestamp: Some(*start_timestamp),
+        end_unix_timestamp: Some(*end_timestamp),
+        session_id,
+      };
+
+      // Record the command invocation
+      debug!("Inserting invocation: {:?}", invocation);
+      if let Err(e) = insert_invocation(&mut tx, &invocation) {
+        // Handle potential duplicate errors gracefully if needed
+        if e.to_string().contains("UNIQUE constraint failed") {
+          info!("Duplicate invocation skipped: {:?}", invocation.command);
+        } else {
+          // Re-throw other errors
+          return Err(e.into());
+        }
+      } else {
+        info!("Invocation recorded successfully.");
+      }
+
+      tx.commit()?;
     }
 
     None => {
