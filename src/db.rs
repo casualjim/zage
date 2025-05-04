@@ -153,15 +153,15 @@ pub fn get_recent_invocations(conn: &mut Connection, limit: usize) -> Result<Vec
 
   let invocations = stmt
     .query_map([limit as i64], |row| {
-      // Get raw bytes from the database and convert to appropriate types
-      let command_bytes: Vec<u8> = row.get(0)?;
+      // Use get for TEXT columns as String, then convert to BString
+      let command_str: String = row.get(0)?;
       let shellname_str: String = row.get(1)?;
-      let working_dir: Option<Vec<u8>> = row.get(2)?;
-      let hostname: Option<Vec<u8>> = row.get(3)?;
-      let username: Option<Vec<u8>> = row.get(4)?;
+      let working_dir: Option<String> = row.get(2)?;
+      let hostname: Option<String> = row.get(3)?;
+      let username: Option<String> = row.get(4)?;
 
       Ok(Invocation {
-        command: bstr::BString::from(command_bytes),
+        command: bstr::BString::from(command_str),
         shellname: shellname_str,
         working_directory: working_dir.map(bstr::BString::from),
         hostname: hostname.map(bstr::BString::from),

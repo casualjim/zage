@@ -1,3 +1,71 @@
+//!
+//! # NGramModel: Predicting Shell Commands with N-grams
+//!
+//! This module implements an N-gram model for predicting the next shell command a user might run, based on their command history.
+//! It is designed to be accessible for those new to Rust, N-grams, or command prediction systems.
+//!
+//! ## What is an N-gram Model?
+//!
+//! An N-gram model is a probabilistic model that predicts the next item in a sequence based on the previous N-1 items.
+//! In this context, each "item" is a shell command (as a string), and the model learns which commands tend to follow others.
+//!
+//! ## How it Works
+//!
+//! 1. **Tokenization & Extraction**: The model processes command history as a sequence of strings, extracting overlapping groups of N commands (n-grams).
+//!    - Each n-gram consists of a context (the previous N-1 commands) and a next command.
+//!    - Optionally, the working directory (cwd) is recorded for each n-gram.
+//!
+//! 2. **Frequency Tables**:
+//!    - The model maintains two tables:
+//!      - **Global Frequency Table**: Maps each context to a map of possible next commands and how often each occurred.
+//!      - **Directory-specific Frequency Table**: Like the global table, but also keyed by the working directory, to capture context-sensitive command habits.
+//!
+//! 3. **Prediction**:
+//!    - Given the most recent N-1 commands (and optionally the current directory), the model ranks possible next commands by their observed frequency.
+//!    - Directory-specific matches are weighted higher, so predictions are more relevant to the user's current context.
+//!
+//! ## Concrete Example
+//!
+//! Suppose n = 3 and the user runs:
+//!
+//! 1. "echo foo" (wd: "/home/user")
+//! 2. "cd project" (wd: "/home/user")
+//! 3. "ls" (wd: "/home/user/project")
+//! 4. "cargo build" (wd: "/home/user/project")
+//!
+//! The model extracts these n-grams:
+//!
+//! ```ignore
+//!     (["echo foo", "cd project"], "ls", Some("/home/user/project"))
+//!     (["cd project", "ls"], "cargo build", Some("/home/user/project"))
+//! ```
+//!
+//! These update the tables as follows:
+//!
+//! **Global frequencies:**
+//!   ["echo foo", "cd project"] => { "ls": 1 }
+//!   ["cd project", "ls"]      => { "cargo build": 1 }
+//!
+//! **Directory-specific frequencies:**
+//!   ("/home/user/project", ["echo foo", "cd project"]) => { "ls": 1 }
+//!   ("/home/user/project", ["cd project", "ls"])      => { "cargo build": 1 }
+//!
+//! ## How Predictions are Made
+//!
+//! - When predicting, the model first checks for directory-specific matches (if enabled), giving them higher weight.
+//! - If not enough matches are found, it falls back to the global table.
+//! - Results are sorted by probability and the top-N are returned.
+//!
+//! ## Why Directory Context?
+//!
+//! Many commands are only relevant in certain directories (e.g., `cargo build` in a Rust project). By tracking directory-specific habits, the model gives more accurate, context-aware predictions.
+//!
+//! ## Intended Audience
+//!
+//! This module is designed for learners and those new to Rust or predictive modeling. It aims for clarity, idiomatic Rust, and thorough documentation to help you understand and extend the code.
+//!
+//! See the tests at the bottom of this file for more concrete usage examples.
+//!
 use std::collections::{BTreeMap, HashMap};
 
 use rusqlite::Connection;
