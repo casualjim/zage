@@ -11,7 +11,7 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use uzers;
 use zage::db::{connect, get_recent_invocations, import_history, init, insert_invocation};
-use zage::model::{PredictionModel, ngram::NGramModel};
+use zage::model::{PredictionModel, markov::MarkovChain, ngram::NGramModel};
 use zage::shell_history::{Invocation, Shell, get_hostname, parse_bash_history, parse_zsh_history};
 
 /// CLI for Zage
@@ -218,6 +218,12 @@ fn main() -> Result<()> {
           println!("  Unique commands: {}", stats.command_count);
           println!("  Directory contexts: {}", stats.dir_context_count);
         }
+        "markov" => {
+          let mut model = MarkovChain::load_from_db(&mut conn)?;
+          model.train(invocations)?;
+          model.save_to_db(&mut conn)?;
+          println!("Markov model trained and saved to database");
+        }
         _ => {
           println!("Unsupported model type: {}", model_type);
         }
@@ -282,6 +288,18 @@ fn main() -> Result<()> {
               for (i, cmd) in predictions.iter().enumerate() {
                 println!("  {}. {}", i + 1, cmd);
               }
+            }
+          }
+        }
+        "markov" => {
+          let model = MarkovChain::load_from_db(&mut conn)?;
+          let predictions = model.predict(&recent_invocations, *count)?;
+          if predictions.is_empty() {
+            println!("No predictions available for your recent command history.");
+          } else {
+            println!("Predicted commands:");
+            for (i, cmd) in predictions.iter().enumerate() {
+              println!("  {}. {}", i + 1, cmd);
             }
           }
         }

@@ -42,6 +42,7 @@ fn test_import() -> Result<()> {
   // Import history
   let mut import_cmd = Command::cargo_bin("zage").unwrap();
   import_cmd
+    .env("RUST_LOG", "info")
     .arg("--db-path")
     .arg(db_file.to_str().unwrap())
     .arg("import")
@@ -68,6 +69,7 @@ fn test_import_and_predict() -> Result<()> {
   // Import history
   let mut import_cmd = Command::cargo_bin("zage").unwrap();
   import_cmd
+    .env("RUST_LOG", "info")
     .arg("--db-path")
     .arg(db_file.to_str().unwrap())
     .arg("import")
@@ -82,6 +84,7 @@ fn test_import_and_predict() -> Result<()> {
   // Train model using the imported history (n=2 default)
   let mut train_cmd = Command::cargo_bin("zage").unwrap();
   train_cmd
+    .env("RUST_LOG", "info")
     .arg("--db-path")
     .arg(db_file.to_str().unwrap())
     .arg("train");
@@ -93,6 +96,7 @@ fn test_import_and_predict() -> Result<()> {
   // Predict
   let mut predict_cmd = Command::cargo_bin("zage").unwrap();
   predict_cmd
+    .env("RUST_LOG", "info")
     .arg("--db-path")
     .arg(db_file.to_str().unwrap())
     .arg("predict");
@@ -114,10 +118,12 @@ fn test_predict_without_import() -> Result<()> {
 
   let mut predict_cmd = Command::cargo_bin("zage").unwrap();
   predict_cmd
+    .env("RUST_LOG", "info")
     .arg("--db-path")
     .arg(db_file.to_str().unwrap())
     .arg("predict");
   predict_cmd
+    .env("RUST_LOG", "info")
     .assert()
     .failure()
     .stdout(predicate::str::contains("No command history found"));
@@ -139,6 +145,7 @@ fn test_record_command() -> Result<()> {
 
   // Run the record command
   let output = cmd
+    .env("RUST_LOG", "info")
     .arg("--db-path")
     .arg(&db_path)
     .arg("record")
@@ -162,8 +169,8 @@ fn test_record_command() -> Result<()> {
   // Verify the record in the database
   let conn = Connection::open(&db_path)?;
   let mut stmt = conn.prepare(
-        "SELECT command, working_directory, exit_status, start_unix_timestamp, end_unix_timestamp, session_id FROM shell_history WHERE command = ?1",
-    )?;
+    "SELECT command, working_directory, exit_status, start_unix_timestamp, end_unix_timestamp, session_id FROM shell_history WHERE command = ?1",
+  )?;
   let invocation = stmt.query_row([cmd_str], |row| {
     Ok((
       row.get::<_, String>(0)?,

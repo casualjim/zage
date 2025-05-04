@@ -141,7 +141,7 @@ The development will proceed in phases, each building on the previous:
   - [x] Directory-aware context for improved predictions
   - [x] Serialization and database persistence
   - [x] Comprehensive test suite for model validation
-- [ ] Add Markov chain model with context awareness
+- [x] Add Markov chain model with context awareness
 - [x] Zsh plugin integration  # Shell hook script with debug logging and silent background recording
 - [ ] Initial sequence detection algorithm
 

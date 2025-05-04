@@ -1,5 +1,6 @@
 // Module for prediction models
 pub mod ngram;
+pub mod markov;
 
 use crate::Result;
 use crate::shell_history::Invocation;
