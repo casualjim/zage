@@ -1,0 +1,28 @@
+[package]
+name = "zage"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+clap = { version = "4.5.37", features = ["derive", "env", "string", "unicode"] }
+color-eyre = "0.6"
+thiserror = "2"
+miette = { version = "7", features = ["fancy"] }
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
+human-panic = "2.0"
+clap-config-file = "0.5.0"
+uuid = { version = "1.16.0", features = ["fast-rng", "std", "v7"] }
+serde = "1.0.219"
+serde_json = "1.0.140"
+bstr = { version = "1.9.0", features = ["serde"] }
+rusqlite = "0.35.0"
+dirs = "6.0.0"
+bytes = "1.10.1"
+rand = "0.9.1"
+users = "0.11.0"
+hostname = "0.4.1"
+itertools = "0.14.0"
+
+[dev-dependencies]
+tempfile = "3.10.1"
