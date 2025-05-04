@@ -232,8 +232,6 @@ impl NGramModel {
       let dir_entry = self.find_or_create_dir_entry(dir, context);
       *dir_entry.entry(next).or_insert(0) += 1;
     }
-
-    self.total_commands += 1;
   }
 
   /// Get the most likely next commands given a context and optional working directory
@@ -320,7 +318,12 @@ impl PredictionModel for NGramModel {
   where
     I: IntoIterator<Item = Invocation>,
   {
-    let ngrams = self.extract_ngrams(invocations);
+    // Collect invocations and update total_commands (number of commands processed)
+    let inv_vec: Vec<Invocation> = invocations.into_iter().collect();
+    let count = inv_vec.len();
+    self.total_commands += count;
+    // Generate n-grams from collected invocations
+    let ngrams = self.extract_ngrams(inv_vec.into_iter());
 
     info!("Training N-gram model with {} n-grams", ngrams.len());
 
@@ -601,6 +604,7 @@ mod tests {
 
   #[test]
   fn test_db_save_and_load() -> Result<()> {
+    // Create a model with some data
     let mut model = NGramModel::new(2);
 
     // Train the model
@@ -641,6 +645,48 @@ mod tests {
 
     assert_eq!(original_predictions, loaded_predictions);
 
+    Ok(())
+  }
+
+  #[test]
+  fn test_predict_simple() -> Result<()> {
+    let mut model = NGramModel::new(2);
+    let invocations = vec![
+      create_test_invocation("ls", Some("/home")),
+      create_test_invocation("pwd", Some("/home")),
+      create_test_invocation("ls", Some("/home")),
+    ];
+    model.train(invocations)?;
+    let recent = vec![create_test_invocation("pwd", Some("/home"))];
+    let preds = model.predict(&recent, 1)?;
+    assert_eq!(preds, vec!["ls".to_string()]);
+    Ok(())
+  }
+
+  #[test]
+  fn test_predict_insufficient_history() -> Result<()> {
+    let model = NGramModel::new(3);
+    let recent = vec![create_test_invocation("ls", Some("/home"))];
+    let preds = model.predict(&recent, 5)?;
+    assert!(preds.is_empty());
+    Ok(())
+  }
+
+  #[test]
+  fn test_stats() -> Result<()> {
+    let mut model = NGramModel::new(2);
+    let invocations = vec![
+      create_test_invocation("ls", Some("/home")),
+      create_test_invocation("pwd", Some("/home")),
+      create_test_invocation("ls", Some("/home")),
+    ];
+    model.train(invocations)?;
+    let stats = model.stats();
+    assert_eq!(stats.n_value, 2);
+    assert_eq!(stats.total_commands, 3);
+    assert_eq!(stats.context_count, 2);
+    assert_eq!(stats.command_count, 2);
+    assert_eq!(stats.dir_context_count, 2);
     Ok(())
   }
 }

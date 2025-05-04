@@ -30,7 +30,7 @@ impl std::str::FromStr for Shell {
   }
 }
 
-#[derive(Debug, Default, Serialize, Deserialize)]
+#[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct Invocation {
   pub command: BString,
   pub shellname: String,

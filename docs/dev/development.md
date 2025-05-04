@@ -94,9 +94,31 @@ zage import [OPTIONS]
 
 Options:
   --file <FILE>       Path to history file (defaults to $HISTFILE env var)
-  --hostname <NAME>   Override hostname for import
-  --username <NAME>   Override username for import
+  --hostname <n>      Override hostname for import
+  --username <n>      Override username for import
   --shell <SHELL>     Shell type (bash or zsh); defaults to $SHELL env var
+
+# Train prediction model
+zage train [OPTIONS]
+
+Options:
+  --model <MODEL>     Model type to train (ngram, default: ngram)
+  --n <N>             N value for N-gram model (default: 3)
+  --limit <LIMIT>     Limit number of history entries to use (default: all)
+
+# Predict next command
+zage predict [OPTIONS]
+
+Options:
+  --model <MODEL>     Model to use for prediction (ngram, default: ngram)
+  --n <N>             Number of predictions to return (default: 5)
+  --context <DIR>     Use directory context for prediction (default: true)
+
+# Show model statistics
+zage stats [OPTIONS]
+
+Options:
+  --model <MODEL>     Model to show statistics for (ngram, default: ngram)
 ```
 
 ## Implementation Plan
@@ -114,7 +136,11 @@ The development will proceed in phases, each building on the previous:
 
 ### Phase 2: Simple Prediction
 
-- [ ] Implement N-gram model for baseline predictions
+- [x] Implement N-gram model for baseline predictions
+  - [x] Core N-gram implementation with frequency tracking
+  - [x] Directory-aware context for improved predictions
+  - [x] Serialization and database persistence
+  - [x] Comprehensive test suite for model validation
 - [ ] Add Markov chain model with context awareness
 - [ ] Zsh plugin integration
 - [ ] Initial sequence detection algorithm
@@ -129,7 +155,9 @@ The development will proceed in phases, each building on the previous:
 
 ### Phase 4: Advanced Features
 
-- [ ] Context enhancement with directory, exit status
+- [x] Context enhancement with directory, exit status
+  - [x] Directory-aware predictions implemented in N-gram model
+  - [ ] Exit status awareness for improved context
 - [ ] Time-based patterns detection
 - [ ] Multi-terminal awareness
 - [ ] Performance optimizations
@@ -161,6 +189,13 @@ CREATE UNIQUE INDEX idx_shell_history_unique ON shell_history (
     start_unix_timestamp,
     end_unix_timestamp,
     session_id
+);
+
+CREATE TABLE models (
+    model_type TEXT PRIMARY KEY,
+    model_data BLOB NOT NULL,
+    created_at INTEGER NOT NULL,
+    updated_at INTEGER NOT NULL
 );
 ```
 
@@ -209,14 +244,14 @@ The Bash history format can have two forms:
 1. Simple commands:
 
 ```text
-echo hello
+echo "Example command"
 ```
 
-1. With timestamps (when HISTTIMEFORMAT is set):
+When timestamps are enabled (`HISTTIMEFORMAT`), the format becomes:
 
 ```text
-#1610000000
-echo hello
+#1430458594
+echo "Example command"
 ```
 
 ### Async Implementation
@@ -226,6 +261,41 @@ This project uses Tokio for asynchronous operations:
 - Database operations are performed asynchronously
 - Shell integration uses async channels for communication
 - Model training and prediction run in background tasks
+
+## N-gram Model Implementation
+
+The N-gram model is the first prediction model implemented in Zage. It provides a solid baseline for command prediction based on command history and working directory context.
+
+### Model Overview
+
+The N-gram model works by:
+
+1. **Analyzing command sequences**: It tracks sequences of N commands and calculates the frequency of each command following a specific context of N-1 commands.
+
+2. **Directory-aware predictions**: The model maintains separate frequency tables for different working directories, allowing it to make context-specific predictions.
+
+3. **Efficient storage**: The model uses BTreeMap for storing frequency data, which provides a good balance between performance and memory usage for potentially large datasets.
+
+### Serialization
+
+The model is serialized to JSON and stored in the SQLite database, allowing it to persist between sessions. The serialization process handles complex data structures like nested maps with non-string keys by using a custom serialization approach.
+
+### Prediction Process
+
+When predicting the next command, the model:
+
+1. Takes the most recent N-1 commands as context
+2. Looks up this context in both the global frequency table and the directory-specific table
+3. Combines and ranks predictions based on frequency, giving higher weight to directory-specific matches
+4. Returns the top K predictions sorted by probability
+
+### Future Enhancements
+
+While the current N-gram model provides good baseline predictions, future enhancements will include:
+
+- Incorporating command exit status for better context awareness
+- Time-based weighting to prioritize more recent patterns
+- Integration with more sophisticated models like Markov chains and LSTMs
 
 ## Testing Strategy
 

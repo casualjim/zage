@@ -91,7 +91,7 @@ where
   Ok(())
 }
 
-fn init_table(tx: &mut Transaction) -> Result<()> {
+pub fn init_table(tx: &mut Transaction) -> Result<()> {
   tx.execute(
     "CREATE TABLE IF NOT EXISTS shell_history (
             id TEXT PRIMARY KEY,
