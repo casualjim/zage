@@ -193,11 +193,12 @@ pub struct RawSequenceScore {
   pub context_json: Option<String>,
 }
 
-/// Retrieves top scored sequences by lift as an iterator.
+/// Retrieves top scored sequences by lift as a vector.
 pub fn get_sequence_scores(conn: &mut Connection, limit: usize) -> Result<Vec<RawSequenceScore>> {
   let mut stmt = conn.prepare(
-    "SELECT sequence, support, confidence, lift, context FROM sequence_scores ORDER BY lift DESC LIMIT :limit",
-  )?;
+        "SELECT sequence, support, confidence, lift, context FROM sequence_scores ORDER BY lift DESC LIMIT :limit",
+    )?;
+
   let seqs = stmt
     .query_map(
       rusqlite::named_params! {":limit": limit as i64},

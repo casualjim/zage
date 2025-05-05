@@ -1,5 +1,6 @@
 // Module for prediction models
 mod context;
+pub mod lstm;
 pub mod markov;
 pub mod ngram;
 pub mod sequence;

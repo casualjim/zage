@@ -44,6 +44,6 @@ JOIN shell_history h1 ON counts.c1 = h1.command
 JOIN shell_history h2 ON counts.c2 = h2.command
 WHERE
   counts.support    >= :min_support
-  AND (counts.support * 1.0 / prefix.sp)             >= :min_confidence
+  AND (counts.support * 1.0 / prefix.sp) >= :min_confidence
   AND ((counts.support * 1.0 / prefix.sp) / (suffix.ss * 1.0 / total.tot)) >= :min_lift
 GROUP BY counts.c1, counts.c2;

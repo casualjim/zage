@@ -1,0 +1,617 @@
+# Predefined simulation scenarios for Zage
+# Each scenario defines a context and a sequence of related shell commands.
+
+scenarios:
+  - id: 1
+    name: rust_laptop_dev
+    context:
+      cwd: "/home/alice/projects/zage"
+      hostname: "laptop"
+      username: "alice"
+      exit_status: 0
+    command_history:
+      - cd /home/alice/projects/zage
+      - git pull
+      - cargo build
+      - cargo test
+      - git add .
+      - git commit -m "update simulation"
+      - git push
+
+  - id: 2
+    name: node_laptop_dev
+    context:
+      cwd: "/home/alice/projects/zage-ui"
+      hostname: "laptop"
+      username: "alice"
+      exit_status: 0
+    command_history:
+      - cd /home/alice/projects/zage-ui
+      - npm install
+      - npm run build
+      - npm test
+      - git add .
+      - git commit -m "front-end update"
+
+  - id: 3
+    name: python_laptop_dev
+    context:
+      cwd: "/home/alice/projects/zage-api"
+      hostname: "laptop"
+      username: "alice"
+      exit_status: 0
+    command_history:
+      - cd /home/alice/projects/zage-api
+      - source .venv/bin/activate
+      - pip install -r requirements.txt
+      - pytest tests/
+      - deactivate
+
+  - id: 4
+    name: docker_server_deploy
+    context:
+      cwd: "/srv/zage"
+      hostname: "server"
+      username: "deploy"
+      exit_status: 0
+    command_history:
+      - cd /srv/zage
+      - docker build -t zage/app:latest .
+      - docker push zage/app:latest
+      - ssh deploy@server 'docker pull zage/app:latest'
+      - ssh deploy@server 'docker-compose up -d'
+
+  - id: 5
+    name: git_laptop_cleanup
+    context:
+      cwd: "/home/alice/projects/zage"
+      hostname: "laptop"
+      username: "alice"
+      exit_status: 0
+    command_history:
+      - cd /home/alice/projects/zage
+      - git fetch --prune
+      - git branch -d feature/old
+      - git branch -vv
+
+  - id: 6
+    name: aws_ci_sync
+    context:
+      cwd: "/home/ci"
+      hostname: "ci"
+      username: "ci"
+      exit_status: 0
+    command_history:
+      - aws configure list
+      - aws s3 sync build/ s3://zage-static
+      - aws cloudfront create-invalidation --distribution-id ABC123 --paths '/*'
+
+  - id: 7
+    name: dbhost_migrate
+    context:
+      cwd: "/home/dbadmin/projects/zage-db"
+      hostname: "dbhost"
+      username: "dbadmin"
+      exit_status: 0
+    command_history:
+      - cd /home/dbadmin/projects/zage-db
+      - psql -f migrations/001_create_tables.sql
+      - psql -f migrations/002_add_indexes.sql
+      - psql -d zage_db -c "SELECT count(*) FROM users;"
+
+  - id: 8
+    name: k8s_cloud_deploy
+    context:
+      cwd: "/home/cloud/projects/zage-k8s"
+      hostname: "cloudvm"
+      username: "devops"
+      exit_status: 0
+    command_history:
+      - kubectl apply -f k8s/deployment.yaml
+      - kubectl rollout status deployment/zage-app
+      - kubectl get pods
+      - kubectl logs deployment/zage-app
+      - kubectl port-forward svc/zage-app 8080:80
+
+  - id: 9
+    name: coworkerpc_feature_test
+    context:
+      cwd: "/home/bob/work/zage"
+      hostname: "coworkerpc"
+      username: "bob"
+      exit_status: 0
+    command_history:
+      - cd /home/bob/work/zage
+      - git checkout feature/simulate
+      - cargo fmt
+      - cargo clippy
+      - cargo run --bin simulate
+
+  - id: 10
+    name: bob_chatops_deploy
+    context:
+      cwd: "/home/bob/projects/zage-chat"
+      hostname: "laptop"
+      username: "bob"
+      exit_status: 0
+    command_history:
+      - cd /home/bob/projects/zage-chat
+      - git checkout main
+      - ./deploy.sh
+
+  - id: 11
+    name: frontend_developer_workflow
+    context:
+      cwd: "/home/ivan/projects/zage-frontend"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-frontend
+      - git pull origin main
+      - npm install
+      - npm run lint
+      - npm run test
+      - npm run dev
+      - git checkout -b feature/new-dashboard
+      - code src/components/Dashboard.jsx
+
+  - id: 12
+    name: docker_local_build
+    context:
+      cwd: "/home/ivan/projects/zage-api"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-api
+      - docker build -t zage-api:dev .
+      - docker run -p 8080:8080 zage-api:dev
+      - curl http://localhost:8080/health
+      - docker ps
+      - docker logs $(docker ps -q --filter "ancestor=zage-api:dev")
+
+  - id: 13
+    name: mongodb_local_dev
+    context:
+      cwd: "/home/ivan/projects/zage-data"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-data
+      - docker-compose up -d mongodb
+      - mongosh "mongodb://localhost:27017"
+      - db.listCollections()
+      - db.users.find().limit(5)
+      - node scripts/seed-database.js
+      - db.users.countDocuments()
+
+  - id: 14
+    name: python_venv_setup
+    context:
+      cwd: "/home/ivan/projects/zage-ml"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-ml
+      - python -m venv .venv
+      - source .venv/bin/activate
+      - pip install -r requirements.txt
+      - pip install -e .
+      - python -m pytest tests/
+      - jupyter notebook
+
+  - id: 15
+    name: react_component_dev
+    context:
+      cwd: "/home/ivan/projects/zage-ui"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-ui
+      - npm run storybook
+      - npm run test:watch src/components/Button
+      - git add src/components/Button
+      - git commit -m "Update Button component with new variants"
+      - git push origin feature/button-variants
+
+  - id: 16
+    name: aws_s3_operations
+    context:
+      cwd: "/home/ivan/projects/zage-infra"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-infra
+      - aws s3 ls s3://zage-assets/
+      - aws s3 cp dist/ s3://zage-assets/latest/ --recursive
+      - aws s3 website s3://zage-assets/ --index-document index.html
+      - aws cloudfront create-invalidation --distribution-id E1EXAMPLE --paths "/*"
+
+  - id: 17
+    name: terraform_workflow
+    context:
+      cwd: "/home/ivan/projects/zage-infra/terraform"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-infra/terraform
+      - terraform init
+      - terraform plan -out=tfplan
+      - terraform apply tfplan
+      - terraform output > outputs.txt
+      - git add outputs.txt
+      - git commit -m "Update infrastructure outputs"
+
+  - id: 18
+    name: nginx_config
+    context:
+      cwd: "/home/ivan/projects/zage-infra/nginx"
+      hostname: "server"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-infra/nginx
+      - sudo cp zage.conf /etc/nginx/sites-available/
+      - sudo ln -sf /etc/nginx/sites-available/zage.conf /etc/nginx/sites-enabled/
+      - sudo nginx -t
+      - sudo systemctl restart nginx
+      - curl -I https://zage.local
+
+  - id: 19
+    name: database_backup
+    context:
+      cwd: "/home/ivan/scripts"
+      hostname: "server"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/scripts
+      - pg_dump -h localhost -U postgres zage_db > zage_backup_$(date +%Y%m%d).sql
+      - gzip zage_backup_*.sql
+      - aws s3 cp zage_backup_*.sql.gz s3://zage-backups/
+      - find . -name "zage_backup_*.sql.gz" -mtime +7 -delete
+
+  - id: 20
+    name: redis_operations
+    context:
+      cwd: "/home/ivan/projects/zage-cache"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-cache
+      - docker-compose up -d redis
+      - redis-cli
+      - keys *
+      - hgetall user:1000
+      - flushall
+      - node test-cache.js
+
+  - id: 21
+    name: typescript_project
+    context:
+      cwd: "/home/ivan/projects/zage-ts"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-ts
+      - npm init -y
+      - npm install typescript @types/node --save-dev
+      - npx tsc --init
+      - mkdir src
+      - touch src/index.ts
+      - npx tsc
+      - node dist/index.js
+
+  - id: 22
+    name: git_workflow
+    context:
+      cwd: "/home/ivan/projects/zage"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage
+      - git checkout main
+      - git pull origin main
+      - git checkout -b feature/user-auth
+      - vim src/auth.js
+      - git add src/auth.js
+      - git commit -m "Implement user authentication"
+      - git push -u origin feature/user-auth
+      - gh pr create --title "Add user authentication" --body "Implements JWT authentication for users"
+
+  - id: 23
+    name: webpack_build
+    context:
+      cwd: "/home/ivan/projects/zage-web"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-web
+      - npm install webpack webpack-cli --save-dev
+      - touch webpack.config.js
+      - vim webpack.config.js
+      - npm run build
+      - ls -la dist/
+      - npm run serve
+      - open http://localhost:8080
+
+  - id: 24
+    name: kubernetes_operations
+    context:
+      cwd: "/home/ivan/projects/zage-k8s"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-k8s
+      - kubectl get nodes
+      - kubectl get pods --all-namespaces
+      - kubectl apply -f deployment.yaml
+      - kubectl get pods -l app=zage
+      - kubectl logs -l app=zage
+      - kubectl port-forward svc/zage-service 8080:80
+
+  - id: 25
+    name: ci_pipeline_debug
+    context:
+      cwd: "/home/ivan/projects/zage-ci"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-ci
+      - gh workflow list
+      - gh workflow view CI.yml
+      - gh run list --workflow=CI.yml
+      - gh run view 12345
+      - gh run rerun 12345
+      - gh run watch 12345
+
+  - id: 26
+    name: python_data_analysis
+    context:
+      cwd: "/home/ivan/projects/zage-analytics"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-analytics
+      - source .venv/bin/activate
+      - jupyter lab
+      - python -c "import pandas as pd; df = pd.read_csv('data.csv'); print(df.head())"
+      - python scripts/analyze.py --input data.csv --output results.json
+      - python -m http.server
+      - open http://localhost:8000/viz.html
+
+  - id: 27
+    name: log_analysis
+    context:
+      cwd: "/home/ivan/logs"
+      hostname: "server"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/logs
+      - grep ERROR app.log | tail -n 100
+      - awk '{print $1}' access.log | sort | uniq -c | sort -nr | head -n 10
+      - cat app.log | grep -A 5 -B 5 "Exception"
+      - find . -name "*.log" -mtime +30 | xargs rm -f
+      - journalctl -u zage-service --since today
+
+  - id: 28
+    name: vue_project_setup
+    context:
+      cwd: "/home/ivan/projects"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects
+      - npm install -g @vue/cli
+      - vue create zage-vue
+      - cd zage-vue
+      - npm install vuex vue-router
+      - vue add element
+      - npm run serve
+      - open http://localhost:8080
+
+  - id: 29
+    name: elasticsearch_operations
+    context:
+      cwd: "/home/ivan/projects/zage-search"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-search
+      - docker-compose up -d elasticsearch kibana
+      - curl -X GET "localhost:9200/_cat/health?v"
+      - curl -X PUT "localhost:9200/products"
+      - 'curl -X POST "localhost:9200/products/_bulk" -H "Content-Type: application/json" --data-binary @products.json'
+      - curl -X GET "localhost:9200/products/_search?q=laptop"
+      - open http://localhost:5601
+
+  - id: 30
+    name: django_development
+    context:
+      cwd: "/home/ivan/projects/zage-django"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-django
+      - source .venv/bin/activate
+      - pip install django djangorestframework
+      - django-admin startproject zageproject .
+      - python manage.py startapp api
+      - python manage.py makemigrations
+      - python manage.py migrate
+      - python manage.py runserver
+
+  - id: 31
+    name: rust_package_release
+    context:
+      cwd: "/home/ivan/projects/zage-rs"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-rs
+      - cargo test
+      - cargo bench
+      - cargo build --release
+      - cargo doc --open
+      - cargo publish --dry-run
+      - cargo publish
+
+  - id: 32
+    name: graphql_api_test
+    context:
+      cwd: "/home/ivan/projects/zage-graphql"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-graphql
+      - npm install
+      - npm run codegen
+      - npm run dev
+      - 'curl -X POST -H "Content-Type: application/json" -d "{\"query\": \"{ users { id name } }\"}" http://localhost:4000/graphql'
+      - open http://localhost:4000/playground
+
+  - id: 33
+    name: kafka_operations
+    context:
+      cwd: "/home/ivan/projects/zage-streams"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-streams
+      - docker-compose up -d zookeeper kafka
+      - kafka-topics.sh --bootstrap-server localhost:9092 --list
+      - kafka-topics.sh --bootstrap-server localhost:9092 --create --topic zage-events --partitions 3 --replication-factor 1
+      - kafka-console-producer.sh --bootstrap-server localhost:9092 --topic zage-events
+      - kafka-console-consumer.sh --bootstrap-server localhost:9092 --topic zage-events --from-beginning
+
+  - id: 34
+    name: system_monitoring
+    context:
+      cwd: "/home/ivan/projects/zage-monitoring"
+      hostname: "server"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-monitoring
+      - docker-compose up -d prometheus grafana
+      - htop
+      - df -h
+      - free -m
+      - netstat -tulpn
+      - open http://localhost:3000
+
+  - id: 35
+    name: rails_development
+    context:
+      cwd: "/home/ivan/projects/zage-rails"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-rails
+      - bundle install
+      - rails db:migrate
+      - rails db:seed
+      - rails c
+      - rails s
+      - open http://localhost:3000
+      - rspec spec/models/user_spec.rb
+
+  - id: 36
+    name: go_api_development
+    context:
+      cwd: "/home/ivan/projects/zage-go"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-go
+      - go mod init github.com/ivan/zage-go
+      - go get -u github.com/gin-gonic/gin
+      - go run main.go
+      - curl http://localhost:8080/ping
+      - go test ./...
+      - go build -o zage-api
+
+  - id: 37
+    name: flutter_development
+    context:
+      cwd: "/home/ivan/projects/zage-flutter"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-flutter
+      - flutter create .
+      - flutter pub get
+      - flutter run -d chrome
+      - flutter test
+      - flutter build web
+      - flutter build apk --release
+
+  - id: 38
+    name: ansible_deployment
+    context:
+      cwd: "/home/ivan/projects/zage-ansible"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-ansible
+      - ansible-galaxy install -r requirements.yml
+      - ansible-playbook -i inventory/production setup.yml --check
+      - ansible-playbook -i inventory/production setup.yml
+      - ansible-playbook -i inventory/production deploy.yml --tags "app,nginx"
+      - ansible-vault edit secrets.yml
+
+  - id: 39
+    name: serverless_deployment
+    context:
+      cwd: "/home/ivan/projects/zage-serverless"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-serverless
+      - npm install -g serverless
+      - serverless create --template aws-nodejs
+      - npm install aws-sdk
+      - serverless deploy --stage dev
+      - serverless logs -f api -t
+      - serverless invoke -f api --data '{"name":"Ivan"}'
+
+  - id: 40
+    name: svelte_development
+    context:
+      cwd: "/home/ivan/projects/zage-svelte"
+      hostname: "macbook"
+      username: "ivan"
+      exit_status: 0
+    command_history:
+      - cd /home/ivan/projects/zage-svelte
+      - npx degit sveltejs/template .
+      - npm install
+      - npm run dev
+      - open http://localhost:5000
+      - npm run build
+      - npx sirv-cli public

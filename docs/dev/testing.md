@@ -26,17 +26,19 @@ We're using a straightforward approach for implementing Warp-like command predic
    - Handles styling of suggestions
 
 2. **Creating a custom strategy for zsh-autosuggestions** that calls the Rust binary
-   ```zsh
-   _zsh_autosuggest_strategy_zage() {
-       local suggestion=$(zage predict --current-line "$1" --pwd "$PWD" 2>/dev/null)
-       [[ -n "$suggestion" ]] && echo "$suggestion"
-   }
-   ```
+
+```zsh
+_zsh_autosuggest_strategy_zage() {
+    local suggestion=$(zage predict --current-line "$1" --pwd "$PWD" 2>/dev/null)
+    [[ -n "$suggestion" ]] && echo "$suggestion"
+}
+```
 
 3. **Configuring zsh-autosuggestions** to use this strategy
-   ```zsh
-   ZSH_AUTOSUGGEST_STRATEGY=(zage history)
-   ```
+
+```zsh
+ZSH_AUTOSUGGEST_STRATEGY=(zage history)
+```
 
 ## Testing Infrastructure Requirements
 

@@ -15,6 +15,7 @@ clap-config-file = "0.5.0"
 uuid = { version = "1.16.0", features = ["fast-rng", "std", "v7"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
+serde_yaml = "0.9"
 bstr = { version = "1.9.0", features = ["serde"] }
 rusqlite = "0.34.0"
 exemplar = "0.34.0"
@@ -28,6 +29,7 @@ jiff = "0.2"
 sqlite-vss = { version = "0.1.2", features = ["download-libs", "flate2"] }
 tch = "0.20.0"
 candle-core = { version = "0.9.1", default-features = false }
+csv = "1.2"
 
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 candle-core = { version = "0.9.1", default-features = false, features = ["accelerate", "metal"] }
@@ -44,3 +46,15 @@ assert_cmd = "2"
 predicates = "3"
 color-backtrace = "0.7.0"
 ctor = "0.4"
+
+[[bin]]
+name = "simulate"
+path = "src/bin/simulate.rs"
+
+[[bin]]
+name = "simulate_context"
+path = "src/bin/simulate_context.rs"
+
+[[bin]]
+name = "simulate_workflow"
+path = "src/bin/simulate_workflow.rs"
