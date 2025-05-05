@@ -98,7 +98,7 @@ zage analyze-sequences [--min_support <N>] [--min_length <N>]
 
 - [ ] Command embedding generation
 - [ ] Feature extraction (including command output)
-- [ ] LSTM model (using `tch-rs`)
+- [ ] LSTM model (using `candle`)
 - [ ] Training/prediction pipeline
 
 ### Phase 4: Advanced Features (Planned)
@@ -196,7 +196,7 @@ The development will proceed in phases, each building on the previous:
 - [ ] Command embedding generation
 - [ ] Feature extraction from commands and context
   - [ ] Command output (stdout/stderr) feature extraction
-- [ ] LSTM model implementation using tch-rs
+- [ ] LSTM model implementation using candle
 - [ ] Training pipeline
 - [ ] Prediction pipeline
 

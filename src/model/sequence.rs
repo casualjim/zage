@@ -32,13 +32,16 @@ pub struct SequenceScore {
 impl SequenceScore {
   /// Parse the context_json into a SequenceContext object
   pub fn parse_context(&self) -> Option<super::sequence_context::SequenceContext> {
-    self.context_json
+    self
+      .context_json
       .as_ref()
       .and_then(|json| Self::parse_context_from_json(json))
   }
 
   /// Parse context information from JSON string into a SequenceContext object
-  pub fn parse_context_from_json(json_str: &str) -> Option<super::sequence_context::SequenceContext> {
+  pub fn parse_context_from_json(
+    json_str: &str,
+  ) -> Option<super::sequence_context::SequenceContext> {
     // Attempt to parse as JSON
     if let Ok(json) = serde_json::from_str::<serde_json::Value>(json_str) {
       if !json.is_object() {
@@ -81,9 +84,7 @@ impl SequenceScore {
         .unwrap_or_default();
 
       // Extract session ID
-      let session_id = json
-        .get("session_id")
-        .and_then(|v| v.as_i64());
+      let session_id = json.get("session_id").and_then(|v| v.as_i64());
 
       // Extract time info
       let (_start_time, _end_time) = if let Some(time_info) = json.get("time_info") {
@@ -114,7 +115,7 @@ impl SequenceScore {
         },
         temporal: super::sequence_context::TemporalContext {
           time_of_day: super::sequence_context::TimeOfDay::Morning, // Default to Morning
-          day_of_week: 1, // Default to Monday (1)
+          day_of_week: 1,                                           // Default to Monday (1)
           is_weekend: false, // Would need to calculate from timestamp
         },
         execution: super::sequence_context::ExecutionContext {
@@ -141,10 +142,10 @@ impl SequenceScore {
   /// Create a SequenceScore from a RawSequenceScore
   pub fn from_raw(raw: &crate::db::RawSequenceScore) -> Result<Self> {
     // Parse the sequence JSON
-    let sequence: Vec<String> = serde_json::from_str(&raw.sequence_json)
-      .map_err(|e| ZageError::SerializationError(e))?;
+    let sequence: Vec<String> =
+      serde_json::from_str(&raw.sequence_json).map_err(|e| ZageError::SerializationError(e))?;
     let size = sequence.len();
-    
+
     Ok(SequenceScore {
       sequence: sequence.clone(),
       support: raw.support,
@@ -215,12 +216,13 @@ mod tests {
 
     let raw_scores = db::get_sequence_scores(&mut conn, 10).unwrap();
     assert_eq!(raw_scores.len(), 1);
-    
-    let scores: Vec<SequenceScore> = raw_scores.iter()
-      .filter_map(|raw| SequenceScore::from_raw(raw).ok())
+
+    let scores: Vec<SequenceScore> = raw_scores
+      .iter()
+      .map(|raw| SequenceScore::from_raw(raw).unwrap())
       .collect();
     assert_eq!(scores.len(), 1);
-    
+
     let s = &scores[0];
     assert_eq!(s.sequence, vec!["X".to_string(), "Y".to_string()]);
     assert_eq!(s.support, 2);
@@ -240,21 +242,23 @@ mod tests {
     // Limit test: top 2 sequences
     let raw_top2 = db::get_sequence_scores(&mut conn, 2).unwrap();
     assert_eq!(raw_top2.len(), 2);
-    
-    let top2: Vec<SequenceScore> = raw_top2.iter()
-      .filter_map(|raw| SequenceScore::from_raw(raw).ok())
+
+    let top2: Vec<SequenceScore> = raw_top2
+      .iter()
+      .map(|raw| SequenceScore::from_raw(raw).unwrap())
       .collect();
     assert_eq!(top2.len(), 2);
 
     // Full result: expect 3 bigrams + 3 trigrams
     let raw_all = db::get_sequence_scores(&mut conn, 10).unwrap();
     assert_eq!(raw_all.len(), 6);
-    
-    let all: Vec<SequenceScore> = raw_all.iter()
-      .filter_map(|raw| SequenceScore::from_raw(raw).ok())
+
+    let all: Vec<SequenceScore> = raw_all
+      .iter()
+      .map(|raw| SequenceScore::from_raw(raw).unwrap())
       .collect();
     assert_eq!(all.len(), 6);
-    
+
     let sequences: Vec<Vec<String>> = all.iter().map(|s| s.sequence.clone()).collect();
     let expected = vec![
       vec!["X".to_string(), "Y".to_string()],

@@ -1,7 +1,7 @@
 use miette::Diagnostic;
 use thiserror::Error;
 
-pub type Result<T> = std::result::Result<T, ZageError>;
+pub type Result<T, E = ZageError> = std::result::Result<T, E>;
 
 #[derive(Debug, Error, Diagnostic)]
 pub enum ZageError {
@@ -24,7 +24,7 @@ pub enum ZageError {
   #[error("Invalid utf-8 bytes")]
   #[diagnostic(code(zage::invalid_utf8))]
   InvalidUtf8(#[from] std::str::Utf8Error),
-  
+
   #[error("Serialization error")]
   #[diagnostic(code(zage::serialization_error))]
   SerializationError(#[from] serde_json::Error),

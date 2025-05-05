@@ -1,7 +1,31 @@
 use std::{path::Path, time::Duration};
 
 use crate::{Result, shell_history::Invocation};
+use exemplar::Model;
 use rusqlite::{Connection, Transaction, params};
+
+#[derive(Debug, Model)]
+#[table("shell_history")]
+pub struct DBInvocation {
+  #[column("id")]
+  pub id: String,
+  pub command: String,
+  pub shellname: String,
+  #[column("working_directory")]
+  pub working_directory: Option<String>,
+  #[column("hostname")]
+  pub hostname: Option<String>,
+  #[column("username")]
+  pub username: Option<String>,
+  #[column("exit_status")]
+  pub exit_status: Option<i64>,
+  #[column("start_unix_timestamp")]
+  pub start_unix_timestamp: Option<i64>,
+  #[column("end_unix_timestamp")]
+  pub end_unix_timestamp: Option<i64>,
+  #[column("session_id")]
+  pub session_id: i64,
+}
 
 pub fn connect<P: AsRef<Path>>(db_path: P) -> Result<Connection> {
   let conn = Connection::open(db_path)?;
@@ -13,47 +37,8 @@ pub fn connect<P: AsRef<Path>>(db_path: P) -> Result<Connection> {
 }
 
 pub fn insert_invocation(tx: &mut Transaction, invocation: &Invocation) -> Result<()> {
-  let working_directory = invocation.working_directory.as_deref().unwrap_or_default();
-  let hostname = invocation.hostname.as_deref().unwrap_or_default();
-  let username = invocation.username.as_deref().unwrap_or_default();
-
-  tx.execute(
-    "INSERT INTO shell_history (
-            id,
-            command,
-            shellname,
-            working_directory,
-            hostname,
-            username,
-            exit_status,
-            start_unix_timestamp,
-            end_unix_timestamp,
-            session_id
-        ) VALUES (
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?,
-            ?
-        )",
-    params![
-      uuid::Uuid::now_v7().to_string(),
-      &invocation.command,
-      &invocation.shellname,
-      working_directory,
-      hostname,
-      username,
-      &invocation.exit_status.unwrap_or(0),
-      &invocation.start_unix_timestamp.unwrap_or(0),
-      &invocation.end_unix_timestamp.unwrap_or(0),
-      &invocation.session_id,
-    ],
-  )?;
+  let db_inv: DBInvocation = invocation.into();
+  db_inv.insert(tx)?;
   Ok(())
 }
 
@@ -79,103 +64,37 @@ where
 }
 
 pub fn init_table(tx: &mut Transaction) -> Result<()> {
-  tx.execute(
-    "CREATE TABLE IF NOT EXISTS shell_history (
-            id TEXT PRIMARY KEY,
-            command TEXT NOT NULL,
-            shellname TEXT NOT NULL,
-            working_directory TEXT,
-            hostname TEXT,
-            username TEXT,
-            exit_status INTEGER,
-            start_unix_timestamp INTEGER,
-            end_unix_timestamp INTEGER,
-            session_id INTEGER
-        )",
-    [],
-  )?;
-  tx.execute(
-    "CREATE UNIQUE INDEX IF NOT EXISTS idx_shell_history_unique ON shell_history (
-            command,
-            shellname,
-            working_directory,
-            hostname,
-            username,
-            exit_status,
-            start_unix_timestamp,
-            end_unix_timestamp,
-            session_id
-        )",
-    [],
-  )?;
-  tx.execute(
-    "CREATE TABLE IF NOT EXISTS models (
-            model_type TEXT PRIMARY KEY,
-            model_data BLOB,
-            created_at INTEGER,
-            updated_at INTEGER
-        )",
-    [],
-  )?;
-  tx.execute(
-    "CREATE TABLE IF NOT EXISTS sequence_scores (
-       sequence   TEXT PRIMARY KEY,
-       support    INTEGER NOT NULL,
-       confidence REAL    NOT NULL,
-       lift       REAL    NOT NULL,
-       context    TEXT    NULL
-      )",
-    [],
-  )?;
+  tx.execute_batch(&include_str!("db/schema-v0.sql"))?;
+
   Ok(())
 }
 
 /// Get recent command invocations from the database
 pub fn get_recent_invocations(conn: &mut Connection, limit: usize) -> Result<Vec<Invocation>> {
-  let mut stmt = conn.prepare(
-    "SELECT
-            command,
-            shellname,
-            working_directory,
-            hostname,
-            username,
-            exit_status,
-            start_unix_timestamp,
-            end_unix_timestamp,
-            session_id
-        FROM shell_history
-        ORDER BY start_unix_timestamp DESC
-        LIMIT ?",
-  )?;
+  let mut stmt = conn.prepare(include_str!("db/get-recent-invocations.sql"))?;
+  let db_invs = stmt
+    .query_and_then(
+      rusqlite::named_params! {":limit": limit as i64},
+      DBInvocation::from_row,
+    )?
+    .collect::<rusqlite::Result<Vec<DBInvocation>>>()?;
 
-  let invocations = stmt
-    .query_map([limit as i64], |row| {
-      // Use get for TEXT columns as String, then convert to BString
-      let command_str: String = row.get(0)?;
-      let shellname_str: String = row.get(1)?;
-      let working_dir: Option<String> = row.get(2)?;
-      let hostname: Option<String> = row.get(3)?;
-      let username: Option<String> = row.get(4)?;
-
-      Ok(Invocation {
-        command: command_str,
-        shellname: shellname_str,
-        working_directory: working_dir,
-        hostname,
-        username,
-        exit_status: row.get(5)?,
-        start_unix_timestamp: row.get(6)?,
-        end_unix_timestamp: row.get(7)?,
-        session_id: row.get(8)?,
-      })
-    })?
-    .collect::<std::result::Result<Vec<_>, _>>()?;
-
-  // Reverse the order to get chronological order for training
-  let mut chronological = invocations;
-  chronological.reverse();
-
-  Ok(chronological)
+  let mut invs = db_invs
+    .into_iter()
+    .map(|db_inv| Invocation {
+      command: db_inv.command,
+      shellname: db_inv.shellname,
+      working_directory: db_inv.working_directory,
+      hostname: db_inv.hostname,
+      username: db_inv.username,
+      exit_status: db_inv.exit_status,
+      start_unix_timestamp: db_inv.start_unix_timestamp,
+      end_unix_timestamp: db_inv.end_unix_timestamp,
+      session_id: db_inv.session_id,
+    })
+    .collect::<Vec<_>>();
+  invs.reverse();
+  Ok(invs)
 }
 
 /// Save a model to the database
@@ -235,161 +154,57 @@ pub fn analyze_sequences(
   min_lift: f64,
 ) -> Result<()> {
   // Bigram analysis
-  let sql_bigram = format!(
-    r#"
-  WITH bigrams AS (
-    SELECT LAG(command) OVER (ORDER BY rowid) AS c1,
-           command AS c2
-    FROM shell_history
-  ), counts AS (
-    SELECT c1, c2, COUNT(*) AS support
-    FROM bigrams
-    WHERE c1 IS NOT NULL
-    GROUP BY c1, c2
-  ), prefix AS (
-    SELECT c1, COUNT(*) AS sp
-    FROM bigrams
-    WHERE c1 IS NOT NULL
-    GROUP BY c1
-  ), suffix AS (
-    SELECT c2, COUNT(*) AS ss
-    FROM bigrams
-    GROUP BY c2
-  ), total AS (
-    SELECT COUNT(*) AS tot FROM shell_history
-  )
-  INSERT OR REPLACE INTO sequence_scores(sequence, support, confidence, lift, context)
-  SELECT
-    json_array(counts.c1, counts.c2),
-    counts.support,
-    counts.support * 1.0 / prefix.sp,
-    (counts.support * 1.0 / prefix.sp) / (suffix.ss * 1.0 / total.tot),
-    json_object(
-      'working_directory', MAX(h1.working_directory),
-      'hostname', MAX(h1.hostname),
-      'username', MAX(h1.username),
-      'exit_status', json_array(MAX(h1.exit_status), MAX(h2.exit_status)),
-      'session_id', MAX(h1.session_id),
-      'time_info', json_object(
-        'start_time', MIN(h1.start_unix_timestamp),
-        'end_time', MAX(h2.end_unix_timestamp)
-      )
-    )
-  FROM counts
-  JOIN prefix ON counts.c1 = prefix.c1
-  JOIN suffix ON counts.c2 = suffix.c2
-  CROSS JOIN total
-  JOIN shell_history h1 ON counts.c1 = h1.command
-  JOIN shell_history h2 ON counts.c2 = h2.command
-  WHERE
-    counts.support    >= {min_support}
-    AND (counts.support * 1.0 / prefix.sp)             >= {min_confidence}
-    AND ((counts.support * 1.0 / prefix.sp) / (suffix.ss * 1.0 / total.tot)) >= {min_lift}
-  GROUP BY counts.c1, counts.c2;
-  "#,
-    min_support = min_support,
-    min_confidence = min_confidence,
-    min_lift = min_lift
-  );
-  tx.execute_batch(&sql_bigram)?;
+  let sql_bigram = include_str!("db/analyze-bigram.sql");
+
+  tx.execute(
+    sql_bigram,
+    rusqlite::named_params! {
+      ":min_support": min_support,
+      ":min_confidence": min_confidence,
+      ":min_lift": min_lift
+    },
+  )?;
 
   // Trigram analysis
-  let sql_trigram = format!(
-    r#"
-  WITH trigrams AS (
-    SELECT LAG(command,2) OVER (ORDER BY rowid) AS c1,
-           LAG(command,1) OVER (ORDER BY rowid) AS c2,
-           command AS c3
-    FROM shell_history
-  ), counts AS (
-    SELECT c1, c2, c3, COUNT(*) AS support
-    FROM trigrams
-    WHERE c1 IS NOT NULL
-    GROUP BY c1, c2, c3
-  ), prefix AS (
-    SELECT c1, c2, COUNT(*) AS sp
-    FROM trigrams
-    WHERE c1 IS NOT NULL
-    GROUP BY c1, c2
-  ), suffix AS (
-    SELECT c3, COUNT(*) AS ss
-    FROM trigrams
-    GROUP BY c3
-  ), total AS (
-    SELECT COUNT(*) AS tot FROM shell_history
-  )
-  INSERT OR REPLACE INTO sequence_scores(sequence, support, confidence, lift, context)
-  SELECT
-    json_array(counts.c1, counts.c2, counts.c3),
-    counts.support,
-    counts.support * 1.0 / prefix.sp,
-    (counts.support * 1.0 / prefix.sp) / (suffix.ss * 1.0 / total.tot),
-    json_object(
-      'working_directory', MAX(h1.working_directory),
-      'hostname', MAX(h1.hostname),
-      'username', MAX(h1.username),
-      'exit_status', json_array(MAX(h1.exit_status), MAX(h2.exit_status), MAX(h3.exit_status)),
-      'session_id', MAX(h1.session_id),
-      'time_info', json_object(
-        'start_time', MIN(h1.start_unix_timestamp),
-        'end_time', MAX(h3.end_unix_timestamp)
-      )
-    )
-  FROM counts
-  JOIN prefix ON counts.c1 = prefix.c1 AND counts.c2 = prefix.c2
-  JOIN suffix ON counts.c3 = suffix.c3
-  CROSS JOIN total
-  JOIN shell_history h1 ON counts.c1 = h1.command
-  JOIN shell_history h2 ON counts.c2 = h2.command
-  JOIN shell_history h3 ON counts.c3 = h3.command
-  WHERE
-    counts.support    >= {min_support}
-    AND (counts.support * 1.0 / prefix.sp)             >= {min_confidence}
-    AND ((counts.support * 1.0 / prefix.sp) / (suffix.ss * 1.0 / total.tot)) >= {min_lift}
-  GROUP BY counts.c1, counts.c2, counts.c3;
-  "#,
-    min_support = min_support,
-    min_confidence = min_confidence,
-    min_lift = min_lift
-  );
-  tx.execute_batch(&sql_trigram)?;
+  let sql_trigram = include_str!("db/analyze-trigram.sql");
+
+  tx.execute(
+    sql_trigram,
+    rusqlite::named_params! {
+      ":min_support": min_support,
+      ":min_confidence": min_confidence,
+      ":min_lift": min_lift
+    },
+  )?;
+
   Ok(())
 }
 
 /// Represents a raw sequence score from the database
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Model)]
+#[table("sequence_scores")]
 pub struct RawSequenceScore {
+  #[column("sequence")]
   pub sequence_json: String,
   pub support: usize,
   pub confidence: f64,
   pub lift: f64,
+  #[column("context")]
   pub context_json: Option<String>,
 }
 
-/// Retrieves top scored sequences by lift.
+/// Retrieves top scored sequences by lift as an iterator.
 pub fn get_sequence_scores(conn: &mut Connection, limit: usize) -> Result<Vec<RawSequenceScore>> {
   let mut stmt = conn.prepare(
-    "SELECT sequence, support, confidence, lift, context
-     FROM sequence_scores
-     ORDER BY lift DESC
-     LIMIT ?",
+    "SELECT sequence, support, confidence, lift, context FROM sequence_scores ORDER BY lift DESC LIMIT :limit",
   )?;
-  let rows = stmt.query_map([limit as i64], |row| {
-    let sequence_json: String = row.get(0)?;
-
-    Ok(RawSequenceScore {
-      sequence_json,
-      support: row.get(1)?,
-      confidence: row.get(2)?,
-      lift: row.get(3)?,
-      context_json: row.get(4)?,
-    })
-  })?;
-  let mut results = Vec::new();
-  for res in rows {
-    results.push(res?);
-  }
-  Ok(results)
+  let seqs = stmt
+    .query_map(
+      rusqlite::named_params! {":limit": limit as i64},
+      RawSequenceScore::from_row,
+    )?
+    .collect::<rusqlite::Result<Vec<_>>>()?;
+  Ok(seqs)
 }
 
 #[cfg(test)]

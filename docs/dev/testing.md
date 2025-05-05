@@ -64,7 +64,7 @@ To effectively test the prediction models, we need diverse and representative co
 Since context is crucial for accurate predictions, we need to simulate different working environments:
 
 - **Directory Structure Mock-ups**:
-  - Cr  - Cr  - Cr  - Cr  - Cr  - Cr  - Cr  - Creal-world scenarios
+  - Create mock project directories that mimic real-world scenarios
   - Include various project types (web, data science, DevOps, etc.)
   - Simulate navigational patterns between directories
 
@@ -97,18 +97,24 @@ For measuring and optimizing performance:
 
 ### 4. User Experience Simulation
 
-To validate the user iTo validate the user iTo validate the user iTo validate the user i-bTo validate the user iTo validate the user iTo validate the user ipatterns
+To validate the user interface aspects:
+
+- **Interactive Typing Simulation**:
+  - Script-based typing with realistic timing
+  - Different typing speeds and patterns
   - Interruptions and corrections
 
 - **Command Acceptance Patterns**:
   - Different acceptance behaviors (tab, right arrow, etc.)
-                                            tion rejection patterns
+  - Partial suggestion acceptance
+  - Suggestion rejection patterns
 
 ### 5. Integration Testing
 
 To ensure smooth operation with ZSH and other components:
 
-- **Shell Pl- **Shell Pl- **Shell Pl- **st with different versions of zsh-autosuggestions
+- **Shell Plugin Compatibility**:
+  - Test with different versions of zsh-autosuggestions
   - Compatibility with other common ZSH plugins
   - Cross-shell behavior (ZSH vs. Bash)
 
@@ -118,7 +124,9 @@ To ensure smooth operation with ZSH and other components:
 
 ## Test Automation
 
-### Automa### Automa### Automa### AutTests**:
+### Automated Test Suites
+
+1. **Unit Tests**:
    - Prediction algorithm correctness
    - Context parsing and handling
    - Database operations
@@ -135,16 +143,21 @@ To ensure smooth operation with ZSH and other components:
 ### CI/CD Integration
 
 - GitHub Actions workflow for automated testing
-- P- P- P- P- P- P- P- P- P- P- P- P- P- P- P- P- P- P- P- P-ting
+- Performance regression detection
+- Compatibility matrix testing
 
 ## Evaluation Metrics
 
 Key metrics to track for assessing Zage's effectiveness:
 
-1. **Predict1. **Predict1. **Predict1. **Predict1. **Predict1. **Pre   - Edit distance between predictions and actual commands
+1. **Prediction Accuracy**:
+   - Percentage of accepted suggestions
+   - Edit distance between predictions and actual commands
    - Ranking quality (how often the best suggestion comes first)
 
-2. **Performance2. **Performance2. **Performance2. **Pner2. **Performance2. **Performance2. **e
+2. **Performance Metrics**:
+   - Average suggestion generation time
+   - Memory usage over time
    - Database size growth rate
 
 3. **User Experience Metrics**:
@@ -159,10 +172,14 @@ Potential tools and frameworks to leverage:
 - **Rust Testing**:
   - Criterion for benchmarking
   - Proptest for property-based testing
-  - Mockall for mocking d  - Mockall for mocking d  -ng**:
+  - Mockall for mocking dependencies
+
+- **Shell Testing**:
   - Bats (Bash Automated Testing System)
   - ShellCheck for script quality
-  - ShellCheck for script quality - xdotool for simulating keyboard input
+
+- **User Experience Testing**:
+  - xdotool for simulating keyboard input
   - ttyrec/asciinema for recording terminal sessions
   - Custom typing simulator
 
