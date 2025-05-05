@@ -1,6 +1,5 @@
 use super::{Invocation, dedup_invocations, generate_import_session_id, get_hostname};
 use crate::Result;
-use bstr::BString;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::Path;
@@ -9,21 +8,19 @@ use std::path::Path;
 /// Handles potential binary/non-UTF8 content by reading line by line
 pub fn parse_history_file(
   path: &Path,
-  hostname: Option<BString>,
-  username: Option<BString>,
+  hostname: Option<String>,
+  username: Option<String>,
 ) -> Result<Vec<Invocation>> {
   let session_id = generate_import_session_id(path);
   let file = File::open(path)?;
   let reader = BufReader::new(file);
   let mut invocations = Vec::new();
 
-  let username = username
-    .or_else(|| {
-      uzers::get_current_username()
-        .as_ref()
-        .map(|v| BString::from(v.as_encoded_bytes()))
-    })
-    .unwrap_or_else(|| BString::from("unknown"));
+  let username = username.unwrap_or_else(|| {
+    uzers::get_current_username()
+      .map(|v| v.to_string_lossy().into_owned())
+      .unwrap_or_else(|| "unknown".to_string())
+  });
   let hostname = hostname.unwrap_or_else(get_hostname);
 
   let mut last_ts = None;
@@ -48,7 +45,7 @@ pub fn parse_history_file(
         continue;
       }
     }
-    let command = BString::from(line_bytes);
+    let command = String::from_utf8_lossy(&line_bytes).into_owned();
     let invocation = Invocation {
       command,
       shellname: "bash".to_string(),

@@ -148,17 +148,17 @@ impl SequenceContext {
     let working_dir = first
       .working_directory
       .as_ref()
-      .map(|wd| String::from_utf8_lossy(wd.as_slice()).to_string())
+      .map(|wd| wd.clone())
       .unwrap_or_default();
     let hostname = first
       .hostname
       .as_ref()
-      .map(|h| String::from_utf8_lossy(h.as_slice()).to_string())
+      .map(|h| h.clone())
       .unwrap_or_default();
     let username = first
       .username
       .as_ref()
-      .map(|u| String::from_utf8_lossy(u.as_slice()).to_string())
+      .map(|u| u.clone())
       .unwrap_or_default();
 
     // Calculate temporal context from first invocation's timestamp
@@ -213,7 +213,7 @@ impl SequenceContext {
       output_characteristics.push(OutputCharacteristic::NoOutput);
 
       // Record command
-      commands.push(String::from_utf8_lossy(inv.command.as_slice()).to_string());
+      commands.push(inv.command.clone());
     }
 
     SequenceContext {
@@ -446,7 +446,6 @@ impl Default for ExecutionContext {
 mod tests {
   use super::*;
   use crate::shell_history::Invocation;
-  use bstr::BString;
 
   fn create_test_invocation(
     cmd: &str,
@@ -457,11 +456,11 @@ mod tests {
     session: i64,
   ) -> Invocation {
     Invocation {
-      command: BString::from(cmd),
+      command: cmd.to_string(),
       shellname: "test_shell".to_string(),
-      working_directory: dir.map(BString::from),
-      hostname: Some(BString::from("test-host")),
-      username: Some(BString::from("test-user")),
+      working_directory: dir.map(|s| s.to_string()),
+      hostname: Some("test-host".to_string()),
+      username: Some("test-user".to_string()),
       exit_status: exit,
       start_unix_timestamp: start_time,
       end_unix_timestamp: end_time,

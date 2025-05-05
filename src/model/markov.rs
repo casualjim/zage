@@ -65,7 +65,7 @@ impl MarkovChain {
   {
     let mut prev: Option<String> = None;
     for inv in invocations {
-      let cmd = String::from_utf8_lossy(&inv.command).to_string();
+      let cmd = inv.command.clone();
       let context_value = Context::from_invocation(&inv); // Returns Context
 
       if let Some(prev_cmd) = prev.take() {
@@ -102,7 +102,7 @@ impl MarkovChain {
   ) -> Result<Vec<String>> {
     // Find the most recent command in history with outgoing transitions
     for inv in recent_history.iter().rev() {
-      let key_cmd = String::from_utf8_lossy(&inv.command).to_string();
+      let key_cmd = inv.command.clone();
       let context_value = Context::from_invocation(inv);
 
       // 1. Try context-specific prediction if enabled
@@ -253,15 +253,14 @@ mod tests {
   use super::MarkovChain;
   use crate::db::{connect, init_table};
   use crate::shell_history::Invocation;
-  use bstr::BString;
 
   // Updated make_invocation to include optional context
   fn make_invocation(cmd: &str, cwd: Option<&str>, hostname: Option<&str>) -> Invocation {
     Invocation {
-      command: BString::from(cmd),
+      command: cmd.to_string(),
       shellname: "bash".to_string(),
-      working_directory: cwd.map(BString::from),
-      hostname: hostname.map(BString::from),
+      working_directory: cwd.map(|s| s.to_string()),
+      hostname: hostname.map(|s| s.to_string()),
       username: None, // Keep username None for simplicity for now
       exit_status: Some(0),
       start_unix_timestamp: Some(0),

@@ -177,7 +177,6 @@ mod tests {
   use crate::db;
   use crate::db::import_history;
   use crate::shell_history::Invocation;
-  use bstr::BString;
   use rusqlite::Connection;
   use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -190,7 +189,7 @@ mod tests {
       .into_iter()
       .enumerate()
       .map(|(i, cmd)| Invocation {
-        command: BString::from(cmd),
+        command: cmd.to_string(),
         shellname: "test_shell".to_string(),
         working_directory: None,
         hostname: None,

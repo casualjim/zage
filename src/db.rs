@@ -13,22 +13,9 @@ pub fn connect<P: AsRef<Path>>(db_path: P) -> Result<Connection> {
 }
 
 pub fn insert_invocation(tx: &mut Transaction, invocation: &Invocation) -> Result<()> {
-  // Convert BString to &[u8] for SQLite parameters
-  let working_directory = invocation
-    .working_directory
-    .as_ref()
-    .map(|wd| wd.as_slice())
-    .map(String::from_utf8_lossy);
-  let hostname = invocation
-    .hostname
-    .as_ref()
-    .map(|hn| hn.as_slice())
-    .map(String::from_utf8_lossy);
-  let username = invocation
-    .username
-    .as_ref()
-    .map(|un| un.as_slice())
-    .map(String::from_utf8_lossy);
+  let working_directory = invocation.working_directory.as_deref().unwrap_or_default();
+  let hostname = invocation.hostname.as_deref().unwrap_or_default();
+  let username = invocation.username.as_deref().unwrap_or_default();
 
   tx.execute(
     "INSERT INTO shell_history (
@@ -56,15 +43,15 @@ pub fn insert_invocation(tx: &mut Transaction, invocation: &Invocation) -> Resul
         )",
     params![
       uuid::Uuid::now_v7().to_string(),
-      String::from_utf8_lossy(invocation.command.as_slice()),
-      String::from_utf8_lossy(invocation.shellname.as_bytes()),
-      working_directory.unwrap_or_default(),
-      hostname.unwrap_or_default(),
-      username.unwrap_or_default(),
+      &invocation.command,
+      &invocation.shellname,
+      working_directory,
+      hostname,
+      username,
       &invocation.exit_status.unwrap_or(0),
       &invocation.start_unix_timestamp.unwrap_or(0),
       &invocation.end_unix_timestamp.unwrap_or(0),
-      &invocation.session_id.to_string(),
+      &invocation.session_id,
     ],
   )?;
   Ok(())
@@ -171,11 +158,11 @@ pub fn get_recent_invocations(conn: &mut Connection, limit: usize) -> Result<Vec
       let username: Option<String> = row.get(4)?;
 
       Ok(Invocation {
-        command: bstr::BString::from(command_str),
+        command: command_str,
         shellname: shellname_str,
-        working_directory: working_dir.map(bstr::BString::from),
-        hostname: hostname.map(bstr::BString::from),
-        username: username.map(bstr::BString::from),
+        working_directory: working_dir,
+        hostname,
+        username,
         exit_status: row.get(5)?,
         start_unix_timestamp: row.get(6)?,
         end_unix_timestamp: row.get(7)?,
@@ -380,10 +367,7 @@ pub struct RawSequenceScore {
 }
 
 /// Retrieves top scored sequences by lift.
-pub fn get_sequence_scores(
-  conn: &mut Connection,
-  limit: usize,
-) -> Result<Vec<RawSequenceScore>> {
+pub fn get_sequence_scores(conn: &mut Connection, limit: usize) -> Result<Vec<RawSequenceScore>> {
   let mut stmt = conn.prepare(
     "SELECT sequence, support, confidence, lift, context
      FROM sequence_scores
@@ -392,7 +376,7 @@ pub fn get_sequence_scores(
   )?;
   let rows = stmt.query_map([limit as i64], |row| {
     let sequence_json: String = row.get(0)?;
-    
+
     Ok(RawSequenceScore {
       sequence_json,
       support: row.get(1)?,
@@ -411,7 +395,6 @@ pub fn get_sequence_scores(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use bstr::BString;
 
   #[test]
   fn test_init_table() -> Result<()> {
@@ -437,11 +420,11 @@ mod tests {
     tx.commit()?;
 
     let invocation = Invocation {
-      command: BString::from("ls -la"),
+      command: "ls -la".to_string(),
       shellname: "zsh".to_string(),
-      working_directory: Some(BString::from("/tmp")),
-      hostname: Some(BString::from("host")),
-      username: Some(BString::from("user")),
+      working_directory: Some("/tmp".to_string()),
+      hostname: Some("host".to_string()),
+      username: Some("user".to_string()),
       exit_status: Some(0),
       start_unix_timestamp: Some(123),
       end_unix_timestamp: Some(124),

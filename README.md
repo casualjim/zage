@@ -45,10 +45,10 @@ Zage automatically predicts the next command you're likely to run based on your 
 Example workflow:
 
 ```bash
-$ git pull
-$ docker compose build
-$ docker compose up -d
-$ # Zage predicts: docker compose logs -f service-1 | humanlog
+git pull
+docker compose build
+docker compose up -d
+# Zage predicts: docker compose logs -f service-1 | humanlog
 ```
 
 ## How It Works
@@ -70,5 +70,9 @@ MIT
 
 ## Acknowledgments
 
-- Inspired by projects like [McFly](https://github.com/cantino/mcfly)
+- Inspired by projects like:
+  - [McFly](https://github.com/cantino/mcfly)
+  - [Warp](https://github.com/warp-rs/warp)
+  - [zsh-autosuggestions](https://github.com/zsh-users/zsh-autosuggestions)
+  - [pxhist](https://github.com/chipturner/pxhist)
 - Built with Rust 🦀

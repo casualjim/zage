@@ -1,4 +1,3 @@
-use bstr::BString;
 use rusqlite::Connection;
 use zage::Result;
 use zage::db::init_table;
@@ -9,9 +8,9 @@ use zage::shell_history::Invocation;
 /// Helper to create a test Invocation
 fn create_test_invocation(command: &str, working_dir: Option<&str>) -> Invocation {
   Invocation {
-    command: BString::from(command.as_bytes()),
+    command: command.to_string(),
     shellname: "zsh".to_string(),
-    working_directory: working_dir.map(|wd| BString::from(wd.as_bytes())),
+    working_directory: working_dir.map(|wd| wd.to_string()),
     hostname: None,
     username: None,
     exit_status: None,

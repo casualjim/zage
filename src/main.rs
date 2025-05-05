@@ -1,6 +1,5 @@
 use std::path::PathBuf;
 
-use bstr::BString;
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
 use dirs::home_dir;
@@ -50,7 +49,7 @@ enum Commands {
   /// Train prediction model
   Train {
     /// Model type to use (default: ngram)
-    #[arg(long, default_value = "ngram")]
+    #[arg(long, default_value = "markov")]
     model_type: String,
 
     /// N-gram size for ngram model (default: 2)
@@ -72,8 +71,8 @@ enum Commands {
     #[arg(short, long, default_value = "5")]
     count: usize,
 
-    /// Model type to use (default: ngram)
-    #[arg(long, default_value = "ngram")]
+    /// Model type to use (default: markov)
+    #[arg(long, default_value = "markov")]
     model_type: String,
 
     /// N-gram size for ngram model (default: 2)
@@ -91,8 +90,8 @@ enum Commands {
 
   /// Show model statistics
   Stats {
-    /// Model type to use (default: ngram)
-    #[arg(long, default_value = "ngram")]
+    /// Model type to use (default: markov)
+    #[arg(long, default_value = "markov")]
     model_type: String,
 
     /// N-gram size for ngram model (default: 2)
@@ -190,11 +189,11 @@ fn main() -> Result<()> {
       });
 
       let mut conn = connect(&db_path)?;
-      let hostname_bs = hostname.clone().map(|h| BString::from(h.into_bytes()));
-      let username_bs = username.clone().map(|u| BString::from(u.into_bytes()));
+      let hostname_s = hostname.clone();
+      let username_s = username.clone();
       let invocations = match shell {
-        Shell::Zsh => parse_zsh_history(&history_file, hostname_bs.clone(), username_bs.clone())?,
-        Shell::Bash => parse_bash_history(&history_file, hostname_bs, username_bs)?,
+        Shell::Zsh => parse_zsh_history(&history_file, hostname_s.clone(), username_s.clone())?,
+        Shell::Bash => parse_bash_history(&history_file, hostname_s, username_s)?,
       };
       import_history(&mut conn, invocations)?;
       info!("Imported history from {:?}", history_file);
@@ -277,7 +276,7 @@ fn main() -> Result<()> {
           let context: Vec<String> = recent_invocations
             .iter()
             .skip(recent_invocations.len().saturating_sub(model.n() - 1))
-            .map(|inv| String::from_utf8_lossy(&inv.command).to_string())
+            .map(|inv| inv.command.clone())
             .collect();
 
           // Get the current working directory
@@ -346,7 +345,12 @@ fn main() -> Result<()> {
           let top_n_sequences = 5;
 
           // Run SQL-based sequence analysis
-          analyze_and_store_sequences(&mut conn, seq_min_support, seq_min_confidence, seq_min_lift)?;
+          analyze_and_store_sequences(
+            &mut conn,
+            seq_min_support,
+            seq_min_confidence,
+            seq_min_lift,
+          )?;
           let raw_scores = get_sequence_scores(&mut conn, top_n_sequences)?;
 
           // Convert raw scores to model scores
@@ -436,9 +440,8 @@ fn main() -> Result<()> {
       // Get hostname and username (best effort)
       let hostname = get_hostname();
       let username = uzers::get_current_username()
-        .as_ref()
-        .map(|v| BString::from(v.as_encoded_bytes()))
-        .unwrap_or_else(|| BString::from("unknown"));
+        .map(|v| v.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown".to_string());
 
       // Generate a session ID if none provided (e.g., using PID)
       // For now, use a placeholder or default.
@@ -447,11 +450,11 @@ fn main() -> Result<()> {
 
       // Create Invocation struct
       let invocation = Invocation {
-        command: BString::from(command.as_bytes()),
+        command: command.clone(),
         shellname: "zsh".to_string(), // Assume zsh for now
-        working_directory: Some(BString::from(working_directory.as_bytes())),
-        hostname: Some(hostname),
-        username: Some(username),
+        working_directory: Some(working_directory.clone()),
+        hostname: Some(hostname.clone()),
+        username: Some(username.clone()),
         exit_status: Some(*exit_status),
         start_unix_timestamp: Some(*start_timestamp),
         end_unix_timestamp: Some(*end_timestamp),

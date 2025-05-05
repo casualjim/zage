@@ -217,7 +217,7 @@ impl NGramModel {
 
   /// Convert an invocation to a command string for the model
   fn invocation_to_command(invocation: &Invocation) -> String {
-    String::from_utf8_lossy(&invocation.command).to_string()
+    invocation.command.clone()
   }
 
   /// Find a context frequency entry or create a new one
@@ -458,14 +458,13 @@ impl PredictionModel for NGramModel {
 mod tests {
   use super::*;
   use crate::model::context::Context;
-  use bstr::BString;
   use rusqlite::Connection;
 
   fn create_test_invocation(command: &str, working_dir: Option<&str>) -> Invocation {
     Invocation {
-      command: BString::from(command.as_bytes()),
+      command: command.to_string(),
       shellname: "zsh".to_string(),
-      working_directory: working_dir.map(|wd| BString::from(wd.as_bytes())),
+      working_directory: working_dir.map(|wd| wd.to_string()),
       hostname: None,
       username: None,
       exit_status: None,
@@ -790,7 +789,9 @@ mod tests {
       create_test_invocation("ls", Some("/dir2")),
       create_test_invocation("cmd2", Some("/dir2")),
     ];
+
     model.train(invocations)?;
+
     let recent1 = vec![create_test_invocation("ls", Some("/dir1"))];
 
     let predictions = model.predict(&recent1, 1)?;
@@ -814,8 +815,8 @@ mod tests {
     model.set_use_context(true);
     // Context A: dir=/proj, host=h1, user=u1, exit=0 -> next = cmdA
     let mut inv1 = create_test_invocation("ls", Some("/proj"));
-    inv1.hostname = Some(BString::from("h1".as_bytes()));
-    inv1.username = Some(BString::from("u1".as_bytes()));
+    inv1.hostname = Some("h1".to_string());
+    inv1.username = Some("u1".to_string());
     inv1.exit_status = Some(0);
     let mut inv2 = create_test_invocation("cmdA", Some("/proj"));
     inv2.hostname = inv1.hostname.clone();
@@ -823,8 +824,8 @@ mod tests {
     inv2.exit_status = inv1.exit_status;
     // Context B: same dir, host=h2, user=u2, exit=1 -> next = cmdB
     let mut inv3 = create_test_invocation("ls", Some("/proj"));
-    inv3.hostname = Some(BString::from("h2".as_bytes()));
-    inv3.username = Some(BString::from("u2".as_bytes()));
+    inv3.hostname = Some("h2".to_string());
+    inv3.username = Some("u2".to_string());
     inv3.exit_status = Some(1);
     let mut inv4 = create_test_invocation("cmdB", Some("/proj"));
     inv4.hostname = inv3.hostname.clone();
@@ -853,8 +854,8 @@ mod tests {
     model.set_use_context(true);
     // Context X: host=h1, user=u1, exit=0 -> next=out1
     let mut invx = create_test_invocation("run", Some("/proj"));
-    invx.hostname = Some(BString::from("h1".as_bytes()));
-    invx.username = Some(BString::from("u1".as_bytes()));
+    invx.hostname = Some("h1".to_string());
+    invx.username = Some("u1".to_string());
     invx.exit_status = Some(0);
     let mut outx = create_test_invocation("out1", Some("/proj"));
     outx.hostname = invx.hostname.clone();
@@ -862,8 +863,8 @@ mod tests {
     outx.exit_status = invx.exit_status;
     // Context Y: host=h1, user=u2, exit=1 -> next=out2
     let mut invy = create_test_invocation("run", Some("/proj"));
-    invy.hostname = Some(BString::from("h1".as_bytes()));
-    invy.username = Some(BString::from("u2".as_bytes()));
+    invy.hostname = Some("h1".to_string());
+    invy.username = Some("u2".to_string());
     invy.exit_status = Some(1);
     let mut outy = create_test_invocation("out2", Some("/proj"));
     outy.hostname = invy.hostname.clone();
@@ -878,8 +879,8 @@ mod tests {
     assert_eq!(predy, vec!["out2".to_string()]);
     // Partial context: same host/user but missing exit -> fallback to global
     let mut inv_partial = create_test_invocation("run", Some("/proj"));
-    inv_partial.hostname = Some(BString::from("h1".as_bytes()));
-    inv_partial.username = Some(BString::from("u1".as_bytes())); // no exit_status
+    inv_partial.hostname = Some("h1".to_string());
+    inv_partial.username = Some("u1".to_string()); // no exit_status
     let preds_partial = model.predict(&[inv_partial], 2)?;
     // Should include both out1 and out2 globally
     assert!(preds_partial.contains(&"out1".to_string()));

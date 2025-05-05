@@ -1,7 +1,4 @@
-use bstr::BString;
 use serde::{Deserialize, Serialize};
-use std::env;
-use std::os::unix::ffi::OsStrExt;
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
@@ -32,11 +29,11 @@ impl std::str::FromStr for Shell {
 
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct Invocation {
-  pub command: BString,
+  pub command: String,
   pub shellname: String,
-  pub working_directory: Option<BString>,
-  pub hostname: Option<BString>,
-  pub username: Option<BString>,
+  pub working_directory: Option<String>,
+  pub hostname: Option<String>,
+  pub username: Option<String>,
   pub exit_status: Option<i64>,
   pub start_unix_timestamp: Option<i64>,
   pub end_unix_timestamp: Option<i64>,
@@ -59,11 +56,13 @@ fn generate_import_session_id(histfile: &Path) -> i64 {
   }
 }
 
-pub fn get_hostname() -> BString {
-  env::var_os("ZAGE_HOSTNAME")
-    .unwrap_or_else(|| hostname::get().unwrap_or_default())
-    .as_bytes()
-    .into()
+pub fn get_hostname() -> String {
+  std::env::var("ZAGE_HOSTNAME").unwrap_or_else(|_| {
+    hostname::get()
+      .unwrap_or_default()
+      .into_string()
+      .unwrap_or_default()
+  })
 }
 
 fn dedup_invocations(invocations: Vec<Invocation>) -> Vec<Invocation> {

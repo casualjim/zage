@@ -87,7 +87,9 @@ fn test_import_and_predict() -> Result<()> {
     .env("RUST_LOG", "info")
     .arg("--db-path")
     .arg(db_file.to_str().unwrap())
-    .arg("train");
+    .arg("train")
+    .arg("--model-type")
+    .arg("ngram");
   train_cmd
     .assert()
     .success()
@@ -99,7 +101,9 @@ fn test_import_and_predict() -> Result<()> {
     .env("RUST_LOG", "info")
     .arg("--db-path")
     .arg(db_file.to_str().unwrap())
-    .arg("predict");
+    .arg("predict")
+    .arg("--model-type")
+    .arg("ngram");
   predict_cmd
     .assert()
     .success()
