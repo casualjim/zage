@@ -83,6 +83,10 @@ enum Commands {
     /// Show prediction probabilities
     #[arg(short, long)]
     show_probability: bool,
+
+    /// Skip sequence detection in predict
+    #[arg(long)]
+    skip_sequence: bool,
   },
 
   /// Show model statistics
@@ -252,6 +256,7 @@ fn main() -> Result<()> {
       model_type,
       n,
       show_probability,
+      skip_sequence,
     }) => {
       info!("Predicting next command using {} model", model_type);
 
@@ -325,53 +330,55 @@ fn main() -> Result<()> {
         }
       }
 
-      // Fetch a larger history for sequence detection
-      // TODO: Consider making the limit configurable or fetching all efficiently
-      let all_invocations = get_recent_invocations(&mut conn, 10000)?;
-      let total_invocations = all_invocations.len();
+      if !*skip_sequence {
+        // Fetch a larger history for sequence detection
+        let all_invocations = get_recent_invocations(&mut conn, 10000)?;
+        let total_invocations = all_invocations.len();
 
-      // --- Sequence Detection ---
-      if total_invocations > 0 {
-        // Only run if there's history
-        info!("Running sequence detection...");
+        // --- Sequence Detection ---
+        if total_invocations > 0 {
+          info!("Running sequence detection...");
 
-        // Define sequence detection parameters (use defaults for now)
-        let seq_min_support = 2;
-        let seq_min_confidence = 0.5;
-        let seq_min_lift = 1.5;
-        let top_n_sequences = 5;
+          // Define sequence detection parameters (use defaults for now)
+          let seq_min_support = 2;
+          let seq_min_confidence = 0.5;
+          let seq_min_lift = 1.5;
+          let top_n_sequences = 5;
 
-        // Run SQL-based sequence analysis
-        analyze_and_store_sequences(&mut conn, seq_min_support, seq_min_confidence, seq_min_lift)?;
-        let raw_scores = get_sequence_scores(&mut conn, top_n_sequences)?;
+          // Run SQL-based sequence analysis
+          analyze_and_store_sequences(&mut conn, seq_min_support, seq_min_confidence, seq_min_lift)?;
+          let raw_scores = get_sequence_scores(&mut conn, top_n_sequences)?;
 
-        // Convert raw scores to model scores
-        let scores: Vec<SequenceScore> = raw_scores
-          .iter()
-          .filter_map(|raw| SequenceScore::from_raw(raw).ok())
-          .collect();
+          // Convert raw scores to model scores
+          let scores: Vec<SequenceScore> = raw_scores
+            .iter()
+            .filter_map(|raw| SequenceScore::from_raw(raw).ok())
+            .collect();
 
-        if !scores.is_empty() {
-          println!(
-            "\n--- Detected Command Sequences (Top {} by Lift) ---",
-            top_n_sequences
-          );
-          for (i, s) in scores.iter().enumerate() {
-            let seq_str = s.sequence.join(" → ");
+          if !scores.is_empty() {
             println!(
-              "  {}. {} (S: {}, C: {:.2}, L: {:.2})",
-              i + 1,
-              seq_str,
-              s.support,
-              s.confidence,
-              s.lift
+              "\n--- Detected Command Sequences (Top {} by Lift) ---",
+              top_n_sequences
             );
+            for (i, s) in scores.iter().enumerate() {
+              let seq_str = s.sequence.join(" → ");
+              println!(
+                "  {}. {} (S: {}, C: {:.2}, L: {:.2})",
+                i + 1,
+                seq_str,
+                s.support,
+                s.confidence,
+                s.lift
+              );
+            }
+          } else {
+            println!("\n--- No command sequences detected with current thresholds ---");
           }
         } else {
-          println!("\n--- No command sequences detected with current thresholds ---");
+          println!("\n--- Skipping sequence detection (no history) ---");
         }
       } else {
-        println!("\n--- Skipping sequence detection (no history) ---");
+        info!("Skipping sequence detection per user request");
       }
     }
 
