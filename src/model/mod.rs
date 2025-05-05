@@ -2,6 +2,8 @@
 mod context;
 pub mod markov;
 pub mod ngram;
+pub mod sequence;
+mod sequence_context;
 
 use crate::Result;
 use crate::shell_history::Invocation;

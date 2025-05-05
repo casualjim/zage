@@ -10,7 +10,11 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use uzers;
-use zage::db::{connect, get_recent_invocations, import_history, init, insert_invocation};
+use zage::db::{
+  connect, get_recent_invocations, get_sequence_scores, import_history, init, insert_invocation,
+};
+use zage::model::sequence::SequenceScore;
+use zage::model::sequence::analyze_and_store_sequences;
 use zage::model::{PredictionModel, markov::MarkovChain, ngram::NGramModel};
 use zage::shell_history::{Invocation, Shell, get_hostname, parse_bash_history, parse_zsh_history};
 
@@ -57,9 +61,9 @@ enum Commands {
     #[arg(long, default_value = "1000")]
     max_commands: usize,
 
-    /// Enable directory context for predictions
+    /// Enable context (directory, hostname, etc.) for predictions
     #[arg(long, default_value = "true")]
-    use_dir_context: bool,
+    use_context: bool,
   },
 
   /// Predict next command
@@ -90,6 +94,19 @@ enum Commands {
     /// N-gram size for ngram model (default: 2)
     #[arg(long, default_value = "2")]
     n: usize,
+  },
+
+  /// Analyze and store frequent command sequences
+  AnalyzeSequences {
+    /// Minimum support count
+    #[arg(long, default_value = "2")]
+    min_support: usize,
+    /// Minimum confidence threshold
+    #[arg(long, default_value = "0.5")]
+    min_confidence: f64,
+    /// Minimum lift threshold
+    #[arg(long, default_value = "1.5")]
+    min_lift: f64,
   },
 
   /// (Internal) Record a single command invocation (used by shell hooks)
@@ -183,7 +200,7 @@ fn main() -> Result<()> {
       model_type,
       n,
       max_commands,
-      use_dir_context,
+      use_context,
     }) => {
       info!("Training {} model with n={}", model_type, n);
 
@@ -201,7 +218,7 @@ fn main() -> Result<()> {
         "ngram" => {
           // Create a new model or load existing one
           let mut model = NGramModel::load_from_db(&mut conn, *n)?;
-          model.set_use_context(*use_dir_context);
+          model.set_use_context(*use_context);
 
           // Train the model
           model.train(invocations)?;
@@ -307,6 +324,55 @@ fn main() -> Result<()> {
           println!("Unsupported model type: {}", model_type);
         }
       }
+
+      // Fetch a larger history for sequence detection
+      // TODO: Consider making the limit configurable or fetching all efficiently
+      let all_invocations = get_recent_invocations(&mut conn, 10000)?;
+      let total_invocations = all_invocations.len();
+
+      // --- Sequence Detection ---
+      if total_invocations > 0 {
+        // Only run if there's history
+        info!("Running sequence detection...");
+
+        // Define sequence detection parameters (use defaults for now)
+        let seq_min_support = 2;
+        let seq_min_confidence = 0.5;
+        let seq_min_lift = 1.5;
+        let top_n_sequences = 5;
+
+        // Run SQL-based sequence analysis
+        analyze_and_store_sequences(&mut conn, seq_min_support, seq_min_confidence, seq_min_lift)?;
+        let raw_scores = get_sequence_scores(&mut conn, top_n_sequences)?;
+
+        // Convert raw scores to model scores
+        let scores: Vec<SequenceScore> = raw_scores
+          .iter()
+          .filter_map(|raw| SequenceScore::from_raw(raw).ok())
+          .collect();
+
+        if !scores.is_empty() {
+          println!(
+            "\n--- Detected Command Sequences (Top {} by Lift) ---",
+            top_n_sequences
+          );
+          for (i, s) in scores.iter().enumerate() {
+            let seq_str = s.sequence.join(" → ");
+            println!(
+              "  {}. {} (S: {}, C: {:.2}, L: {:.2})",
+              i + 1,
+              seq_str,
+              s.support,
+              s.confidence,
+              s.lift
+            );
+          }
+        } else {
+          println!("\n--- No command sequences detected with current thresholds ---");
+        }
+      } else {
+        println!("\n--- Skipping sequence detection (no history) ---");
+      }
     }
 
     Some(Commands::Stats { model_type, n }) => {
@@ -331,6 +397,20 @@ fn main() -> Result<()> {
           println!("Unsupported model type: {}", model_type);
         }
       }
+    }
+
+    Some(Commands::AnalyzeSequences {
+      min_support,
+      min_confidence,
+      min_lift,
+    }) => {
+      info!(
+        "Analyzing command sequences with support ≥ {}, confidence ≥ {}, lift ≥ {}",
+        min_support, min_confidence, min_lift
+      );
+      let mut conn = connect(&db_path)?;
+      analyze_and_store_sequences(&mut conn, *min_support, *min_confidence, *min_lift)?;
+      println!("Sequence analysis complete and stored in sequence_scores table.");
     }
 
     Some(Commands::Record {

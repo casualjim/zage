@@ -12,58 +12,134 @@ Zage aims to predict the next shell command a user is likely to run based on:
 - Exit status of previous commands
 - Time and contextual patterns
 
-Unlike simple history search tools, Zage uses LSTM neural networks to identify and learn complex command sequences within different contexts, working as a seamless plugin for Zsh (and potentially Bash).
+Unlike simple history search tools, Zage uses advanced models (starting with N-gram, with Markov and LSTM planned) to identify and learn complex command sequences within different contexts, working as a seamless plugin for Zsh and Bash.
 
 ## Current Project Structure
 
-```rust
+```text
 zage/
 ├── src/
-│   ├── config.rs          # Configuration management
-│   ├── db.rs              # Database connection and operations
-│   ├── err.rs             # Error types and handling
-│   ├── lib.rs             # Library entry point
-│   ├── main.rs            # CLI entry point
-│   └── shell_history/     # Shell history parsing
-│       ├── mod.rs
-│       ├── bash.rs        # Bash history parser
-│       └── zsh.rs         # Zsh history parser
+│   ├── config.rs           # Configuration management
+│   ├── db.rs               # Database connection and operations
+│   ├── err.rs              # Error types and handling
+│   ├── lib.rs              # Library entry point
+│   ├── main.rs             # CLI entry point and logic
+│   ├── model/              # ML model implementations
+│   │   ├── context.rs      # Context struct for predictions
+│   │   ├── markov.rs       # Markov model implementation
+│   │   ├── mod.rs
+│   │   ├── ngram.rs        # N-gram model (default)
+│   │   ├── sequence.rs     # Sequence detection
+│   │   └── sequence_context.rs # Sequence context logic
+│   ├── shell_history/      # Shell history parsing
+│   │   ├── bash.rs         # Bash history parser
+│   │   ├── mod.rs
+│   │   └── zsh.rs          # Zsh history parser
+│   └── shell_integration/  # Shell integration scripts
+│       ├── bash.sh         # Bash integration script
+│       └── zsh.zsh         # Zsh integration script
 └── docs/
     └── dev/
-        └── development.md # This file
+        └── development.md  # This file
 ```
 
-## Target Architecture
+## Dependencies
 
-```rust
-zage/
-├── src/
-│   ├── cli.rs             # Command-line interface handling
-│   ├── config.rs          # Configuration management
-│   ├── db.rs              # Database connection and operations
-│   ├── err.rs             # Error types and handling
-│   ├── lib.rs             # Library entry point
-│   ├── main.rs            # CLI entry point
-│   ├── model/             # ML model implementation
-│   │   ├── mod.rs
-│   │   ├── features.rs    # Feature extraction
-│   │   ├── lstm.rs        # LSTM implementation
-│   │   ├── markov.rs      # Simpler Markov model (initial implementation)
-│   │   └── training.rs    # Model training logic
-│   ├── shell_history/     # Shell history parsing
-│   │   ├── mod.rs
-│   │   ├── bash.rs        # Bash history parser
-│   │   └── zsh.rs         # Zsh history parser
-│   └── shell_integration/ # Shell integration scripts
-│       ├── mod.rs
-│       ├── bash.rs        # Bash integration (future)
-│       └── zsh.rs         # Zsh integration
-└── docs/
-    └── dev/
-        └── development.md # This file
+Zage uses the following main dependencies:
+
+- `clap` for CLI parsing
+- `color-eyre`, `thiserror`, `miette` for error handling
+- `tracing` for logging
+- `serde`, `serde_json`, `bstr` for serialization
+- `rusqlite` for SQLite database
+- `uuid`, `dirs`, `rand`, `itertools`, `jiff`, `sqlite-vss` for various utilities
+
+See `Cargo.toml` for full list and versions. Rust 2024 edition is required.
+
+## CLI Usage
+
+Zage provides a command-line interface with the following subcommands (see `zage --help` for all options):
+
+```bash
+# Import shell history
+zage import [--file <FILE>] [--hostname <HOST>] [--username <USER>] [--shell <SHELL>]
+
+# Train prediction model
+zage train [--model_type <MODEL>] [--n <N>] [--max_commands <LIMIT>] [--use_context <BOOL>]
+
+# Predict next command
+zage predict [--count <N>] [--model_type <MODEL>] [--n <N>] [--show_probability]
+
+# Show model statistics
+zage stats [--model_type <MODEL>] [--n <N>]
+
+# Analyze and store frequent command sequences
+zage analyze-sequences [--min_support <N>] [--min_length <N>]
 ```
 
-### Data Flow
+- `model_type` can be `ngram` (default) or `markov` (experimental).
+- `n` defaults to 2 for N-gram.
+- `use_context` enables context-aware predictions (directory, hostname, username, exit status).
+
+## Development Phases
+
+### Phase 1: Foundation (Complete)
+
+- Project setup, CLI, error handling, config, shell history parsing, SQLite schema, command collection.
+
+### Phase 2: Simple Prediction (Mostly Complete)
+
+- [x] N-gram model with context (directory, host, user, exit status)
+- [x] Markov model (experimental)
+- [x] Zsh and Bash integration scripts
+- [x] Sequence detection (complete)
+
+### Phase 3: LSTM Implementation (Planned)
+
+- [ ] Command embedding generation
+- [ ] Feature extraction (including command output)
+- [ ] LSTM model (using `tch-rs`)
+- [ ] Training/prediction pipeline
+
+### Phase 4: Advanced Features (Planned)
+
+- [ ] Output awareness, time-based patterns, multi-terminal, performance optimizations
+- [ ] BitNet model (experimental)
+
+## Database Schema
+
+Schema is up-to-date and matches the codebase. See `src/db.rs` for implementation.
+
+## Testing
+
+- Unit tests and integration tests are provided for all core models and features.
+- Run tests with:
+
+```bash
+cargo test
+```
+
+## Shell Integration
+
+- Zsh and Bash integration scripts are in `src/shell_integration/` as `zsh.zsh` and `bash.sh`.
+- These scripts hook into the shell to record command execution and output.
+
+## Coding Style & Conventions
+
+- Idiomatic Rust (2024 edition)
+- Error handling with `Result`, `color-eyre`, `thiserror`
+- Modular code organization
+- Use of environment variables for config
+- Comprehensive Rustdoc and inline comments
+
+## Contributing
+
+- Ensure you have the correct Rust version (`rustup update stable`)
+- Run tests before submitting PRs
+- Follow the module structure and error handling conventions
+- Document new features and update this file as needed
+
+## Data Flow
 
 1. **Data Collection**:
    - Hook into shell to capture commands as they're executed
@@ -84,48 +160,11 @@ zage/
    - Rank predictions by confidence score
    - Automatically suggest the next command
 
-## CLI Usage
-
-Zage provides a command-line interface with the following subcommands:
-
-```bash
-# Import shell history
-zage import [OPTIONS]
-
-Options:
-  --file <FILE>       Path to history file (defaults to $HISTFILE env var)
-  --hostname <n>      Override hostname for import
-  --username <n>      Override username for import
-  --shell <SHELL>     Shell type (bash or zsh); defaults to $SHELL env var
-
-# Train prediction model
-zage train [OPTIONS]
-
-Options:
-  --model <MODEL>     Model type to train (ngram, default: ngram)
-  --n <N>             N value for N-gram model (default: 3)
-  --limit <LIMIT>     Limit number of history entries to use (default: all)
-
-# Predict next command
-zage predict [OPTIONS]
-
-Options:
-  --model <MODEL>     Model to use for prediction (ngram, default: ngram)
-  --n <N>             Number of predictions to return (default: 5)
-  --context <DIR>     Use directory context for prediction (default: true)
-
-# Show model statistics
-zage stats [OPTIONS]
-
-Options:
-  --model <MODEL>     Model to show statistics for (ngram, default: ngram)
-```
-
 ## Implementation Plan
 
 The development will proceed in phases, each building on the previous:
 
-### Phase 1: Foundation (Current)
+### Phase 1: Foundation
 
 - [x] Project setup with CLI framework
 - [x] Basic error handling
@@ -134,7 +173,7 @@ The development will proceed in phases, each building on the previous:
 - [x] SQLite database schema and operations  # Completed: includes schema init, insert_invocation, and tests
 - [x] Command collection system with CLI import command
 
-### Phase 2: Simple Prediction
+### Phase 2: Simple Prediction (Current)
 
 - [x] Implement N-gram model for baseline predictions
   - [x] Core N-gram implementation with frequency tracking
@@ -144,7 +183,13 @@ The development will proceed in phases, each building on the previous:
   - [x] Comprehensive test suite for model validation
 - [x] Add Markov chain model with context awareness
 - [x] Zsh plugin integration  # Shell hook script with debug logging and silent background recording
-- [ ] Initial sequence detection algorithm
+- [x] Initial sequence detection algorithm
+  - [x] Define sequence detection objectives and requirements
+  - [x] Design multi-dimensional context representation for sequences
+  - [x] Implement sequence scoring and threshold criteria
+  - [x] Integrate detection algorithm with existing models and contexts
+  - [x] Develop unit tests and benchmarking suite for sequence detection
+  - [x] Validate detection performance on real shell history samples
 
 ### Phase 3: LSTM Implementation
 
@@ -159,7 +204,7 @@ The development will proceed in phases, each building on the previous:
 
 - [x] Context enhancement with directory, exit status
   - [x] Directory-aware predictions implemented in N-gram model
-  - [ ] Exit status awareness for improved context
+  - [x] Exit status awareness for improved context
 - [ ] Command output awareness (stdout/stderr)
 - [ ] Time-based patterns detection
 - [ ] Multi-terminal awareness
@@ -268,14 +313,6 @@ When timestamps are enabled (`HISTTIMEFORMAT`), the format becomes:
 echo "Example command"
 ```
 
-### Async Implementation
-
-This project uses Tokio for asynchronous operations:
-
-- Database operations are performed asynchronously
-- Shell integration uses async channels for communication
-- Model training and prediction run in background tasks
-
 ## N-gram Model Implementation
 
 The N-gram model is the first prediction model implemented in Zage. It provides a solid baseline for command prediction based on command history and working directory context.
@@ -325,6 +362,7 @@ Incorporating stdout and stderr from commands can significantly enhance predicti
 ### Capture Approach
 
 1. **Shell Integration**:
+
    ```bash
    # Example of command output capture in shell hooks
    command_exec_hook() {
@@ -345,6 +383,7 @@ Incorporating stdout and stderr from commands can significantly enhance predicti
    ```
 
 2. **Rust Implementation**:
+
    ```rust
    // Function to process and store command outputs
    pub async fn store_command_output(
@@ -413,6 +452,7 @@ BitNet with ternary weights (-1, 0, +1) offers an efficient alternative to LSTMs
    - Efficient matrix operations that avoid multiplication
 
 2. **Integration Strategy**:
+
    ```rust
    pub struct BitNetModel {
        // Model architecture fields
@@ -455,3 +495,21 @@ BitNet with ternary weights (-1, 0, +1) offers an efficient alternative to LSTMs
 - Privacy controls and sensitive command filtering
 - Remote synchronization between machines
 - Pre-trained models for common command patterns
+
+### Testing and Benchmarking
+
+#### Unit Tests
+
+Run the unit tests for sequence detection:
+
+```bash
+cargo test -- --nocapture
+```
+
+#### Benchmarks
+
+Run the benchmarks using Criterion:
+
+```bash
+cargo bench
+```
