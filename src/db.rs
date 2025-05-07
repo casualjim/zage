@@ -2,7 +2,9 @@ use std::{path::Path, time::Duration};
 
 use crate::{Result, shell_history::Invocation};
 use exemplar::Model;
+use rusqlite::ffi::sqlite3_auto_extension;
 use rusqlite::{Connection, Transaction, params};
+use sqlite_vec::sqlite3_vec_init;
 
 #[derive(Debug, Model)]
 #[table("shell_history")]
@@ -28,7 +30,11 @@ pub struct DBInvocation {
 }
 
 pub fn connect<P: AsRef<Path>>(db_path: P) -> Result<Connection> {
+  unsafe {
+    sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
+  }
   let conn = Connection::open(db_path)?;
+
   conn.busy_timeout(Duration::from_millis(500))?;
   conn.pragma_update(None, "journal_mode", "WAL")?;
   conn.pragma_update(None, "temp_store", "MEMORY")?;

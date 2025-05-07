@@ -1,4 +1,5 @@
 use miette::Diagnostic;
+use std::error::Error as StdError;
 use thiserror::Error;
 
 pub type Result<T, E = ZageError> = std::result::Result<T, E>;
@@ -28,4 +29,16 @@ pub enum ZageError {
   #[error("Serialization error")]
   #[diagnostic(code(zage::serialization_error))]
   SerializationError(#[from] serde_json::Error),
+
+  #[error("HF Hub error")]
+  #[diagnostic(code(zage::hf_hub_error))]
+  HfHubError(#[from] hf_hub::api::sync::ApiError),
+
+  #[error("Candle error")]
+  #[diagnostic(code(zage::candle_error))]
+  CandleError(#[from] candle_core::Error),
+
+  #[error("Generic error")]
+  #[diagnostic(code(zage::generic_error))]
+  GenericError(Box<dyn StdError + Send + Sync>),
 }

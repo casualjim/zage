@@ -1,8 +1,8 @@
-// Module for prediction models
 mod context;
-pub mod lstm;
 pub mod markov;
+pub mod neural;
 pub mod ngram;
+mod pretrained_embedder;
 pub mod sequence;
 mod sequence_context;
 

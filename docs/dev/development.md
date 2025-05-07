@@ -17,30 +17,67 @@ Unlike simple history search tools, Zage uses advanced models (starting with N-g
 ## Current Project Structure
 
 ```text
-zage/
-├── src/
-│   ├── config.rs           # Configuration management
-│   ├── db.rs               # Database connection and operations
-│   ├── err.rs              # Error types and handling
-│   ├── lib.rs              # Library entry point
-│   ├── main.rs             # CLI entry point and logic
-│   ├── model/              # ML model implementations
-│   │   ├── context.rs      # Context struct for predictions
-│   │   ├── markov.rs       # Markov model implementation
+.
+├── Cargo.lock
+├── Cargo.toml
+├── CLAUDE.md
+├── docs
+│   ├── dev
+│   │   ├── development.md
+│   │   ├── neural_model_plan.md
+│   │   ├── scenarios.yaml
+│   │   └── testing.md
+│   └── predictions.md
+├── justfile
+├── LICENSE
+├── README.md
+├── rustfmt.toml
+├── src
+│   ├── bin
+│   │   ├── simulate.rs
+│   │   ├── simulate_context.rs
+│   │   └── simulate_workflow.rs
+│   ├── config.rs
+│   ├── db
+│   │   ├── analyze-bigram.sql
+│   │   ├── analyze-trigram.sql
+│   │   ├── get-recent-invocations.sql
+│   │   └── schema-v0.sql
+│   ├── db.rs
+│   ├── err.rs
+│   ├── lib.rs
+│   ├── main.rs
+│   ├── model
+│   │   ├── context.rs
+│   │   ├── markov.rs
 │   │   ├── mod.rs
-│   │   ├── ngram.rs        # N-gram model (default)
-│   │   ├── sequence.rs     # Sequence detection
-│   │   └── sequence_context.rs # Sequence context logic
-│   ├── shell_history/      # Shell history parsing
-│   │   ├── bash.rs         # Bash history parser
+│   │   ├── neural.rs
+│   │   ├── ngram.rs
+│   │   ├── sequence.rs
+│   │   ├── sequence_context.rs
+│   │   ├── tokenizer.rs
+│   │   └── vocabulary.rs
+│   ├── shell_history
+│   │   ├── bash.rs
 │   │   ├── mod.rs
-│   │   └── zsh.rs          # Zsh history parser
-│   └── shell_integration/  # Shell integration scripts
-│       ├── bash.sh         # Bash integration script
-│       └── zsh.zsh         # Zsh integration script
-└── docs/
-    └── dev/
-        └── development.md  # This file
+│   │   └── zsh.rs
+│   └── shell_integration
+│       ├── bash.sh
+│       └── zsh.zsh
+└── tests
+    ├── bash_timestamp.rs
+    ├── cli_integration.rs
+    ├── data
+    │   ├── bash.history
+    │   ├── bash.timestamp.history
+    │   └── zsh.history
+    ├── e2e_predictions.rs
+    ├── history_fuzz.rs
+    ├── history_parser.rs
+    ├── import_history.rs
+    ├── ngram_model.rs
+    └── zsh_timestamp.rs
+
 ```
 
 ## Dependencies
