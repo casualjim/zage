@@ -10,7 +10,7 @@ Key features:
 
 * Uses a Unix domain socket for inter-process communication.
 * Employs a thread pool to handle concurrent embedding requests efficiently.
-* Utilizes a custom Run-Length Encoding (RLE) protocol for compact data transfer.
+* Utilizes a simple length-delimited protocol for data transfer.
 
 The server is particularly useful for scenarios where multiple clients or processes require embedding services from a single, shared model instance.
 
@@ -85,41 +85,35 @@ Send a single request and display the full embedding vector:
 cargo run --bin test_embedding_client --text "Show me the vector" --verbose
 ```
 
-## 4. Protocol Specification (RLE)
+## 4. Protocol Specification (Length-Delimited)
 
-Communication between the client and server occurs over a Unix domain socket using a simple Run-Length Encoding (RLE) based protocol.
+Communication between the client and server occurs over a Unix domain socket using a simple length-delimited protocol.
 
 Each message consists of three parts:
 
-1.  **Message Type (1 byte):** Indicates the type of message being sent.
-2.  **Payload Length (4 bytes, little-endian u32):** The size of the RLE-encoded payload in bytes.
-3.  **RLE-encoded Payload (variable length):** The actual message data, encoded using RLE.
+1. **Message Type (1 byte):** Indicates the type of message being sent.
+2. **Payload Length (4 bytes, little-endian u32):** The size of the payload in bytes.
+3. **Payload (variable length):** The actual message data of the specified length.
 
 ### Message Types
 
-| Value (Hex) | Value (Decimal) | Type            | Description                                | Payload Content           |
-| :---------- | :-------------- | :-------------- | :----------------------------------------- | :------------------------ |
-| `0x01`      | 1               | `EmbedRequest`  | Client requests an embedding for text.     | RLE-encoded text string   |
-| `0x02`      | 2               | `EmbedResponse` | Server responds with the embedding vector. | RLE-encoded f32 vector    |
-| `0xFF`      | 255             | `ErrorResponse` | Server indicates an error occurred.        | RLE-encoded error message |
+| Value (Hex) | Value (Decimal) | Type            | Description                                | Payload Content      |
+| :---------- | :-------------- | :-------------- | :----------------------------------------- | :------------------- |
+| `0x01`      | 1               | `EmbedRequest`  | Client requests an embedding for text.     | Raw text string      |
+| `0x02`      | 2               | `EmbedResponse` | Server responds with the embedding vector. | Vector of f32 values |
+| `0xFF`      | 255             | `ErrorResponse` | Server indicates an error occurred.        | Error message string |
 
-### RLE Encoding
+### Data Encoding
 
-The RLE encoding is applied to the payload data (text string bytes or f32 vector bytes). It works by replacing sequences of identical bytes with a count and the byte value.
-
-A run of identical bytes is encoded as two bytes:
-* The first byte is the run length (1 to 255).
-* The second byte is the value of the repeated byte.
-
-If a sequence of identical bytes is longer than 255, it is broken down into multiple runs of maximum length 255, followed by a run for the remaining bytes.
+The protocol uses straightforward binary encoding for data transfer:
 
 **Encoding Strings:**
 
-Text strings are first converted to UTF-8 byte sequences and then RLE-encoded.
+Text strings are sent as UTF-8 byte sequences. The payload length specifies the exact number of bytes in the UTF-8 encoded string.
 
 **Encoding f32 Vectors:**
 
-Vectors of `f32` values are converted to byte sequences by representing each `f32` as 4 bytes in little-endian format. This byte sequence is then RLE-encoded.
+Vectors of `f32` values are encoded as a sequence of 4-byte values in little-endian format. The total payload length will be 4 times the number of vector elements.
 
 ### Protocol Flow
 
@@ -128,19 +122,18 @@ sequenceDiagram
     Client->Server: Connect to socket
     Client->Server: Send MessageType (EmbedRequest)
     Client->Server: Send Payload Length (u32)
-    Client->Server: Send RLE-encoded Text Payload
-    Server->Server: Decode RLE Payload
+    Client->Server: Send Text Payload
+    Server->Server: Process Text
     Server->Server: Perform Embedding
     alt Embedding Successful
         Server->Client: Send MessageType (EmbedResponse)
         Server->Client: Send Payload Length (u32)
-        Server->Client: Send RLE-encoded Embedding Vector Payload
+        Server->Client: Send Embedding Vector Payload
     else Embedding Failed
         Server->Client: Send MessageType (ErrorResponse)
         Server->Client: Send Payload Length (u32)
-        Server->Client: Send RLE-encoded Error Message Payload
+        Server->Client: Send Error Message Payload
     end
-    Client->Client: Decode RLE Payload
     Client->Client: Process Response/Error
     Client->Server: Disconnect (or keep open for more requests)
 ```
@@ -273,8 +266,8 @@ Here are some common issues you might encounter and their potential solutions:
 * **Client receives an `ErrorResponse`:**
   * **Issue:** The server sends an error message instead of an embedding vector.
   * **Solution:** Examine the error message received by the client for details. This usually indicates an issue during the embedding process itself (e.g., invalid input for the model).
-* **Unexpected message type or RLE decoding errors:**
-  * **Issue:** Client or server reports errors related to message types or RLE decoding.
-  * **Solution:** This suggests a mismatch in the protocol implementation between the client and server. Ensure both are using compatible versions and adhering strictly to the RLE protocol specification described above.
+* **Unexpected message type or protocol decoding errors:**
+  * **Issue:** Client or server reports errors related to message types or protocol parsing.
+  * **Solution:** This suggests a mismatch in the protocol implementation between the client and server. Ensure both are using compatible versions and adhering strictly to the length-delimited protocol specification described above.
 
 If you encounter other issues, reviewing the server and client logs (if enabled) can provide more detailed diagnostic information.

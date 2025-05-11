@@ -7,12 +7,10 @@
       "socket": "/Users/ivan/Library/Application Support/zage/zage.db",
       "readOnly": false,
       "driverOptions": {
-        "extensions": [
-          "sqlite-vec"
-        ]
+        "extensions": ["sqlite-vec"]
       },
       "connectionType": "socket"
     }
   ],
-  "rust-analyzer.cargo.buildScripts.enable": true,
+  "rust-analyzer.cargo.buildScripts.enable": true
 }

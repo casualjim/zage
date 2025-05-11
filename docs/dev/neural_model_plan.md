@@ -39,33 +39,33 @@ This plan describes the steps to replace all existing models with a Candle-based
 
 ### 2.3 Training Data Generation
 
-- [ ] Create comprehensive dataset from shell history:
-  - [ ] Implement sequence windowing to create training examples
-  - [ ] For each example, extract:
-    - [ ] Input sequence (previous commands as embeddings)
-    - [ ] Target sequence (command to predict)
-    - [ ] Associated contextual features
-  - [ ] Split into training/validation sets
-  - [ ] Implement batching and shuffling mechanisms
-  - [ ] Create data loaders compatible with Candle
-  - [ ] Test dataset creation and iteration
+- [x] Create comprehensive dataset from shell history:
+  - [x] Implement sequence windowing to create training examples
+  - [x] For each example, extract:
+    - [x] Input sequence (previous commands as embeddings)
+    - [x] Target sequence (command to predict)
+    - [x] Associated contextual features
+  - [x] Split into training/validation sets
+  - [x] Implement batching and shuffling mechanisms
+  - [x] Create data loaders compatible with Candle
+  - [x] Test dataset creation and iteration
 
 ### 2.4 Feature Integration
 
-- [ ] Create combined input representation:
-  - [ ] Concatenate or otherwise merge command embeddings with contextual features
-  - [ ] Implement feature normalization if needed
-  - [ ] Create input tensor formatting for model
-  - [ ] Test integrated feature representation
+- [x] Create combined input representation:
+  - [x] Concatenate or otherwise merge command embeddings with contextual features
+  - [x] Implement feature normalization if needed
+  - [x] Create input tensor formatting for model
+  - [x] Test integrated feature representation
 
 ### 2.5 Testing and Validation
 
-- [ ] Implement comprehensive tests for preprocessing pipeline:
-  - [ ] Tests for embedding functionality with various shell commands
-  - [ ] Tests for context feature extraction with diverse inputs
-  - [ ] Tests for dataset creation and batching
-  - [ ] End-to-end tests for complete preprocessing pipeline
-  - [ ] Benchmark preprocessing pipeline performance
+- [x] Implement comprehensive tests for preprocessing pipeline:
+  - [x] Tests for embedding functionality with various shell commands
+  - [x] Tests for context feature extraction with diverse inputs
+  - [x] Tests for dataset creation and batching
+  - [x] End-to-end tests for complete preprocessing pipeline
+  - [x] Benchmark preprocessing pipeline performance
 
 ## 3. Model Architecture
 

@@ -52,16 +52,19 @@ First try to use context7 for finding docs.
 │   │   ├── neural_model_plan.md
 │   │   ├── scenarios.yaml
 │   │   └── testing.md
+│   ├── embedding_socket_server.md
 │   └── predictions.md
 ├── justfile
 ├── LICENSE
+├── notes.md
 ├── README.md
 ├── rustfmt.toml
 ├── src
 │   ├── bin
 │   │   ├── simulate.rs
 │   │   ├── simulate_context.rs
-│   │   └── simulate_workflow.rs
+│   │   ├── simulate_workflow.rs
+│   │   └── test_embedding_client.rs
 │   ├── config.rs
 │   ├── db
 │   │   ├── analyze-bigram.sql
@@ -74,21 +77,29 @@ First try to use context7 for finding docs.
 │   ├── main.rs
 │   ├── model
 │   │   ├── context.rs
+│   │   ├── contextual_features.rs
+│   │   ├── feature_integration.rs
 │   │   ├── markov.rs
 │   │   ├── mod.rs
 │   │   ├── neural.rs
 │   │   ├── ngram.rs
+│   │   ├── pretrained_embedder.rs
 │   │   ├── sequence.rs
 │   │   ├── sequence_context.rs
 │   │   ├── tokenizer.rs
-│   │   └── vocabulary.rs
+│   │   └── training_dataset.rs
 │   ├── shell_history
 │   │   ├── bash.rs
 │   │   ├── mod.rs
 │   │   └── zsh.rs
-│   └── shell_integration
-│       ├── bash.sh
-│       └── zsh.zsh
+│   ├── shell_integration
+│   │   ├── bash.sh
+│   │   └── zsh.zsh
+│   └── socket_server
+│       ├── encoder.rs
+│       ├── messages.rs
+│       ├── mod.rs
+│       └── server.rs
 └── tests
     ├── bash_timestamp.rs
     ├── cli_integration.rs
