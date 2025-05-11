@@ -13,92 +13,44 @@ This plan describes the steps to replace all existing models with a Candle-based
 
 ## 2. Data Preprocessing
 
-### 2.1 Shell Command Tokenization (Simplified)
+### 2.1 Command Embeddings
 
-- [x] Add `shell-words` dependency to `Cargo.toml` for POSIX-compliant splitting
-- [x] Remove `yash-syntax` dependency; no AST-based parsing
-- [ ] Ensure `ShellTokenizer` uses `shell-words` with whitespace fallback
-- [ ] Make `ShellTokenizer` stateful, tracking token counts
-- [ ] Add token frequency counting for vocabulary building
-- [ ] Test tokenization across diverse shell command patterns
+- [x] Add HuggingFace dependency `hf-hub` to Cargo.toml
+- [x] Add tokenizers dependency to Cargo.toml
+- [x] Implement `PretrainedEmbedder` using a HuggingFace model
+- [x] Use CodeRankEmbed model for embedding shell commands
+- [x] Add functions to embed text into fixed-size vectors
+- [x] Test embedding output shapes and values
+- [x] Measure embedding latency for performance benchmarking
 
-### 2.2 Vocabulary Building
+### 2.2 Contextual Features
 
-- [x] Enhance `VocabularyBuilder` to process command history:
-  - [x] Store tokenized corpus for embedding generation
-  - [x] Implement token frequency-based vocabulary selection
-  - [x] Add special tokens (UNK, PAD, BOS, EOS)
-  - [x] Implement configurable parameters:
-    - [x] Minimum token frequency
-    - [x] Maximum vocabulary size
-    - [x] Special token handling
-  - [x] Create token-to-ID and ID-to-token mappings
-  - [x] Test with real command history samples
+- [x] Design and implement context extraction:
+  - [x] Working directory embedding:
+    - [x] Use pretrained embedder to encode path components
+  - [x] Command success/failure representation:
+    - [x] Encode exit status as binary or categorical feature
+  - [x] Time features:
+    - [x] Extract hour of day, day of week, etc.
+    - [x] Encode as cyclic features using sine/cosine transformations
+  - [x] User/host representation if applicable
+  - [x] Remote/local session
+  - [x] Test context feature extraction with diverse inputs
 
-### 2.3 Command Encoding
-
-- [x] Implement multiple encoding strategies inspired by SLP:
-  - [x] TF-IDF encoding:
-    - [x] Calculate document frequency for each token
-    - [x] Calculate term frequency for tokens in each command
-    - [x] Combine into TF-IDF representation
-  - [x] One-hot encoding:
-    - [x] Create sparse vectors of vocabulary size
-    - [x] Set corresponding values to 1 for present tokens
-  - [x] Label encoding:
-    - [x] Convert token sequences to ID sequences
-    - [x] Add padding to fixed length
-  - [x] Test each encoding strategy with varied command inputs
-
-### 2.4 Embedding Layer
-
-- [ ] Implement embedding layer using Candle:
-  - [ ] Create embedding table with dimensions (vocab_size, embedding_dim)
-  - [ ] Initialize with uniform or normal distribution
-  - [ ] Implement lookup operation for token IDs
-  - [ ] Add positional encoding for sequence position information
-  - [ ] Implement optional embedding normalization
-  - [ ] Test embedding output shapes and values
-
-### 2.5 Contextual Features
-
-- [ ] Design and implement context extraction:
-  - [ ] Working directory embedding:
-    - [ ] Tokenize path components
-    - [ ] Encode using vocabulary or separate path encoder
-  - [ ] Command success/failure representation:
-    - [ ] Encode exit status as binary or categorical feature
-  - [ ] Time features:
-    - [ ] Extract hour of day, day of week, etc.
-    - [ ] Encode as cyclic features using sine/cosine transformations
-  - [ ] User/host representation if applicable
-  - [ ] Test context feature extraction with diverse inputs
-
-### 2.6 Syntax-Aware Embeddings
-
-- [ ] Leverage AST structure for improved embeddings:
-  - [ ] Develop position-aware token embeddings based on AST depth
-  - [ ] Create node type embeddings (command, argument, operator, etc.)
-  - [ ] Implement parent-child relationship encoding
-  - [ ] Create command-argument relationship encoding
-  - [ ] Test syntax-aware embeddings against baseline
-
-### 2.7 Training Data Generation
+### 2.3 Training Data Generation
 
 - [ ] Create comprehensive dataset from shell history:
   - [ ] Implement sequence windowing to create training examples
   - [ ] For each example, extract:
-    - [ ] Input sequence (previous commands)
+    - [ ] Input sequence (previous commands as embeddings)
     - [ ] Target sequence (command to predict)
     - [ ] Associated contextual features
-    - [ ] Syntax information from AST
   - [ ] Split into training/validation sets
   - [ ] Implement batching and shuffling mechanisms
-  - [ ] Add data augmentation techniques if applicable
   - [ ] Create data loaders compatible with Candle
   - [ ] Test dataset creation and iteration
 
-### 2.8 Feature Integration
+### 2.4 Feature Integration
 
 - [ ] Create combined input representation:
   - [ ] Concatenate or otherwise merge command embeddings with contextual features
@@ -106,77 +58,90 @@ This plan describes the steps to replace all existing models with a Candle-based
   - [ ] Create input tensor formatting for model
   - [ ] Test integrated feature representation
 
-### 2.9 Testing and Validation
+### 2.5 Testing and Validation
 
 - [ ] Implement comprehensive tests for preprocessing pipeline:
-  - [ ] Unit tests for tokenizer with edge cases
-  - [ ] Tests for AST parsing with various shell constructs
-  - [ ] Tests for vocabulary building and selection
-  - [ ] Tests for each encoding strategy
-  - [ ] Tests for embedding layer functionality
+  - [ ] Tests for embedding functionality with various shell commands
+  - [ ] Tests for context feature extraction with diverse inputs
+  - [ ] Tests for dataset creation and batching
   - [ ] End-to-end tests for complete preprocessing pipeline
   - [ ] Benchmark preprocessing pipeline performance
 
 ## 3. Model Architecture
 
-- [ ] Design LSTM/Transformer architecture in Candle
-- [ ] Implement forward pass for sequence prediction
-- [ ] Integrate context vectors into model
-- [ ] Implement attention mechanism for context awareness
-- [ ] Create prediction layer for command probabilities
-- [ ] Implement beam search for command generation
-- [ ] Implement model saving/loading to/from disk
-- [ ] Model versioning for compatibility
-- [ ] Working tests for model forward pass, context injection, prediction head, and serialization
+- [ ] Design and implement neural network architecture:
+  - [ ] Choose between LSTM or Transformer-based architecture
+  - [ ] Define model parameters (layers, dimensions, etc.)
+  - [ ] Implement forward pass for sequence prediction
+  - [ ] Integrate context vectors into model
+  - [ ] Create prediction head for command probabilities
+  - [ ] Add optional caching for efficient inference
+  - [ ] Implement model saving/loading to/from disk
+  - [ ] Working tests for model components and forward pass
 
 ## 4. Training Pipeline
 
 - [ ] Implement loss function for command prediction
-- [ ] Add regularization techniques
-- [ ] Create training loop with learning rate scheduling
-- [ ] Implement early stopping and checkpointing
-- [ ] Implement accuracy, perplexity, and other metrics
-- [ ] Logging system for training progress
-- [ ] Hyperparameter tuning system (simple grid search)
-- [ ] Working tests for loss, training loop, metrics, and parameter tuning
+- [ ] Create training loop with optimization:
+  - [ ] Set up optimizer with learning rate schedule
+  - [ ] Implement gradient accumulation if needed
+  - [ ] Add regularization techniques
+  - [ ] Implement early stopping and checkpointing
+  - [ ] Create validation loop
+- [ ] Implement evaluation metrics:
+  - [ ] Accuracy, perplexity, etc.
+  - [ ] Command suggestion quality metrics
+- [ ] Add logging and visualization
+- [ ] Working tests for training components
 
 ## 5. Inference & Integration
 
-- [ ] Create efficient inference pipeline for prediction
-- [ ] Implement top-k and top-p sampling for suggestions
-- [ ] Model evaluation and benchmarking suite
-- [ ] Update shell integration scripts to use neural model
-- [ ] Optimize for low-latency prediction
-- [ ] Implement fallback to simpler models when appropriate
-- [ ] Confidence-based model selection
-- [ ] Working tests for inference, integration, and fallback
+- [ ] Create efficient inference pipeline:
+  - [ ] Implement top-k and top-p sampling for suggestions
+  - [ ] Add cache mechanism for faster repeated predictions
+  - [ ] Optimize for low-latency prediction
+- [ ] Integrate with shell:
+  - [ ] Update shell integration scripts to use neural model
+  - [ ] Implement fallback to simpler models when appropriate
+  - [ ] Add confidence-based model selection
+- [ ] Comprehensive test suite:
+  - [ ] Unit tests for inference components
+  - [ ] Integration tests with shell environment
+  - [ ] Performance benchmarks
 
 ## 6. Advanced Features
 
-- [ ] Incorporate command output as context for predictions
-- [ ] Implement filtering based on output patterns
-- [ ] Add time-of-day and day-of-week features
-- [ ] Implement seasonal pattern detection
-- [ ] Create shared model state across terminal instances
-- [ ] Implement synchronization for multi-terminal prediction
-- [ ] Profile and optimize model for latency reduction
-- [ ] Implement quantization for reduced memory footprint
-- [ ] Working tests for advanced features and optimizations
+- [ ] Add advanced context awareness:
+  - [ ] Incorporate command output as context
+  - [ ] Implement time-based patterns (time of day, day of week)
+  - [ ] Add user activity patterns
+- [ ] Improve multi-terminal support:
+  - [ ] Create shared model state across terminal instances
+  - [ ] Implement synchronization mechanism
+- [ ] Optimize performance:
+  - [ ] Profile and optimize for latency
+  - [ ] Implement quantization for reduced memory footprint
+  - [ ] Add model compression techniques if needed
+- [ ] Working tests for advanced features
 
-## 7. Testing & Documentation (Continuous)
+## 7. Testing & Documentation
 
-- [ ] Ensure comprehensive unit test coverage for all components
-- [ ] Implement property-based testing for edge cases
-- [ ] Create end-to-end integration tests for full prediction pipeline
-- [ ] Test across different shell environments
-- [ ] Update `development.md` and create model architecture documentation
-- [ ] Add examples for custom model training
-- [ ] Create benchmark suite for prediction accuracy and latency
-- [ ] Working tests for documentation and benchmarks
+- [ ] Comprehensive test coverage:
+  - [ ] Unit tests for all components
+  - [ ] Integration tests for end-to-end functionality
+  - [ ] Property-based tests for edge cases
+  - [ ] Cross-shell environment tests
+- [ ] Documentation:
+  - [ ] Update development docs with neural model architecture
+  - [ ] Add examples for custom model training
+  - [ ] Create user guide for model configuration
+- [ ] Benchmarking:
+  - [ ] Prediction accuracy benchmarks
+  - [ ] Latency and resource usage benchmarks
 
 ## Implementation Guidelines
 
-- Write tests first for each component (TDD)
+- Write tests first for each component (TDD approach)
 - Maintain or improve test coverage with all code changes
 - Follow Rust idioms and naming conventions
 - Use expressive variable names and comprehensive error handling

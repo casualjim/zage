@@ -1,5 +1,7 @@
 use std::path::PathBuf;
 
+use candle_core::Device;
+use candle_core::backend::BackendDevice;
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
 use dirs::home_dir;
@@ -16,6 +18,7 @@ use zage::model::sequence::SequenceScore;
 use zage::model::sequence::analyze_and_store_sequences;
 use zage::model::{PredictionModel, markov::MarkovChain, ngram::NGramModel};
 use zage::shell_history::{Invocation, Shell, get_hostname, parse_bash_history, parse_zsh_history};
+use zage::socket_server::{ServerConfig, SocketServer};
 
 /// CLI for Zage
 #[derive(Parser)]
@@ -132,6 +135,25 @@ enum Commands {
     /// The shell session ID
     #[arg(long)]
     session_id: Option<i64>, // Optional for now
+  },
+
+  /// Run as a Unix domain socket server for embedding requests
+  Server {
+    /// Path to the Unix domain socket
+    #[arg(long, default_value = "/tmp/zage_embedder.sock")]
+    socket_path: String,
+
+    /// Number of worker threads
+    #[arg(long, default_value = "4")]
+    num_threads: usize,
+
+    /// Connection timeout in seconds
+    #[arg(long, default_value = "30")]
+    timeout_secs: u64,
+
+    /// Device to use for embeddings (cpu, metal, cuda)
+    #[arg(long, default_value = "cpu")]
+    device: String,
   },
 }
 
@@ -476,6 +498,64 @@ fn main() -> Result<()> {
       }
 
       tx.commit()?;
+    }
+
+    Some(Commands::Server {
+      socket_path,
+      num_threads,
+      timeout_secs,
+      device,
+    }) => {
+      info!("Starting socket server on {}", socket_path);
+
+      // Create the device based on the user's choice
+      let device = match device.to_lowercase().as_str() {
+        "cpu" => Device::Cpu,
+        "metal" => {
+          #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
+          {
+            Device::Metal(candle_core::MetalDevice::new(0).expect("Failed to create Metal device"))
+          }
+          #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
+          {
+            println!("Metal device is only supported on macOS with Apple Silicon.");
+            println!("Falling back to CPU device.");
+            Device::Cpu
+          }
+        }
+        "cuda" => {
+          #[cfg(feature = "cuda")]
+          {
+            Device::Cuda(candle_core::CudaDevice::new(0).expect("Failed to create CUDA device"))
+          }
+          #[cfg(not(feature = "cuda"))]
+          {
+            println!("CUDA device is not supported in this build.");
+            println!("Falling back to CPU device.");
+            Device::Cpu
+          }
+        }
+        _ => {
+          println!("Unknown device: {}. Falling back to CPU device.", device);
+          Device::Cpu
+        }
+      };
+
+      // Initialize the embedder
+      info!("Initializing embedder on {:?}...", device);
+      let embedder = zage::model::pretrained_embedder::PretrainedEmbedder::new(device)?;
+      info!("Embedder initialized successfully");
+
+      // Create server configuration
+      let config = ServerConfig {
+        socket_path: socket_path.clone(),
+        num_threads: *num_threads,
+        timeout_secs: *timeout_secs,
+      };
+
+      // Create and start the server
+      let server = SocketServer::new(config, embedder);
+      server.start()?;
     }
 
     None => {

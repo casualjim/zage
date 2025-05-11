@@ -5,6 +5,7 @@ pub use config::*;
 pub mod db;
 pub mod model;
 pub mod shell_history;
+pub mod socket_server;
 
 #[cfg(test)]
 mod tests {

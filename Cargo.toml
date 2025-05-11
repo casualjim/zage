@@ -34,6 +34,9 @@ hf-hub = "0.4.2"
 tokenizers = "0.21"
 sqlite-vec = "0.1.6"
 
+# Thread pool for socket server
+threadpool = "1.8.1"
+
 [target.'cfg(all(target_os = "macos", target_arch = "aarch64"))'.dependencies]
 candle-core = { version = "0.9.1", default-features = false, features = [
   "accelerate",
@@ -68,3 +71,12 @@ path = "src/bin/simulate_context.rs"
 [[bin]]
 name = "simulate_workflow"
 path = "src/bin/simulate_workflow.rs"
+
+[[bin]]
+name = "test_embedding_client"
+path = "src/bin/test_embedding_client.rs"
+
+# The profile that 'dist' will build with
+[profile.dist]
+inherits = "release"
+lto = "thin"

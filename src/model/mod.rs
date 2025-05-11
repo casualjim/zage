@@ -1,10 +1,12 @@
 mod context;
+mod contextual_features;
 pub mod markov;
 pub mod neural;
 pub mod ngram;
-mod pretrained_embedder;
+pub mod pretrained_embedder;
 pub mod sequence;
 mod sequence_context;
+mod tokenizer;
 
 use crate::Result;
 use crate::shell_history::Invocation;
