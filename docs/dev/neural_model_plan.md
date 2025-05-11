@@ -69,15 +69,48 @@ This plan describes the steps to replace all existing models with a Candle-based
 
 ## 3. Model Architecture
 
-- [ ] Design and implement neural network architecture:
-  - [ ] Choose between LSTM or Transformer-based architecture
-  - [ ] Define model parameters (layers, dimensions, etc.)
-  - [ ] Implement forward pass for sequence prediction
-  - [ ] Integrate context vectors into model
-  - [ ] Create prediction head for command probabilities
-  - [ ] Add optional caching for efficient inference
-  - [ ] Implement model saving/loading to/from disk
-  - [ ] Working tests for model components and forward pass
+### 3.1 Architecture Selection & Evaluation
+
+- [ ] Evaluate LSTM-based architecture:
+  - [ ] Define number of layers, hidden size, dropout, embedding size
+  - [ ] Prototype using Candle's RNN modules
+  - [ ] Benchmark on sample dataset (accuracy, latency)
+- [ ] Evaluate Transformer-based architecture:
+  - [ ] Define number of layers, attention heads, model dimension, positional encoding
+  - [ ] Prototype using Candle's transformer modules
+  - [ ] Benchmark on sample dataset (accuracy, latency)
+- [ ] Compare architectures and select best-performing model
+
+### 3.2 Model Definition
+
+- [ ] Define `ModelConfig` struct with hyperparameters
+- [ ] Implement model struct and constructor
+- [ ] Implement forward pass:
+  - [ ] Sequence encoding pipeline (e.g., RNN or self-attention)
+  - [ ] Integrate contextual feature vectors
+  - [ ] Prediction head outputting command probabilities
+
+### 3.3 Inference Optimization
+
+- [ ] Add top-k and top-p sampling methods
+- [ ] Implement caching for recurrent states or attention key/value tensors
+- [ ] Optimize tensor operations for low-latency inference
+
+### 3.4 Model Persistence
+
+- [ ] Implement `save` method to serialize model parameters to disk (e.g., `.ckpt` files)
+- [ ] Implement `load` method to restore model from disk
+- [ ] Test round-trip serialization integrity
+
+### 3.5 Testing & Validation
+
+- [ ] Unit tests for model components:
+  - [ ] Test shapes and types of forward pass outputs
+  - [ ] Test behavior with dummy inputs
+- [ ] Integration tests:
+  - [ ] Load sample model, run inference, validate output distribution
+  - [ ] Ensure reproducibility across runs
+- [ ] Benchmark model runtime and memory usage on sample inputs
 
 ## 4. Training Pipeline
 
