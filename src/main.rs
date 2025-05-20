@@ -18,7 +18,8 @@ use zage::model::sequence::SequenceScore;
 use zage::model::sequence::analyze_and_store_sequences;
 use zage::model::{PredictionModel, markov::MarkovChain, ngram::NGramModel};
 use zage::shell_history::{Invocation, Shell, get_hostname, parse_bash_history, parse_zsh_history};
-use zage::socket_server::{ServerConfig, SocketServer};
+use zage::socket_server::ServerConfig;
+use zage::socket_server::SocketServer;
 
 /// CLI for Zage
 #[derive(Parser)]
@@ -144,7 +145,7 @@ enum Commands {
     socket_path: String,
 
     /// Number of worker threads
-    #[arg(long, default_value = "4")]
+    #[arg(long, default_value_os = num_cpus::get().to_string())]
     num_threads: usize,
 
     /// Connection timeout in seconds
@@ -541,20 +542,19 @@ fn main() -> Result<()> {
         }
       };
 
-      // Initialize the embedder
-      info!("Initializing embedder on {:?}...", device);
-      let embedder = zage::model::pretrained_embedder::PretrainedEmbedder::new(device)?;
-      info!("Embedder initialized successfully");
+      // Initialize the embedder from the model module
+      // This ensures we're using the intended abstraction (Embedder trait)
+      let embedder = zage::model::create_embedder(device.clone())?;
 
-      // Create server configuration
-      let config = ServerConfig {
+      // Initialize and start the socket server in a new thread
+      let server_config = ServerConfig {
         socket_path: socket_path.clone(),
         num_threads: *num_threads,
         timeout_secs: *timeout_secs,
       };
 
       // Create and start the server
-      let server = SocketServer::new(config, embedder);
+      let server = SocketServer::new(server_config, embedder);
       server.start()?;
     }
 

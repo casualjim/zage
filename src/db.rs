@@ -1,6 +1,6 @@
 use std::{path::Path, time::Duration};
 
-use crate::{Result, shell_history::Invocation};
+use crate::{Result, shell_history::Invocation, model::contextual_features::PathComponentStats};
 use exemplar::Model;
 use rusqlite::ffi::sqlite3_auto_extension;
 use rusqlite::{Connection, Transaction, params};
@@ -56,20 +56,134 @@ pub fn init<P: AsRef<Path>>(db_path: P) -> Result<()> {
   Ok(())
 }
 
-/// Imports shell history from a sequence of invocations.
+/// Save path component statistics to the database
+/// 
+/// Uses a transaction to atomically update all path statistics.
+/// The implementation uses UPSERT to efficiently update existing records
+/// or insert new ones without requiring separate read/write operations.
+pub fn save_path_stats(conn: &mut Connection, path_stats: &PathComponentStats) -> Result<()> {
+  // Get current timestamp
+  let now = std::time::SystemTime::now()
+    .duration_since(std::time::UNIX_EPOCH)
+    .unwrap_or_default()
+    .as_secs() as i64;
+  
+  // Start transaction for atomic operations
+  let tx = conn.transaction()?;
+  
+  // Update path_stats with atomic upsert
+  tx.execute(
+    "INSERT OR REPLACE INTO path_stats (id, total_paths, updated_at) VALUES (1, ?, ?)",
+    params![path_stats.total_paths() as i64, now],
+  )?;
+  
+  // Use batch operations for component frequencies
+  if !path_stats.component_frequencies().is_empty() {
+    // Prepare the SQL statement once
+    let sql = "INSERT INTO path_components (component, document_frequency) 
+               VALUES (?, ?) 
+               ON CONFLICT(component) DO UPDATE SET 
+               document_frequency = excluded.document_frequency";
+    
+    // Create a prepared statement
+    let mut stmt = tx.prepare(sql)?;
+    
+    // Execute for each component
+    for (component, frequency) in path_stats.component_frequencies() {
+      stmt.execute(params![component, *frequency as i64])?;
+    }
+    
+    // Explicitly drop the statement before committing
+    drop(stmt);
+  }
+  
+  // Commit all changes atomically
+  tx.commit()?;
+  
+  Ok(())
+}
+
+/// Load path component statistics from the database
+pub fn load_path_stats(conn: &mut Connection) -> Result<PathComponentStats> {
+  // Get total paths count
+  let total_paths: usize = conn.query_row(
+    "SELECT total_paths FROM path_stats WHERE id = 1",
+    [],
+    |row| row.get(0),
+  )?;
+  
+  // Get component frequencies
+  let mut stmt = conn.prepare(
+    "SELECT component, document_frequency FROM path_components"
+  )?;
+  
+  let rows = stmt.query_map([], |row| {
+    let component: String = row.get(0)?;
+    let frequency: usize = row.get(1)?;
+    Ok((component, frequency))
+  })?;
+  
+  // Build path stats from database data
+  let mut path_stats = PathComponentStats::new();
+  path_stats.set_total_paths(total_paths);
+  
+  for row_result in rows {
+    let (component, frequency) = row_result?;
+    path_stats.set_component_frequency(&component, frequency);
+  }
+  
+  Ok(path_stats)
+}
+
+/// Import shell history invocations into the database
+/// and update path component statistics for path normalization
 pub fn import_history<I>(conn: &mut Connection, invocations: I) -> Result<()>
 where
   I: IntoIterator<Item = Invocation>,
 {
-  let mut tx = conn.transaction()?;
+  // First, try to load existing path stats or create new ones
+  let mut path_stats = match load_path_stats(conn) {
+    Ok(stats) => stats,
+    Err(_) => PathComponentStats::new()
+  };
+  
+  // Collect working directories from invocations
+  let mut invocations_vec = Vec::new();
+  let mut working_dirs = Vec::new();
+  
   for invocation in invocations {
-    insert_invocation(&mut tx, &invocation)?;
+    // Store working directory for path stats update
+    if let Some(wd) = &invocation.working_directory {
+      working_dirs.push(wd.clone());
+    }
+    invocations_vec.push(invocation);
   }
+  
+  // Start transaction for history import
+  let mut tx = conn.transaction()?;
+  
+  // Insert all invocations
+  for invocation in &invocations_vec {
+    insert_invocation(&mut tx, invocation)?;
+  }
+  
+  // Commit transaction to ensure history is saved
   tx.commit()?;
+  
+  // Update path statistics with collected working directories
+  for wd in working_dirs {
+    path_stats.update(&wd);
+  }
+  
+  // Save updated path statistics separately
+  // This is not critical functionality, so we ignore errors
+  let _ = save_path_stats(conn, &path_stats);
+  
   Ok(())
 }
 
 pub fn init_table(tx: &mut Transaction) -> Result<()> {
+  // Initialize schema (includes path component statistics tables)
   tx.execute_batch(&include_str!("db/schema-v0.sql"))?;
 
   Ok(())

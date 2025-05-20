@@ -1,4 +1,3 @@
-use std::io::{Read as _, Write as _};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::Path;
 use std::sync::Arc;
@@ -7,11 +6,10 @@ use std::time::Duration;
 use threadpool::ThreadPool;
 use tracing::{error, info};
 
-use crate::model::pretrained_embedder::PretrainedEmbedder;
 use crate::{Result, ZageError};
 
-use super::MessageType;
-use super::encoder::{LengthDelimitedDecoder, LengthDelimitedEncoder};
+use crate::model::Embedder;
+use crate::protocol::ProtocolMessage;
 
 /// Socket server configuration
 #[derive(Debug, Clone)]
@@ -28,7 +26,7 @@ impl Default for ServerConfig {
   fn default() -> Self {
     Self {
       socket_path: "/tmp/zage_embedder.sock".to_string(),
-      num_threads: 4,
+      num_threads: num_cpus::get(),
       timeout_secs: 30,
     }
   }
@@ -37,14 +35,13 @@ impl Default for ServerConfig {
 /// Socket server for handling embedding requests
 pub struct SocketServer {
   config: ServerConfig,
-  embedder: Arc<PretrainedEmbedder>,
+  embedder: Arc<dyn Embedder>,
   pool: ThreadPool,
 }
 
 impl SocketServer {
   /// Create a new socket server with the given configuration
-  pub fn new(config: ServerConfig, embedder: PretrainedEmbedder) -> Self {
-    let embedder = Arc::new(embedder);
+  pub fn new(config: ServerConfig, embedder: Arc<dyn Embedder>) -> Self {
     let pool = ThreadPool::new(config.num_threads);
 
     Self {
@@ -103,70 +100,35 @@ impl SocketServer {
 }
 
 /// Handle a client connection
-fn handle_client(mut stream: UnixStream, embedder: Arc<PretrainedEmbedder>) -> Result<()> {
-  // Read the message type
-  let mut type_buf = [0u8; 1];
-  stream.read_exact(&mut type_buf)?;
-  let msg_type = MessageType::from_byte(type_buf[0])?;
+fn handle_client(mut stream: UnixStream, embedder: Arc<dyn Embedder>) -> Result<()> {
+  // Read the request message
+  let request = ProtocolMessage::read_from(&mut stream)?;
 
-  match msg_type {
-    MessageType::EmbedRequest => {
-      // Read the message length (4 bytes, little endian)
-      let mut len_buf = [0u8; 4];
-      stream.read_exact(&mut len_buf)?;
-      let msg_len = u32::from_le_bytes(len_buf) as usize;
-
-      // Read the RLE-encoded message
-      let mut rle_buf = vec![0u8; msg_len];
-      stream.read_exact(&mut rle_buf)?;
-
-      // Decode the message
-      let mut decoder = LengthDelimitedDecoder::new(&rle_buf);
-      let text = decoder.decode_string()?;
+  // Process based on message type
+  match request {
+    ProtocolMessage::EmbedRequest(text) => {
+      // Extract the text to embed
+      let text = text;
 
       // Process the embedding request
       match embedder.embed(&text) {
         Ok(embedding) => {
-          // Encode the response
-          let mut encoder = LengthDelimitedEncoder::new();
-          encoder.encode_f32_vec(&embedding);
-          let encoded = encoder.finish();
-
-          // Write the response type
-          stream.write_all(&[MessageType::EmbedResponse.to_byte()])?;
-
-          // Write the response length
-          let len_bytes = (encoded.len() as u32).to_le_bytes();
-          stream.write_all(&len_bytes)?;
-
-          // Write the RLE-encoded response
-          stream.write_all(&encoded)?;
-          stream.flush()?;
+          // Create and send the successful response
+          let response = ProtocolMessage::EmbedResponse(embedding);
+          response.write_to(&mut stream)?
         }
         Err(e) => {
-          // Send error response
+          // Create and send the error response
           let error_msg = format!("Embedding error: {}", e);
-          let mut encoder = LengthDelimitedEncoder::new();
-          encoder.encode_string(&error_msg);
-          let encoded = encoder.finish();
-
-          // Write the error response type
-          stream.write_all(&[MessageType::ErrorResponse.to_byte()])?;
-
-          // Write the error response length
-          let len_bytes = (encoded.len() as u32).to_le_bytes();
-          stream.write_all(&len_bytes)?;
-
-          // Write the RLE-encoded error response
-          stream.write_all(&encoded)?;
-          stream.flush()?;
+          let response = ProtocolMessage::ErrorResponse(error_msg);
+          response.write_to(&mut stream)?
         }
       }
     }
     _ => {
       return Err(ZageError::ConfigError(format!(
         "Unexpected message type: {:?}",
-        msg_type
+        request
       )));
     }
   }

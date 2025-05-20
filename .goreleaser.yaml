@@ -1,11 +1,4 @@
-# This is an example .goreleaser.yml file with some sensible defaults.
-# Make sure to check the documentation at https://goreleaser.com
-
-# The lines below are called `modelines`. See `:help modeline`
-# Feel free to remove those if you don't want/need to use them.
-# yaml-language-server: $schema=https://goreleaser.com/static/schema.json
-# vim: set ts=2 sw=2 tw=0 fo=cnqoj
-
+---
 version: 2
 
 before:
@@ -15,15 +8,27 @@ before:
     - rustup default stable
     - cargo install --locked cargo-zigbuild
     - cargo fetch --locked
+    # Add Linux targets for cross-compilation
+    - rustup target add x86_64-unknown-linux-gnu
+    - rustup target add aarch64-unknown-linux-gnu
+    - rustup target add aarch64-apple-darwin
 
 builds:
   - builder: rust
+    # Use cargo-zigbuild for better cross-compilation support
     flags:
       - --release
+      - --target={{ .Target }}
     targets:
       - x86_64-unknown-linux-gnu
       - aarch64-unknown-linux-gnu
       - aarch64-apple-darwin
+    # Add environment variables for cross-compilation with OpenSSL
+    env:
+      - PKG_CONFIG_ALLOW_CROSS=1
+      - OPENSSL_STATIC=1
+      - PATH=/opt/homebrew/bin:$PATH
+
 
 archives:
   - formats: [tar.gz]

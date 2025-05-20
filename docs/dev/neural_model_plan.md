@@ -22,17 +22,24 @@ This plan describes the steps to replace all existing models with a Candle-based
 - [x] Add functions to embed text into fixed-size vectors
 - [x] Test embedding output shapes and values
 - [x] Measure embedding latency for performance benchmarking
+- [x] Refactor embedder logic:
+  - [x] Move `PretrainedEmbedder` from model module to socket_server module
+  - [x] Create `Embedder` trait in model module to define the embedding interface
+  - [x] Implement `InProcessEmbedderClient` in model module for development and testing
+  - [x] Update all references to use the new embedder interface
 
 ### 2.2 Contextual Features
 
 - [x] Design and implement context extraction:
   - [x] Working directory embedding:
     - [x] Use pretrained embedder to encode path components
+    - [x] Implement basic per-component length cap and last-N segment truncation
+    - [x] Preserve project root plus last 2 segments for deep/monorepo paths
+    - [x] Derive spacer segments dynamically using DF stats (high-DF names) and replace them with placeholder (`....`)
+    - [x] Implement document frequency statistics for path components via `PathComponentStats`
+    - [x] Integrate TF–IDF filtering by building DF stats during history import & persisting to SQLite
   - [x] Command success/failure representation:
     - [x] Encode exit status as binary or categorical feature
-  - [x] Time features:
-    - [x] Extract hour of day, day of week, etc.
-    - [x] Encode as cyclic features using sine/cosine transformations
   - [x] User/host representation if applicable
   - [x] Remote/local session
   - [x] Test context feature extraction with diverse inputs
@@ -52,9 +59,11 @@ This plan describes the steps to replace all existing models with a Candle-based
 
 ### 2.4 Feature Integration
 
-- [x] Create combined input representation:
-  - [x] Concatenate or otherwise merge command embeddings with contextual features
-  - [x] Implement feature normalization if needed
+- [x] Implement feature integration pipeline:
+  - [x] Combine command embeddings with contextual features
+  - [x] Implement L2 normalization with a simple boolean flag (following YAGNI principle)
+  - [x] Test combined feature vectors for shape and values
+  - [ ] Benchmark feature integration performance
   - [x] Create input tensor formatting for model
   - [x] Test integrated feature representation
 
@@ -71,10 +80,11 @@ This plan describes the steps to replace all existing models with a Candle-based
 
 ### 3.1 Architecture Selection & Evaluation
 
-- [ ] Evaluate LSTM-based architecture:
-  - [ ] Define number of layers, hidden size, dropout, embedding size
-  - [ ] Prototype using Candle's RNN modules
-  - [ ] Benchmark on sample dataset (accuracy, latency)
+- [x] Evaluate LSTM-based architecture:
+  - [x] Define number of layers, hidden size, dropout, embedding size
+  - [x] Prototype using Candle's RNN modules
+  - [x] Benchmark on sample dataset (accuracy)
+  - [x] Benchmark on sample dataset (latency)
 - [ ] Evaluate Transformer-based architecture:
   - [ ] Define number of layers, attention heads, model dimension, positional encoding
   - [ ] Prototype using Candle's transformer modules
@@ -105,11 +115,13 @@ This plan describes the steps to replace all existing models with a Candle-based
 ### 3.5 Testing & Validation
 
 - [ ] Unit tests for model components:
-  - [ ] Test shapes and types of forward pass outputs
-  - [ ] Test behavior with dummy inputs
+  - [x] Test shapes and types of forward pass outputs
+  - [x] Test behavior with dummy inputs
 - [ ] Integration tests:
   - [ ] Load sample model, run inference, validate output distribution
   - [ ] Ensure reproducibility across runs
+  - [ ] Add end-to-end tests for complete feature encoding -> model prediction pipeline
+  - [ ] Implement feature contribution analysis tests
 - [ ] Benchmark model runtime and memory usage on sample inputs
 
 ## 4. Training Pipeline
@@ -164,6 +176,8 @@ This plan describes the steps to replace all existing models with a Candle-based
   - [ ] Integration tests for end-to-end functionality
   - [ ] Property-based tests for edge cases
   - [ ] Cross-shell environment tests
+  - [ ] Add tests for feature normalization and scaling
+  - [ ] Implement synthetic stress tests for long-running sessions
 - [ ] Documentation:
   - [ ] Update development docs with neural model architecture
   - [ ] Add examples for custom model training

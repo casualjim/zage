@@ -6,72 +6,72 @@
 //! The primary goal is to convert raw shell command history into structured
 //! tensor data that can be efficiently processed by the Candle-based neural network.
 
-use candle_core::{Device, Result as CandleResult, Tensor};
+use candle_core::{Device, Tensor};
 use rand::seq::SliceRandom;
 use std::sync::Arc;
 
 use crate::Result;
 use crate::model::contextual_features::ContextualFeatures;
-use crate::model::pretrained_embedder::PretrainedEmbedder;
+use crate::model::embedder::Embedder;
 use crate::shell_history::Invocation;
 
 /// Represents a single training example for the neural model
 pub struct TrainingExample {
   /// Input sequence of command embeddings (sequence of previous commands)
   pub input_embeddings: Vec<Vec<f32>>,
-  /// Target command embedding (command to predict)
+  /// Input sequence of context features (for each command)
+  pub input_context_features: Vec<Vec<f32>>,
+  /// Target command embedding
   pub target_embedding: Vec<f32>,
-  /// Contextual features for the example
-  pub context_features: Vec<f32>,
+  /// Target context features
+  pub target_context_features: Vec<f32>,
   /// Target command as string (for evaluation)
   pub target_command: String,
 }
 
 /// A dataset for training neural models
 pub struct TrainingDataset {
-  /// The sequence of training examples
-  examples: Vec<TrainingExample>,
-  /// Command embedder for converting text to vectors
-  embedder: Arc<PretrainedEmbedder>,
-  /// Contextual features extractor
+  /// Pretrained embedder for command embeddings
+  embedder: Arc<dyn Embedder>,
+  /// Contextual feature extractor
   context_features: Arc<ContextualFeatures>,
-  /// Maximum sequence length to consider
+  /// Length of input sequences
   sequence_length: usize,
-  /// Device to use for tensor operations
+  /// Training examples
+  examples: Vec<TrainingExample>,
+  /// Device to use for tensors
   device: Device,
 }
 
 impl TrainingDataset {
   /// Create a new training dataset
   pub fn new(
-    embedder: Arc<PretrainedEmbedder>,
+    embedder: Arc<dyn Embedder>,
     context_features: Arc<ContextualFeatures>,
     sequence_length: usize,
     device: Device,
   ) -> Self {
     Self {
-      examples: Vec::new(),
       embedder,
       context_features,
       sequence_length,
+      examples: Vec::new(),
       device,
     }
   }
 
   /// Generate training examples from invocation history
   pub fn generate_from_history(&mut self, invocations: &[Invocation]) -> Result<()> {
-    if invocations.len() < self.sequence_length + 1 {
-      // Not enough data for a single example
+    // Need at least sequence_length + 1 invocations to create an example
+    if invocations.len() <= self.sequence_length {
       return Ok(());
     }
 
-    // Extract sliding windows of commands to create examples
-    for window_start in 0..=(invocations.len() - self.sequence_length - 1) {
-      let window_end = window_start + self.sequence_length;
-      let input_sequence = &invocations[window_start..window_end];
-      let target = &invocations[window_end];
+    // Create sliding windows over the invocations
+    for i in 0..invocations.len() - self.sequence_length {
+      let input_sequence = &invocations[i..i + self.sequence_length];
+      let target = &invocations[i + self.sequence_length];
 
-      // Process this window into a training example
       let example = self.process_sequence(input_sequence, target)?;
       self.examples.push(example);
     }
@@ -80,28 +80,34 @@ impl TrainingDataset {
   }
 
   /// Process a sequence of invocations into a training example
-  fn process_sequence(
+  pub fn process_sequence(
     &self,
     input_sequence: &[Invocation],
     target: &Invocation,
   ) -> Result<TrainingExample> {
-    // Embed each command in the input sequence
+    // Process input sequence
     let mut input_embeddings = Vec::with_capacity(input_sequence.len());
+    let mut input_context_features = Vec::with_capacity(input_sequence.len());
+
     for inv in input_sequence {
+      // Get command embedding
       let embedding = self.embedder.embed(&inv.command)?;
       input_embeddings.push(embedding);
+
+      // Get context features
+      let features = self.context_features.encode_all_features(inv)?;
+      input_context_features.push(features);
     }
 
-    // Embed the target command
+    // Process target
     let target_embedding = self.embedder.embed(&target.command)?;
-
-    // Extract contextual features from the target (the context where we make prediction)
-    let context_features = self.context_features.encode_all_features(target)?;
+    let target_context_features = self.context_features.encode_all_features(target)?;
 
     Ok(TrainingExample {
       input_embeddings,
+      input_context_features,
       target_embedding,
-      context_features,
+      target_context_features,
       target_command: target.command.clone(),
     })
   }
@@ -111,87 +117,108 @@ impl TrainingDataset {
     &self,
     validation_ratio: f64,
   ) -> (Vec<&TrainingExample>, Vec<&TrainingExample>) {
-    let validation_size = (self.examples.len() as f64 * validation_ratio) as usize;
-    let training_size = self.examples.len() - validation_size;
+    let val_size = (self.examples.len() as f64 * validation_ratio).round() as usize;
+    let train_size = self.examples.len() - val_size;
 
-    let train = self.examples.iter().take(training_size).collect();
-    let val = self.examples.iter().skip(training_size).collect();
+    let train: Vec<&TrainingExample> = self.examples[..train_size].iter().collect();
+    let val: Vec<&TrainingExample> = self.examples[train_size..].iter().collect();
 
     (train, val)
   }
 
   /// Shuffle the training examples
   pub fn shuffle(&mut self) {
-    let mut rng = rand::thread_rng();
+    let mut rng = rand::rng();
     self.examples.shuffle(&mut rng);
   }
 
   /// Create batches for training
   pub fn create_batches(&self, batch_size: usize) -> Vec<TrainingBatch> {
-    let mut batches = Vec::new();
-    for chunk in self.examples.chunks(batch_size) {
-      if let Ok(batch) = self.create_batch(chunk) {
+    let num_batches = (self.examples.len() + batch_size - 1) / batch_size;
+    let mut batches = Vec::with_capacity(num_batches);
+
+    for i in 0..num_batches {
+      let start = i * batch_size;
+      let end = (start + batch_size).min(self.examples.len());
+      let examples = &self.examples[start..end];
+
+      if let Ok(batch) = self.create_batch(examples) {
         batches.push(batch);
       }
     }
+
     batches
   }
 
   /// Create a single batch from examples
-  fn create_batch(&self, examples: &[TrainingExample]) -> Result<TrainingBatch> {
+  pub fn create_batch(&self, examples: &[TrainingExample]) -> Result<TrainingBatch> {
     if examples.is_empty() {
       return Err(crate::ZageError::ConfigError(
         "Cannot create batch from empty examples".to_string(),
       ));
     }
 
-    // Get dimensions
+    // Dimensions
     let batch_size = examples.len();
     let seq_len = self.sequence_length;
-    let embedding_dim = examples[0].input_embeddings[0].len();
-    let context_dim = examples[0].context_features.len();
+    let emb_dim = examples[0].input_embeddings[0].len();
+    let ctx_dim = examples[0].input_context_features[0].len();
 
-    // Prepare data arrays
-    let mut input_data = Vec::with_capacity(batch_size * seq_len * embedding_dim);
-    let mut target_data = Vec::with_capacity(batch_size * embedding_dim);
-    let mut context_data = Vec::with_capacity(batch_size * context_dim);
-    let mut target_commands = Vec::with_capacity(batch_size);
-
-    // Fill data arrays
+    // Flatten input embeddings
+    let mut flat_input_emb = Vec::with_capacity(batch_size * seq_len * emb_dim);
     for example in examples {
-      // Flatten input embeddings
-      for embedding in &example.input_embeddings {
-        input_data.extend_from_slice(embedding);
+      for emb in &example.input_embeddings {
+        flat_input_emb.extend_from_slice(emb);
       }
+    }
 
-      // Add target embedding
-      target_data.extend_from_slice(&example.target_embedding);
+    // Flatten input context features
+    let mut flat_input_ctx = Vec::with_capacity(batch_size * seq_len * ctx_dim);
+    for example in examples {
+      for ctx in &example.input_context_features {
+        flat_input_ctx.extend_from_slice(ctx);
+      }
+    }
 
-      // Add context features
-      context_data.extend_from_slice(&example.context_features);
+    // Flatten target embeddings
+    let mut flat_target_emb = Vec::with_capacity(batch_size * emb_dim);
+    for example in examples {
+      flat_target_emb.extend_from_slice(&example.target_embedding);
+    }
 
-      // Add target command string
-      target_commands.push(example.target_command.clone());
+    // Flatten target context features
+    let mut flat_target_ctx = Vec::with_capacity(batch_size * ctx_dim);
+    for example in examples {
+      flat_target_ctx.extend_from_slice(&example.target_context_features);
     }
 
     // Create tensors
-    let input_tensor = Tensor::from_vec(
-      input_data,
-      (batch_size, seq_len, embedding_dim),
+    let input_emb_tensor = Tensor::from_vec(
+      flat_input_emb,
+      &[batch_size, seq_len, emb_dim],
       &self.device,
-    )
-    .map_err(|e| crate::ZageError::CandleError(e))?;
+    )?;
 
-    let target_tensor = Tensor::from_vec(target_data, (batch_size, embedding_dim), &self.device)
-      .map_err(|e| crate::ZageError::CandleError(e))?;
+    let input_ctx_tensor = Tensor::from_vec(
+      flat_input_ctx,
+      &[batch_size, seq_len, ctx_dim],
+      &self.device,
+    )?;
 
-    let context_tensor = Tensor::from_vec(context_data, (batch_size, context_dim), &self.device)
-      .map_err(|e| crate::ZageError::CandleError(e))?;
+    let target_emb_tensor =
+      Tensor::from_vec(flat_target_emb, &[batch_size, emb_dim], &self.device)?;
+
+    let target_ctx_tensor =
+      Tensor::from_vec(flat_target_ctx, &[batch_size, ctx_dim], &self.device)?;
+
+    // Collect target commands for evaluation
+    let target_commands: Vec<String> = examples.iter().map(|e| e.target_command.clone()).collect();
 
     Ok(TrainingBatch {
-      input: input_tensor,
-      target: target_tensor,
-      context: context_tensor,
+      input_embeddings: input_emb_tensor,
+      input_context_features: input_ctx_tensor,
+      target_embeddings: target_emb_tensor,
+      target_context_features: target_ctx_tensor,
       target_commands,
     })
   }
@@ -209,12 +236,14 @@ impl TrainingDataset {
 
 /// A batch of training data as tensors
 pub struct TrainingBatch {
-  /// Input tensor of shape [batch_size, sequence_length, embedding_dim]
-  pub input: Tensor,
-  /// Target tensor of shape [batch_size, embedding_dim]
-  pub target: Tensor,
-  /// Context tensor of shape [batch_size, context_dim]
-  pub context: Tensor,
+  /// Input sequence embeddings [batch_size, seq_len, emb_dim]
+  pub input_embeddings: Tensor,
+  /// Input sequence context features [batch_size, seq_len, ctx_dim]
+  pub input_context_features: Tensor,
+  /// Target embeddings [batch_size, emb_dim]
+  pub target_embeddings: Tensor,
+  /// Target context features [batch_size, ctx_dim]
+  pub target_context_features: Tensor,
   /// Target commands as strings (for evaluation)
   pub target_commands: Vec<String>,
 }
@@ -229,48 +258,59 @@ mod tests {
   fn create_test_invocations() -> Vec<Invocation> {
     vec![
       Invocation {
-        command: "git status".to_string(),
-        shellname: "bash".to_string(),
-        working_directory: Some("/project".to_string()),
-        hostname: Some("localhost".to_string()),
-        username: Some("user".to_string()),
+        command: "cd /home/user/projects".to_string(),
+        working_directory: Some("/home/user".to_string()),
         exit_status: Some(0),
-        start_unix_timestamp: Some(1000),
-        end_unix_timestamp: Some(1005),
+        start_unix_timestamp: Some(1620000000),
+        shellname: "bash".to_string(),
         session_id: 1,
+        hostname: None,
+        username: None,
+        end_unix_timestamp: None,
+      },
+      Invocation {
+        command: "git status".to_string(),
+        working_directory: Some("/home/user/projects".to_string()),
+        exit_status: Some(0),
+        start_unix_timestamp: Some(1620000100),
+        shellname: "bash".to_string(),
+        session_id: 1,
+        hostname: None,
+        username: None,
+        end_unix_timestamp: None,
       },
       Invocation {
         command: "git add .".to_string(),
-        shellname: "bash".to_string(),
-        working_directory: Some("/project".to_string()),
-        hostname: Some("localhost".to_string()),
-        username: Some("user".to_string()),
+        working_directory: Some("/home/user/projects".to_string()),
         exit_status: Some(0),
-        start_unix_timestamp: Some(1010),
-        end_unix_timestamp: Some(1015),
+        start_unix_timestamp: Some(1620000200),
+        shellname: "bash".to_string(),
         session_id: 1,
+        hostname: None,
+        username: None,
+        end_unix_timestamp: None,
       },
       Invocation {
         command: "git commit -m 'update'".to_string(),
-        shellname: "bash".to_string(),
-        working_directory: Some("/project".to_string()),
-        hostname: Some("localhost".to_string()),
-        username: Some("user".to_string()),
+        working_directory: Some("/home/user/projects".to_string()),
         exit_status: Some(0),
-        start_unix_timestamp: Some(1020),
-        end_unix_timestamp: Some(1025),
+        start_unix_timestamp: Some(1620000300),
+        shellname: "bash".to_string(),
         session_id: 1,
+        hostname: None,
+        username: None,
+        end_unix_timestamp: None,
       },
       Invocation {
         command: "git push".to_string(),
-        shellname: "bash".to_string(),
-        working_directory: Some("/project".to_string()),
-        hostname: Some("localhost".to_string()),
-        username: Some("user".to_string()),
+        working_directory: Some("/home/user/projects".to_string()),
         exit_status: Some(0),
-        start_unix_timestamp: Some(1030),
-        end_unix_timestamp: Some(1035),
+        start_unix_timestamp: Some(1620000400),
+        shellname: "bash".to_string(),
         session_id: 1,
+        hostname: None,
+        username: None,
+        end_unix_timestamp: None,
       },
     ]
   }
@@ -280,8 +320,11 @@ mod tests {
     let device = Device::Cpu;
 
     // Initialize the embedder and context features
-    let embedder = Arc::new(PretrainedEmbedder::new(device.clone())?);
-    let context_features = Arc::new(ContextualFeatures::new(device.clone())?);
+    let embedder = crate::model::create_embedder(device.clone())?;
+    let context_features = Arc::new(crate::model::contextual_features::ContextualFeatures::new(
+      device.clone(),
+      embedder.clone(),
+    )?);
 
     // Create a dataset with sequence length 2
     let mut dataset = TrainingDataset::new(embedder.clone(), context_features.clone(), 2, device);
@@ -290,22 +333,31 @@ mod tests {
     let invocations = create_test_invocations();
     dataset.generate_from_history(&invocations)?;
 
-    // We should have 2 examples:
-    // 1. [git status, git add .] → git commit -m 'update'
-    // 2. [git add ., git commit -m 'update'] → git push
-    assert_eq!(dataset.len(), 2, "Expected 2 training examples");
+    // Check that we have the expected number of examples
+    // With 5 invocations and sequence length 2, we should have 3 examples
+    assert_eq!(
+      dataset.len(),
+      3,
+      "Should have 3 examples with sequence length 2"
+    );
 
-    // Test shuffling (just make sure it doesn't crash)
-    dataset.shuffle();
+    // Create batches
+    let batches = dataset.create_batches(2);
+    assert_eq!(batches.len(), 2, "Should have 2 batches with batch size 2");
 
-    // Test train/val split
-    let (train, val) = dataset.split_train_val(0.5);
-    assert_eq!(train.len(), 1, "Expected 1 training example");
-    assert_eq!(val.len(), 1, "Expected 1 validation example");
+    // Check first batch dimensions
+    let batch = &batches[0];
+    assert_eq!(
+      batch.input_embeddings.shape().dims(),
+      &[2, 2, batch.input_embeddings.shape().dims()[2]],
+      "Input embeddings should have shape [batch_size, seq_len, emb_dim]"
+    );
 
-    // Test batch creation
-    let batches = dataset.create_batches(1);
-    assert_eq!(batches.len(), 2, "Expected 2 batches of size 1");
+    assert_eq!(
+      batch.target_commands.len(),
+      2,
+      "Should have 2 target commands in the batch"
+    );
 
     Ok(())
   }

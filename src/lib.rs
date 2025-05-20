@@ -4,6 +4,7 @@ mod config;
 pub use config::*;
 pub mod db;
 pub mod model;
+pub mod protocol;
 pub mod shell_history;
 pub mod socket_server;
 
