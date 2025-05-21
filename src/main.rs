@@ -544,7 +544,7 @@ fn main() -> Result<()> {
 
       // Initialize the embedder from the model module
       // This ensures we're using the intended abstraction (Embedder trait)
-      let embedder = zage::model::create_embedder(device.clone())?;
+      let embedder = zage::embedding::create_embedder(device.clone())?;
 
       // Initialize and start the socket server in a new thread
       let server_config = ServerConfig {

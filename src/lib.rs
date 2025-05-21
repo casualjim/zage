@@ -3,8 +3,8 @@ pub use err::*;
 mod config;
 pub use config::*;
 pub mod db;
+pub mod embedding;
 pub mod model;
-pub mod protocol;
 pub mod shell_history;
 pub mod socket_server;
 

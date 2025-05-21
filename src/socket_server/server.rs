@@ -8,8 +8,8 @@ use tracing::{error, info};
 
 use crate::{Result, ZageError};
 
-use crate::model::Embedder;
-use crate::protocol::ProtocolMessage;
+use crate::embedding::Embedder;
+use crate::embedding::ProtocolMessage;
 
 /// Socket server configuration
 #[derive(Debug, Clone)]
@@ -25,7 +25,7 @@ pub struct ServerConfig {
 impl Default for ServerConfig {
   fn default() -> Self {
     Self {
-      socket_path: "/tmp/zage_embedder.sock".to_string(),
+      socket_path: "/tmp/zage_embedder.sock".into(),
       num_threads: num_cpus::get(),
       timeout_secs: 30,
     }

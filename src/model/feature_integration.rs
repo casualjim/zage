@@ -12,8 +12,8 @@ use candle_core::{Device, Tensor};
 use std::sync::Arc;
 
 use crate::Result;
+use crate::embedding::Embedder;
 use crate::model::contextual_features::ContextualFeatures;
-use crate::model::embedder::Embedder;
 use crate::shell_history::Invocation;
 
 /// Configuration for feature integration
@@ -168,7 +168,7 @@ impl FeatureIntegrator {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::model::create_embedder;
+  use crate::embedding::create_embedder;
   use crate::shell_history::Invocation;
   use candle_core::Device;
 
@@ -242,7 +242,7 @@ mod tests {
     let device = Device::Cpu;
 
     // Initialize embedder and context features
-    let embedder = crate::model::create_embedder(device.clone())?;
+    let embedder = crate::embedding::create_embedder(device.clone())?;
     let context_features = Arc::new(crate::model::contextual_features::ContextualFeatures::new(
       device.clone(),
       embedder.clone(),
@@ -281,7 +281,7 @@ mod tests {
   #[test]
   fn test_feature_integration_with_normalization() -> Result<()> {
     let device = Device::Cpu;
-    let embedder = crate::model::create_embedder(device.clone())?;
+    let embedder = crate::embedding::create_embedder(device.clone())?;
     let context_features = Arc::new(crate::model::contextual_features::ContextualFeatures::new(
       device.clone(),
       embedder.clone(),
@@ -345,6 +345,8 @@ mod tests {
     // Check that non-normalized features don't have unit length
     // (unless by coincidence, which is extremely unlikely)
     let non_norm_squared: f32 = features_no_norm.iter().map(|&x| x * x).sum();
+    // Check that non-normalized features don't have unit length
+    // (unless by coincidence, which is extremely unlikely)
     assert!(
       (non_norm_squared - 1.0).abs() > 1e-5 || non_norm_squared < 1e-10,
       "Non-normalized features should not have unit length (unless they're all zeros)"
@@ -358,7 +360,7 @@ mod tests {
     let device = Device::Cpu;
 
     // Initialize embedder and context features
-    let embedder = crate::model::create_embedder(device.clone())?;
+    let embedder = crate::embedding::create_embedder(device.clone())?;
     let context_features = Arc::new(crate::model::contextual_features::ContextualFeatures::new(
       device.clone(),
       embedder.clone(),
@@ -403,7 +405,7 @@ mod tests {
     let device = Device::Cpu;
 
     // Initialize embedder and context features
-    let embedder = crate::model::create_embedder(device.clone())?;
+    let embedder = crate::embedding::create_embedder(device.clone())?;
     let context_features = Arc::new(crate::model::contextual_features::ContextualFeatures::new(
       device.clone(),
       embedder.clone(),

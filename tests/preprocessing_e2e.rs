@@ -9,8 +9,8 @@ use std::time::Instant;
 
 use candle_core::Device;
 use zage::Result;
+use zage::embedding::create_embedder;
 use zage::model::contextual_features::ContextualFeatures;
-use zage::model::create_embedder;
 use zage::model::feature_integration::{FeatureIntegrationConfig, FeatureIntegrator};
 use zage::model::training_dataset::TrainingDataset;
 use zage::shell_history::Invocation;
@@ -153,7 +153,7 @@ fn create_complex_command() -> Invocation {
 #[test]
 fn test_embedding_various_commands() -> Result<()> {
   let device = Device::Cpu;
-  let embedder = zage::model::create_embedder(device.clone())?;
+  let embedder = zage::embedding::create_embedder(device.clone())?;
 
   // Test different types of commands
   let basic_cmd = embedder.embed("ls -la")?;

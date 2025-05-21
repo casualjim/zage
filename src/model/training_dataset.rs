@@ -12,7 +12,7 @@ use std::sync::Arc;
 
 use crate::Result;
 use crate::model::contextual_features::ContextualFeatures;
-use crate::model::embedder::Embedder;
+use crate::embedding::Embedder;
 use crate::shell_history::Invocation;
 
 /// Represents a single training example for the neural model
@@ -320,7 +320,7 @@ mod tests {
     let device = Device::Cpu;
 
     // Initialize the embedder and context features
-    let embedder = crate::model::create_embedder(device.clone())?;
+    let embedder = crate::embedding::create_embedder(device.clone())?;
     let context_features = Arc::new(crate::model::contextual_features::ContextualFeatures::new(
       device.clone(),
       embedder.clone(),

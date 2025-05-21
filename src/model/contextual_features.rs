@@ -1,6 +1,6 @@
 use crate::Result;
 // Using dependency injection for embedder
-use crate::model::embedder::Embedder;
+use crate::embedding::Embedder;
 use crate::shell_history::Invocation;
 use candle_core::{Device, Tensor};
 use serde::{Deserialize, Serialize};
@@ -452,7 +452,7 @@ impl ContextualFeatures {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::model::create_embedder;
+  use crate::embedding::create_embedder;
   use crate::shell_history::Invocation;
 
   #[test]
@@ -733,7 +733,7 @@ mod tests {
   #[test]
   fn test_encode_host_user() -> Result<()> {
     let device = Device::Cpu;
-    let embedder = crate::model::create_embedder(device.clone())?;
+    let embedder = crate::embedding::create_embedder(device.clone())?;
     let features = ContextualFeatures::new(device.clone(), embedder)?;
 
     // Test with hostname and username
@@ -773,7 +773,7 @@ mod tests {
   #[test]
   fn test_encode_all_features() -> Result<()> {
     let device = Device::Cpu;
-    let embedder = crate::model::create_embedder(device.clone())?;
+    let embedder = crate::embedding::create_embedder(device.clone())?;
     let features = ContextualFeatures::new(device.clone(), embedder)?;
 
     let invocation = Invocation {

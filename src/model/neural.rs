@@ -1,6 +1,6 @@
 use crate::model::PredictionModel;
 use crate::model::contextual_features::ContextualFeatures;
-use crate::model::embedder::Embedder;
+use crate::embedding::Embedder;
 use crate::model::feature_integration::FeatureIntegrator;
 use crate::{Result, shell_history::Invocation};
 use candle_core::{Device, IndexOp};
@@ -148,7 +148,7 @@ impl PredictionModel for NeuralModel {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::model::create_embedder;
+  use crate::embedding::create_embedder;
   use candle_core::Device;
 
   #[test]
