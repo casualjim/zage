@@ -19,7 +19,6 @@ The goal is a fast, on-device predictor that is accurate for personal histories 
 - Keep the system fully local, fast, and deterministic.
 
 ### Non-Goals
-- No LSTM/Transformer models or embeddings in the core pipeline.
 - No GPU dependency.
 - No external inference services.
 
@@ -275,4 +274,3 @@ Import/record remain unchanged.
 - [ ] CLI updates (`index`, `suggest`)
 - [ ] Offline evaluation harness
 - [ ] Updated tests
-
