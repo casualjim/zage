@@ -4,30 +4,29 @@
 Draft for review and iteration.
 
 ## Summary
-Strengthen Tier 1 candidate recall first (templates, session awareness, alias expansion, repo priors). Add an **optional lightweight reranker** (GBDT/linear)
-only after recall is high. The ML layer is strictly additive and never replaces the statistical pipeline.
+Keep the system **simple and local**: strengthen Tier 1 candidate recall (templates, session awareness, alias expansion, repo priors) and add an **optional
+lightweight reranker** (GBDT/linear). No embedding-first retrieval. The statistical pipeline stays the backbone; ML only reorders candidates.
 
 ## Goals
-- Preserve current speed and reliability of suggestions.
-- Improve **recall** (candidate generation) before improving ranking.
-- Improve ranking quality (esp. next-command suggestions).
-- Keep inference fast on CPU (<20ms; target <5ms at tiny sizes).
+- Maximize **context relevance** (repo/cwd/branch/session-aware).
+- Improve **recall** via better candidate generation (templates + session awareness).
+- Improve ranking quality without heavy ML infrastructure.
 - Use local data only; no external services.
 
 ## Non-goals
-- Replacing the SQLite retrieval layer.
-- Training on any shared or public user history by default.
-- Building a large embedding model.
+- Replacing the SQLite statistical pipeline.
+- Training on shared or public user history by default.
+- Large embedding models or vector search infrastructure.
 
 ## Architecture Overview
 ```
 shell_history -> indexer.rs -> SQLite stats (Tier 1 retrieval)
                                    |
                                    v
-                           candidate set (~50)
+                         candidate set (~50–200)
                                    |
                                    v
-                     optional reranker (Tier 2)
+                     lightweight reranker (Tier 2)
                                    |
                                    v
                           final ordered suggestions
@@ -50,7 +49,7 @@ Improve recall before ML reranking:
 - Takes Tier 1 candidates + context features.
 - Outputs a score per candidate.
 - Uses **GBDT or linear model** (fast, debuggable).
-- Blends with Tier 1 score using **learned calibration**, not a fixed alpha.
+- Blends with Tier 1 score using **stacked calibration**, not a fixed alpha.
 
 ### Candidate Features
 Base features (cheap, always available):
@@ -60,7 +59,6 @@ Base features (cheap, always available):
 - Last exit status (from last command).
 - Session id match.
 - Repo root match / cwd match.
-- Time-of-day bucket (optional).
 
 Contextual features (v1):
 - Last K command tokens (token IDs); default K=12 tokens.
@@ -72,7 +70,15 @@ Contextual features (v1):
 
 Similarity features:
 - Token overlap or normalized token similarity between **session window** and candidate.
-- Optional lightweight embedding similarity (deferred).
+
+## Session Phase Detection
+Detect workflow phase from recent command patterns (last 3–5 commands):
+- **build**: `cargo build`, `make`, `npm run build`, `go build`
+- **test**: `cargo test`, `pytest`, `npm test`, `go test`
+- **deploy**: `git push`, `kubectl apply`, `docker push`
+- **edit**: editor commands like `vim`, `code`, `nano`
+- **default**: no clear pattern\n
+Phase is inferred from simple keyword rules and used as a categorical feature.
 
 ## Model Options
 ### Option A: GBDT / Linear Reranker (preferred)
@@ -82,15 +88,25 @@ Similarity features:
 ### Option B: Tiny Transformer (future)
 - Only if GBDT plateaus and recall is high.
 
+### GBDT Implementation
+- Prefer **lightgbm-rs** (LightGBM bindings) for speed/quality.
+- Fallback: **linfa** (pure Rust) if avoiding C dependencies is critical.
+- Model size target: <1MB for fast loading.
+
 ## Training Data
 Source: local `shell_history` table (user’s own data) plus optional public corpora for pretraining.
 - Build sequences of last N commands.
-- Training task: predict next token or classify candidate set.
+- Training task: **pairwise ranking** (context, next command) vs negatives.
 - Only local data by default; optional public corpora are opt-in.
+
+### Negative Sampling (Pairwise Ranking)
+- **Easy negatives**: random commands from history.
+- **Hard negatives**: commands from the same session but not the next step.
+- **Hardest negatives**: commands with similar prefixes or same head (e.g., `git status` vs `git diff`).
 
 ### Data Leakage & Evaluation Split
 - Use a **time-based split** for local evaluation (e.g., train on the oldest 80–90%, validate on the newest 10–20%).
-- For replay evaluation, predict each command using only history up to *t‑1* (no peeking at future commands).
+- For replay evaluation, predict each command using only history up to *t-1* (no peeking at future commands).
 - Keep a small “recent holdout” window (e.g., last 1–2 days or last 1k commands) to detect overfitting to recency.
 
 ### Recommended Corpora (from recent research)
@@ -105,19 +121,31 @@ Source: local `shell_history` table (user’s own data) plus optional public cor
 - Optionally include exit status, time bucket, repo root id as extra features.
 
 ### Training Triggers & Minimum Data
-- Minimum local history before training: **~1k–2k commands** for linear/GBDT; **5k–10k** for tiny transformer.
+- Minimum local history before training: **~1k–2k commands**.
 - Retrain cadence: when new history exceeds a threshold (e.g., +2k commands) or on a weekly schedule.
 - Training should be **background/idle** and cancellable; never block suggestions.
 
+### Incremental Updates
+- GBDT supports warm-start from previous model when available.
+- Add new training examples incrementally without full retrain.
+- Full retrain only on major history changes (e.g., new repo focus or >10k new commands).
+
 ## Inference
-1. Get candidate set from Tier 1.
-2. Encode last N commands (K=6 commands, 12 tokens).
-3. Score candidates with model.
-4. Blend scores using **stacked calibration**:
+1. Build a context window (K=6 commands, 12 tokens).
+2. Generate candidates from Tier 1 + Tier 1+ expansions.
+3. Apply hard constraints (prefix, slots) for completion mode.
+4. Score candidates with reranker.
+5. Blend scores using **stacked calibration**:
    - Calibrate Tier 1 and model scores to probabilities (isotonic regression or Platt scaling).
    - Combine via learned logistic stacker or weighted geometric mean.
    - Fall back to Tier 1 only when model confidence is below threshold (e.g., low calibrated top‑1 probability or small top‑1 vs top‑2 margin).
-5. Output ranked suggestions (one for autosuggest, top k for list).
+6. Output ranked suggestions (one for autosuggest, top k for list).
+
+## Graceful Degradation
+- If model unavailable: use Tier 1 scores only (silent fallback).
+- If reranker exceeds 50ms: short-circuit to Tier 1.
+- If history < 1k commands: skip training, rely on Tier 1.
+- Log degradation events for debugging (optional, off by default).
 
 ## Storage
 - Model file: `~/.local/share/zage/model/model.bin` (global)
@@ -136,17 +164,16 @@ Config/env:
 - `ZAGE_RERANK_ALPHA` to override blending for debugging (optional).
 
 ## Performance Targets
-- Retrieval: <5ms.
-- Rerank: <20ms (goal <5ms).
-- Total suggest path: <30ms.
+- No strict latency targets in v1; prioritize relevance.
+- Track latency to avoid regressions.
 
 ### Latency & Tokenization Budget
-- Avoid heavy tokenization in the hot path.
+- Avoid heavy tokenization in the hot path where possible.
 - Reuse **token_cache** for history/candidates; only tokenize current line + last N commands at inference.
 - For candidates, prefer **precomputed token features** from the indexer.
 
 ### Vocabulary Strategy
-- Keep a **fixed vocab size** (e.g., 5k) to allow incremental updates without resizing embeddings.
+- Keep a **fixed vocab size** (e.g., 5k) for optional bag‑of‑tokens features.
 - Use **normalization tokens** (PATH/NUM/HASH/IP) to reduce the long tail.
 - Use **hash buckets** for OOV tokens to capture user-specific paths without dynamic vocab growth.
 
@@ -173,9 +200,6 @@ Config/env:
 2. Add Tier 1+ recall upgrades (templates, session awareness, repo priors).
 3. Add GBDT/linear reranker (optional).
 4. Add tiny transformer only if needed.
-
-### Non-goal Alignment
-- This reranker remains optional and should not replace the Tier 1 statistical pipeline.
 
 ## Future Context Features (non‑blocking)
 - Error‑aware suggestions using “Fix‑it” style datasets (e.g., CLAI).
