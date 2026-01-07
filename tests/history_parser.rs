@@ -1,59 +1,46 @@
 use std::path::Path;
 use tempfile::tempdir;
-use zage::{AppConfig, Result, db, shell_history};
+use zage::{Result, db, shell_history};
 
-#[test]
-fn test_history_import() -> Result<()> {
-  // Create a temporary directory for the test database
+#[tokio::test]
+async fn test_history_import() -> Result<()> {
   let temp_dir = tempdir()?;
   let db_path = temp_dir.path().join("test.db");
-  let db_path_str = db_path.to_str().unwrap();
 
-  // Initialize the database
-  let config = AppConfig {
-    db_path: db_path_str.to_string(),
-  };
-  db::init(&config.db_path)?;
+  let db = db::open_db(&db_path).await?;
+  db::init(&db.conn).await?;
 
-  // Import bash history
   let bash_history_path = Path::new(env!("CARGO_MANIFEST_DIR"))
     .join("tests")
     .join("data")
     .join("bash.history");
-
   let bash_invocations = shell_history::parse_bash_history(&bash_history_path, None, None)?;
 
-  // Import zsh history
   let zsh_history_path = Path::new(env!("CARGO_MANIFEST_DIR"))
     .join("tests")
     .join("data")
     .join("zsh.history");
-
   let zsh_invocations = shell_history::parse_zsh_history(&zsh_history_path, None, None)?;
 
-  // Insert all invocations into database
-  let mut conn = db::connect(&config.db_path)?;
-  let mut tx = conn.transaction()?;
-
   for invocation in bash_invocations {
-    db::insert_invocation(&mut tx, &invocation)?;
+    let inserted = db::insert_invocation(&db.conn, &invocation).await?;
+    assert!(inserted);
   }
 
   for invocation in zsh_invocations {
-    db::insert_invocation(&mut tx, &invocation)?;
+    let inserted = db::insert_invocation(&db.conn, &invocation).await?;
+    assert!(inserted);
   }
 
-  tx.commit()?;
-
-  // Verify data was inserted correctly
-  let count = count_history_entries(&conn)?;
+  let count = count_history_entries(&db.conn).await?;
   assert!(count > 0, "No history entries were imported");
 
   Ok(())
 }
 
-/// Count the number of entries in the shell_history table
-fn count_history_entries(conn: &rusqlite::Connection) -> Result<usize> {
-  let count: usize = conn.query_row("SELECT COUNT(*) FROM shell_history", [], |row| row.get(0))?;
-  Ok(count)
+async fn count_history_entries(conn: &libsql::Connection) -> Result<usize> {
+  let mut rows = conn.query("SELECT COUNT(*) FROM shell_history", ()).await?;
+  let row = rows.next().await?.expect("expected row");
+  let count: i64 = row.get(0)?;
+  Ok(count as usize)
 }

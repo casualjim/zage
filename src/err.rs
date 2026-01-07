@@ -20,7 +20,7 @@ pub enum ZageError {
 
   #[error("Database error")]
   #[diagnostic(code(zage::db_error))]
-  DbError(#[from] rusqlite::Error),
+  DbError(#[from] libsql::Error),
 
   #[error("Invalid utf-8 bytes")]
   #[diagnostic(code(zage::invalid_utf8))]
@@ -29,14 +29,6 @@ pub enum ZageError {
   #[error("Serialization error")]
   #[diagnostic(code(zage::serialization_error))]
   SerializationError(#[from] serde_json::Error),
-
-  #[error("HF Hub error")]
-  #[diagnostic(code(zage::hf_hub_error))]
-  HfHubError(#[from] hf_hub::api::sync::ApiError),
-
-  #[error("Candle error")]
-  #[diagnostic(code(zage::candle_error))]
-  CandleError(#[from] candle_core::Error),
 
   #[error("Generic error")]
   #[diagnostic(code(zage::generic_error))]

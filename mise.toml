@@ -1,0 +1,7 @@
+[tools]
+hk = "latest"
+pkl = "latest"
+rust = "latest"
+
+[tasks.pre-commit]
+run = "hk run pre-commit"

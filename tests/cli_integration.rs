@@ -1,17 +1,17 @@
 //! Integration tests for the Zage CLI binary.
 //!
-//! These tests run the built CLI as a subprocess and verify end-to-end behavior, including database and model interactions.
-//! They use temporary directories and files to avoid polluting the user's environment.
+//! These tests run the built CLI as a subprocess and verify end-to-end behavior for
+//! history import and command recording without touching the user's environment.
 
 use assert_cmd::prelude::*;
 use color_eyre::Result;
 use predicates::prelude::*;
-use rusqlite::Connection;
 use std::fs;
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
+use zage::db::{open_db, init};
 
 /// Helper to write a minimal shell history file (zsh format)
 fn write_zsh_history(path: &Path) {
@@ -40,7 +40,7 @@ fn test_import() -> Result<()> {
   write_zsh_history(&hist_file);
 
   // Import history
-  let mut import_cmd = Command::cargo_bin("zage").unwrap();
+  let mut import_cmd = Command::new(assert_cmd::cargo::cargo_bin!("zage"));
   import_cmd
     .env("RUST_LOG", "info")
     .arg("--db-path")
@@ -53,84 +53,6 @@ fn test_import() -> Result<()> {
     .assert()
     .success()
     .stdout(predicate::str::contains("Imported history"));
-
-  Ok(())
-}
-
-#[test]
-fn test_import_and_predict() -> Result<()> {
-  let temp_dir = TempDir::new().unwrap();
-  let db_dir = temp_dir.path().join("zage_data");
-  fs::create_dir_all(&db_dir).unwrap();
-  let db_file = db_dir.join("zage.db");
-  let hist_file = temp_dir.path().join(".zsh_history");
-  write_zsh_history(&hist_file);
-
-  // Import history
-  let mut import_cmd = Command::cargo_bin("zage").unwrap();
-  import_cmd
-    .env("RUST_LOG", "info")
-    .arg("--db-path")
-    .arg(db_file.to_str().unwrap())
-    .arg("import")
-    .arg("--shell")
-    .arg("zsh")
-    .arg(hist_file.to_str().unwrap());
-  import_cmd
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("Imported history"));
-
-  // Train model using the imported history (n=2 default)
-  let mut train_cmd = Command::cargo_bin("zage").unwrap();
-  train_cmd
-    .env("RUST_LOG", "info")
-    .arg("--db-path")
-    .arg(db_file.to_str().unwrap())
-    .arg("train")
-    .arg("--model-type")
-    .arg("ngram");
-  train_cmd
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("Model trained successfully"));
-
-  // Predict
-  let mut predict_cmd = Command::cargo_bin("zage").unwrap();
-  predict_cmd
-    .env("RUST_LOG", "info")
-    .arg("--db-path")
-    .arg(db_file.to_str().unwrap())
-    .arg("predict")
-    .arg("--model-type")
-    .arg("ngram");
-  predict_cmd
-    .assert()
-    .success()
-    .stdout(predicate::str::contains("Predicted commands"))
-    .stdout(predicate::str::contains("cargo build")); // Check for specific prediction
-
-  Ok(())
-}
-
-#[test]
-fn test_predict_without_import() -> Result<()> {
-  let temp_dir = TempDir::new().unwrap();
-  let db_dir = temp_dir.path().join("zage_data");
-  fs::create_dir_all(&db_dir).unwrap();
-  let db_file = db_dir.join("zage.db");
-
-  let mut predict_cmd = Command::cargo_bin("zage").unwrap();
-  predict_cmd
-    .env("RUST_LOG", "info")
-    .arg("--db-path")
-    .arg(db_file.to_str().unwrap())
-    .arg("predict");
-  predict_cmd
-    .env("RUST_LOG", "info")
-    .assert()
-    .failure()
-    .stdout(predicate::str::contains("No command history found"));
 
   Ok(())
 }
@@ -138,7 +60,7 @@ fn test_predict_without_import() -> Result<()> {
 #[test]
 fn test_record_command() -> Result<()> {
   let (_temp_dir, db_path, _) = setup_test_environment()?;
-  let mut cmd = Command::cargo_bin("zage").unwrap();
+  let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("zage"));
 
   let cmd_str = "echo 'hello zage'";
   let wd = "/tmp/zage_test_dir";
@@ -171,19 +93,27 @@ fn test_record_command() -> Result<()> {
   // Optional: check stderr/stdout if needed
 
   // Verify the record in the database
-  let conn = Connection::open(&db_path)?;
-  let mut stmt = conn.prepare(
-    "SELECT command, working_directory, exit_status, start_unix_timestamp, end_unix_timestamp, session_id FROM shell_history WHERE command = ?1",
-  )?;
-  let invocation = stmt.query_row([cmd_str], |row| {
-    Ok((
-      row.get::<_, String>(0)?,
-      row.get::<_, String>(1)?,
-      row.get::<_, i64>(2)?,
-      row.get::<_, i64>(3)?,
-      row.get::<_, i64>(4)?,
-      row.get::<_, i64>(5)?,
-    ))
+  let rt = tokio::runtime::Runtime::new()?;
+  let invocation = rt.block_on(async {
+    let db = open_db(&db_path).await?;
+    init(&db.conn).await?;
+    let mut rows = db
+      .conn
+      .query(
+        "SELECT command, working_directory, exit_status, start_unix_timestamp, end_unix_timestamp, session_id FROM shell_history WHERE command = ?",
+        libsql::params![cmd_str.to_string()],
+      )
+      .await?;
+    let row = rows.next().await?.expect("expected row");
+    let record = (
+      row.get::<String>(0)?,
+      row.get::<String>(1)?,
+      row.get::<i64>(2)?,
+      row.get::<i64>(3)?,
+      row.get::<i64>(4)?,
+      row.get::<i64>(5)?,
+    );
+    Ok::<_, zage::ZageError>(record)
   })?;
 
   assert_eq!(invocation.0, cmd_str);

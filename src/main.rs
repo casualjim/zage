@@ -1,7 +1,5 @@
 use std::path::PathBuf;
 
-use candle_core::Device;
-use candle_core::backend::BackendDevice;
 use clap::{Parser, Subcommand};
 use color_eyre::eyre::Result;
 use dirs::home_dir;
@@ -11,15 +9,12 @@ use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use uzers;
-use zage::db::{
-  connect, get_recent_invocations, get_sequence_scores, import_history, init, insert_invocation,
-};
-use zage::model::sequence::SequenceScore;
-use zage::model::sequence::analyze_and_store_sequences;
-use zage::model::{PredictionModel, markov::MarkovChain, ngram::NGramModel};
+use zage::db::{import_history, init, insert_invocation, open_db, update_stats_for_invocation};
+use zage::indexer::rebuild_stats;
+use zage::predict::{SuggestConfig, suggest};
+use zage::sequence::{SequenceConfig, analyze_sequences, analyze_token_sequences};
 use zage::shell_history::{Invocation, Shell, get_hostname, parse_bash_history, parse_zsh_history};
-use zage::socket_server::ServerConfig;
-use zage::socket_server::SocketServer;
+use zage::tokenize::tokenize;
 
 /// CLI for Zage
 #[derive(Parser)]
@@ -50,57 +45,58 @@ enum Commands {
     shell: Shell,
   },
 
-  /// Train prediction model
-  Train {
-    /// Model type to use (default: ngram)
-    #[arg(long, default_value = "markov")]
-    model_type: String,
+  /// Build or rebuild index tables for prediction
+  Index {
+    /// Maximum number of commands to index (oldest first)
+    #[arg(long)]
+    max_commands: Option<usize>,
 
-    /// N-gram size for ngram model (default: 2)
-    #[arg(long, default_value = "2")]
-    n: usize,
-
-    /// Maximum number of commands to use for training
-    #[arg(long, default_value = "1000")]
-    max_commands: usize,
-
-    /// Enable context (directory, hostname, etc.) for predictions
-    #[arg(long, default_value = "true")]
-    use_context: bool,
+    /// Also recompute sequence statistics
+    #[arg(long)]
+    with_sequences: bool,
   },
 
-  /// Predict next command
-  Predict {
-    /// Number of predictions to return
+  /// Suggest next command
+  Suggest {
+    /// Number of suggestions to return
     #[arg(short, long, default_value = "5")]
     count: usize,
 
-    /// Model type to use (default: markov)
-    #[arg(long, default_value = "markov")]
-    model_type: String,
-
-    /// N-gram size for ngram model (default: 2)
-    #[arg(long, default_value = "2")]
-    n: usize,
-
-    /// Show prediction probabilities
-    #[arg(short, long)]
-    show_probability: bool,
-
-    /// Skip sequence detection in predict
+    /// Current input line (prefix)
     #[arg(long)]
-    skip_sequence: bool,
-  },
+    current_line: Option<String>,
 
-  /// Show model statistics
-  Stats {
-    /// Model type to use (default: markov)
-    #[arg(long, default_value = "markov")]
-    model_type: String,
+    /// Number of recent commands to consider as context
+    #[arg(long, default_value = "10")]
+    recent_limit: usize,
 
-    /// N-gram size for ngram model (default: 2)
-    #[arg(long, default_value = "2")]
-    n: usize,
+    /// Override current working directory
+    #[arg(long)]
+    cwd: Option<String>,
+
+    /// Override hostname
+    #[arg(long)]
+    hostname: Option<String>,
+
+    /// Override username
+    #[arg(long)]
+    username: Option<String>,
+
+    /// Override session id
+    #[arg(long, env = "ZAGE_SESSION_ID")]
+    session_id: Option<i64>,
+
+    /// Disable sequence-based candidates
+    #[arg(long)]
+    no_sequences: bool,
+
+    /// Output format for completion (plain or zsh)
+    #[arg(long, env = "ZAGE_COMPLETION_FORMAT", default_value = "plain")]
+    completion_format: CompletionFormat,
+
+    /// Show per-suggestion scores
+    #[arg(long)]
+    show_scores: bool,
   },
 
   /// Analyze and store frequent command sequences
@@ -112,8 +108,11 @@ enum Commands {
     #[arg(long, default_value = "0.5")]
     min_confidence: f64,
     /// Minimum lift threshold
-    #[arg(long, default_value = "1.5")]
+    #[arg(long, default_value = "1.2")]
     min_lift: f64,
+    /// Maximum sequence length (2 or 3)
+    #[arg(long, default_value = "3")]
+    max_len: usize,
   },
 
   /// (Internal) Record a single command invocation (used by shell hooks)
@@ -138,27 +137,16 @@ enum Commands {
     session_id: Option<i64>, // Optional for now
   },
 
-  /// Run as a Unix domain socket server for embedding requests
-  Server {
-    /// Path to the Unix domain socket
-    #[arg(long, default_value = "/tmp/zage_embedder.sock")]
-    socket_path: String,
-
-    /// Number of worker threads
-    #[arg(long, default_value_os = num_cpus::get().to_string())]
-    num_threads: usize,
-
-    /// Connection timeout in seconds
-    #[arg(long, default_value = "30")]
-    timeout_secs: u64,
-
-    /// Device to use for embeddings (cpu, metal, cuda)
-    #[arg(long, default_value = "cpu")]
-    device: String,
-  },
 }
 
-fn main() -> Result<()> {
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum CompletionFormat {
+  Plain,
+  Zsh,
+}
+
+#[tokio::main]
+async fn main() -> Result<()> {
   let cli = Cli::parse();
   setup_panic!();
   color_eyre::install()?;
@@ -186,8 +174,11 @@ fn main() -> Result<()> {
       .expect("Could not determine data directory")
   };
   debug!("Initializing db at {}", db_path.display());
-  std::fs::create_dir_all(db_path.parent().unwrap())?;
-  init(&db_path)?;
+  if let Some(parent) = db_path.parent() {
+    std::fs::create_dir_all(parent)?;
+  }
+  let db = open_db(&db_path).await?;
+  init(&db.conn).await?;
 
   match &cli.command {
     Some(Commands::Import {
@@ -211,224 +202,155 @@ fn main() -> Result<()> {
         path
       });
 
-      let mut conn = connect(&db_path)?;
       let hostname_s = hostname.clone();
       let username_s = username.clone();
       let invocations = match shell {
         Shell::Zsh => parse_zsh_history(&history_file, hostname_s.clone(), username_s.clone())?,
         Shell::Bash => parse_bash_history(&history_file, hostname_s, username_s)?,
       };
-      import_history(&mut conn, invocations)?;
+      import_history(&db.conn, invocations).await?;
+      println!("Imported history from {:?}", history_file);
       info!("Imported history from {:?}", history_file);
     }
 
-    Some(Commands::Train {
-      model_type,
-      n,
+    Some(Commands::Index {
       max_commands,
-      use_context,
+      with_sequences,
     }) => {
-      info!("Training {} model with n={}", model_type, n);
+      let report = rebuild_stats(&db.conn, *max_commands).await?;
+      println!(
+        "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}",
+        report.commands, report.transitions, report.contexts, report.token_cache
+      );
 
-      let mut conn = connect(&db_path)?;
-      let invocations = get_recent_invocations(&mut conn, *max_commands)?;
-
-      if invocations.is_empty() {
-        println!("No command history found. Please import history first.");
-        return Ok(());
-      }
-
-      info!("Retrieved {} commands for training", invocations.len());
-
-      match model_type.as_str() {
-        "ngram" => {
-          // Create a new model or load existing one
-          let mut model = NGramModel::load_from_db(&mut conn, *n)?;
-          model.set_use_context(*use_context);
-
-          // Train the model
-          model.train(invocations)?;
-
-          // Save the model back to the database
-          model.save_to_db(&mut conn)?;
-
-          let stats = model.stats();
-          println!("Model trained successfully and saved to database");
-          println!("Model statistics:");
-          println!("  N-gram size: {}", stats.n_value);
-          println!("  Total commands: {}", stats.total_commands);
-          println!("  Unique contexts: {}", stats.context_count);
-          println!("  Unique commands: {}", stats.command_count);
-          println!("  Directory contexts: {}", stats.dir_context_count);
-        }
-        "markov" => {
-          let mut model = MarkovChain::load_from_db(&mut conn)?;
-          model.train(invocations)?;
-          model.save_to_db(&mut conn)?;
-          println!("Markov model trained and saved to database");
-        }
-        _ => {
-          println!("Unsupported model type: {}", model_type);
-        }
+      if *with_sequences {
+        let seq_report = analyze_sequences(&db.conn, SequenceConfig::default()).await?;
+        println!(
+          "Command sequence stats: sequences={}, bigrams={}, trigrams={}",
+          seq_report.sequences, seq_report.bigrams, seq_report.trigrams
+        );
+        let token_report = analyze_token_sequences(&db.conn, SequenceConfig::default()).await?;
+        println!(
+          "Token sequence stats: sequences={}, bigrams={}, trigrams={}",
+          token_report.sequences, token_report.bigrams, token_report.trigrams
+        );
       }
     }
 
-    Some(Commands::Predict {
+    Some(Commands::Suggest {
       count,
-      model_type,
-      n,
-      show_probability,
-      skip_sequence,
+      current_line,
+      recent_limit,
+      cwd,
+      hostname,
+      username,
+      session_id,
+      no_sequences,
+      completion_format,
+      show_scores,
     }) => {
-      info!("Predicting next command using {} model", model_type);
+      let cwd = match cwd.clone() {
+        Some(val) => Some(val),
+        None => std::env::current_dir()
+          .ok()
+          .and_then(|p| p.to_str().map(|s| s.to_string())),
+      };
 
-      let mut conn = connect(&db_path)?;
-      let recent_invocations = get_recent_invocations(&mut conn, 10)?;
+      let hostname = hostname.clone().or_else(|| Some(get_hostname()));
+      let username = username.clone().or_else(|| {
+        uzers::get_current_username().map(|v| v.to_string_lossy().into_owned())
+      });
 
-      if recent_invocations.is_empty() {
-        println!("No command history found. Please import history first.");
-        std::process::exit(1);
-      }
+      let has_prefix = current_line.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
 
-      match model_type.as_str() {
-        "ngram" => {
-          // Load the model from the database
-          let model = NGramModel::load_from_db(&mut conn, *n)?;
+      if has_prefix {
+        let base_config = SuggestConfig {
+          max_results: *count,
+          recent_limit: *recent_limit,
+          prefix: current_line.clone(),
+          cwd: cwd.clone(),
+          hostname: hostname.clone(),
+          username: username.clone(),
+          session_id: *session_id,
+          use_sequences: !*no_sequences,
+        };
 
-          // Get raw predictions with probabilities for display
-          let context: Vec<String> = recent_invocations
-            .iter()
-            .skip(recent_invocations.len().saturating_sub(model.n() - 1))
-            .map(|inv| inv.command.clone())
-            .collect();
+        let completions = suggest(&db.conn, base_config).await?;
+        if completions.is_empty() {
+          return Ok(());
+        }
 
-          // Get the current working directory
-          let current_dir = std::env::current_dir()
-            .ok()
-            .and_then(|p| p.to_str().map(|s| s.to_string()));
+        let prefix_str = current_line.clone().unwrap_or_default();
+        let prefix_tokens = tokenize(&prefix_str);
+        let ends_with_space = prefix_str
+          .chars()
+          .last()
+          .map(|c| c.is_whitespace())
+          .unwrap_or(false);
+        let target_index = if prefix_tokens.is_empty() {
+          0
+        } else if ends_with_space {
+          prefix_tokens.len()
+        } else {
+          prefix_tokens.len() - 1
+        };
 
-          if let Some(dir) = &current_dir {
-            println!("Current directory: {}", dir);
-          }
-
-          println!("Based on recent commands: {}", context.join(" → "));
-
-          // For raw predictions with probabilities, we need to implement a custom method
-          if *show_probability {
-            // This is a simplified version - in a real implementation, we'd add a method to get predictions with probabilities
-            println!("Predicted commands (with probabilities):");
-            let predictions = model.predict(&recent_invocations, *count)?;
-            for (i, cmd) in predictions.iter().enumerate() {
-              // Simplified probability display
-              println!("  {}. {} (likely)", i + 1, cmd);
-            }
-          } else {
-            let predictions = model.predict(&recent_invocations, *count)?;
-
-            if predictions.is_empty() {
-              println!("No predictions available for your recent command history.");
-            } else {
-              println!("Predicted commands:");
-              for (i, cmd) in predictions.iter().enumerate() {
-                println!("  {}. {}", i + 1, cmd);
+        let mut seen = std::collections::HashSet::new();
+        for suggestion in completions {
+          let candidate_tokens = tokenize(&suggestion.command);
+          if let Some(tok) = candidate_tokens.get(target_index) {
+            if seen.insert(tok.raw.clone()) {
+              match completion_format {
+                CompletionFormat::Plain => {
+                  if *show_scores {
+                    println!("{}\t{:.4}", tok.raw, suggestion.score);
+                  } else {
+                    println!("{}", tok.raw);
+                  }
+                }
+                CompletionFormat::Zsh => {
+                  let desc = if *show_scores {
+                    Some(format!("{:.4}", suggestion.score))
+                  } else {
+                    None
+                  };
+                  println!("{}", format_zsh_item(&tok.raw, desc.as_deref()));
+                }
               }
             }
           }
         }
-        "markov" => {
-          let model = MarkovChain::load_from_db(&mut conn)?;
-          let predictions = model.predict(&recent_invocations, *count)?;
-          if predictions.is_empty() {
-            println!("No predictions available for your recent command history.");
-          } else {
-            println!("Predicted commands:");
-            for (i, cmd) in predictions.iter().enumerate() {
-              println!("  {}. {}", i + 1, cmd);
-            }
-          }
-        }
-        _ => {
-          println!("Unsupported model type: {}", model_type);
-        }
-      }
-
-      if !*skip_sequence {
-        // Fetch a larger history for sequence detection
-        let all_invocations = get_recent_invocations(&mut conn, 10000)?;
-        let total_invocations = all_invocations.len();
-
-        // --- Sequence Detection ---
-        if total_invocations > 0 {
-          info!("Running sequence detection...");
-
-          // Define sequence detection parameters (use defaults for now)
-          let seq_min_support = 2;
-          let seq_min_confidence = 0.5;
-          let seq_min_lift = 1.5;
-          let top_n_sequences = 5;
-
-          // Run SQL-based sequence analysis
-          analyze_and_store_sequences(
-            &mut conn,
-            seq_min_support,
-            seq_min_confidence,
-            seq_min_lift,
-          )?;
-          let raw_scores = get_sequence_scores(&mut conn, top_n_sequences)?;
-
-          // Convert raw scores to model scores
-          let scores: Vec<SequenceScore> = raw_scores
-            .iter()
-            .filter_map(|raw| SequenceScore::from_raw(raw).ok())
-            .collect();
-
-          if !scores.is_empty() {
-            println!(
-              "\n--- Detected Command Sequences (Top {} by Lift) ---",
-              top_n_sequences
-            );
-            for (i, s) in scores.iter().enumerate() {
-              let seq_str = s.sequence.join(" → ");
-              println!(
-                "  {}. {} (S: {}, C: {:.2}, L: {:.2})",
-                i + 1,
-                seq_str,
-                s.support,
-                s.confidence,
-                s.lift
-              );
-            }
-          } else {
-            println!("\n--- No command sequences detected with current thresholds ---");
-          }
-        } else {
-          println!("\n--- Skipping sequence detection (no history) ---");
-        }
       } else {
-        info!("Skipping sequence detection per user request");
-      }
-    }
+        let config = SuggestConfig {
+          max_results: *count,
+          recent_limit: *recent_limit,
+          prefix: None,
+          cwd,
+          hostname,
+          username,
+          session_id: *session_id,
+          use_sequences: !*no_sequences,
+        };
 
-    Some(Commands::Stats { model_type, n }) => {
-      info!("Displaying statistics for {} model", model_type);
-
-      let mut conn = connect(&db_path)?;
-
-      match model_type.as_str() {
-        "ngram" => {
-          // Load the model from the database
-          let model = NGramModel::load_from_db(&mut conn, *n)?;
-          let stats = model.stats();
-
-          println!("Model statistics:");
-          println!("  N-gram size: {}", stats.n_value);
-          println!("  Total commands: {}", stats.total_commands);
-          println!("  Unique contexts: {}", stats.context_count);
-          println!("  Unique commands: {}", stats.command_count);
-          println!("  Directory contexts: {}", stats.dir_context_count);
-        }
-        _ => {
-          println!("Unsupported model type: {}", model_type);
+        let suggestions = suggest(&db.conn, config).await?;
+        for suggestion in suggestions {
+          match completion_format {
+            CompletionFormat::Plain => {
+              if *show_scores {
+                println!("{}\t{:.4}", suggestion.command, suggestion.score);
+              } else {
+                println!("{}", suggestion.command);
+              }
+            }
+            CompletionFormat::Zsh => {
+              let desc = if *show_scores {
+                Some(format!("{:.4}", suggestion.score))
+              } else {
+                None
+              };
+              println!("{}", format_zsh_item(&suggestion.command, desc.as_deref()));
+            }
+          }
         }
       }
     }
@@ -437,14 +359,24 @@ fn main() -> Result<()> {
       min_support,
       min_confidence,
       min_lift,
+      max_len,
     }) => {
-      info!(
-        "Analyzing command sequences with support ≥ {}, confidence ≥ {}, lift ≥ {}",
-        min_support, min_confidence, min_lift
+      let config = SequenceConfig {
+        min_support: *min_support,
+        min_confidence: *min_confidence,
+        min_lift: *min_lift,
+        max_len: *max_len,
+      };
+      let report = analyze_sequences(&db.conn, config.clone()).await?;
+      println!(
+        "Command sequence stats: sequences={}, bigrams={}, trigrams={}",
+        report.sequences, report.bigrams, report.trigrams
       );
-      let mut conn = connect(&db_path)?;
-      analyze_and_store_sequences(&mut conn, *min_support, *min_confidence, *min_lift)?;
-      println!("Sequence analysis complete and stored in sequence_scores table.");
+      let token_report = analyze_token_sequences(&db.conn, config).await?;
+      println!(
+        "Token sequence stats: sequences={}, bigrams={}, trigrams={}",
+        token_report.sequences, token_report.bigrams, token_report.trigrams
+      );
     }
 
     Some(Commands::Record {
@@ -456,9 +388,6 @@ fn main() -> Result<()> {
       session_id,
     }) => {
       info!("Recording command invocation");
-
-      let mut conn = connect(&db_path)?;
-      let mut tx = conn.transaction()?;
 
       // Get hostname and username (best effort)
       let hostname = get_hostname();
@@ -486,76 +415,13 @@ fn main() -> Result<()> {
 
       // Record the command invocation
       debug!("Inserting invocation: {:?}", invocation);
-      if let Err(e) = insert_invocation(&mut tx, &invocation) {
-        // Handle potential duplicate errors gracefully if needed
-        if e.to_string().contains("UNIQUE constraint failed") {
-          info!("Duplicate invocation skipped: {:?}", invocation.command);
-        } else {
-          // Re-throw other errors
-          return Err(e.into());
-        }
-      } else {
+      let inserted = insert_invocation(&db.conn, &invocation).await?;
+      if inserted {
+        update_stats_for_invocation(&db.conn, &invocation).await?;
         info!("Invocation recorded successfully.");
+      } else {
+        info!("Duplicate invocation skipped: {:?}", invocation.command);
       }
-
-      tx.commit()?;
-    }
-
-    Some(Commands::Server {
-      socket_path,
-      num_threads,
-      timeout_secs,
-      device,
-    }) => {
-      info!("Starting socket server on {}", socket_path);
-
-      // Create the device based on the user's choice
-      let device = match device.to_lowercase().as_str() {
-        "cpu" => Device::Cpu,
-        "metal" => {
-          #[cfg(all(target_os = "macos", target_arch = "aarch64"))]
-          {
-            Device::Metal(candle_core::MetalDevice::new(0).expect("Failed to create Metal device"))
-          }
-          #[cfg(not(all(target_os = "macos", target_arch = "aarch64")))]
-          {
-            println!("Metal device is only supported on macOS with Apple Silicon.");
-            println!("Falling back to CPU device.");
-            Device::Cpu
-          }
-        }
-        "cuda" => {
-          #[cfg(feature = "cuda")]
-          {
-            Device::Cuda(candle_core::CudaDevice::new(0).expect("Failed to create CUDA device"))
-          }
-          #[cfg(not(feature = "cuda"))]
-          {
-            println!("CUDA device is not supported in this build.");
-            println!("Falling back to CPU device.");
-            Device::Cpu
-          }
-        }
-        _ => {
-          println!("Unknown device: {}. Falling back to CPU device.", device);
-          Device::Cpu
-        }
-      };
-
-      // Initialize the embedder from the model module
-      // This ensures we're using the intended abstraction (Embedder trait)
-      let embedder = zage::embedding::create_embedder(device.clone())?;
-
-      // Initialize and start the socket server in a new thread
-      let server_config = ServerConfig {
-        socket_path: socket_path.clone(),
-        num_threads: *num_threads,
-        timeout_secs: *timeout_secs,
-      };
-
-      // Create and start the server
-      let server = SocketServer::new(server_config, embedder);
-      server.start()?;
     }
 
     None => {
@@ -566,4 +432,29 @@ fn main() -> Result<()> {
   }
 
   Ok(())
+}
+
+fn format_zsh_item(word: &str, desc: Option<&str>) -> String {
+  let mut escaped = String::new();
+  for ch in word.chars() {
+    match ch {
+      '\\' => escaped.push_str("\\\\"),
+      ':' => escaped.push_str("\\:"),
+      _ => escaped.push(ch),
+    }
+  }
+  match desc {
+    Some(d) => {
+      let mut d_esc = String::new();
+      for ch in d.chars() {
+        match ch {
+          '\\' => d_esc.push_str("\\\\"),
+          ':' => d_esc.push_str("\\:"),
+          _ => d_esc.push(ch),
+        }
+      }
+      format!("{}:{}", escaped, d_esc)
+    }
+    None => format!("{}:", escaped),
+  }
 }

@@ -7,6 +7,15 @@ if ! declare -F preexec_invoke_exec &>/dev/null; then
     return 1
 fi
 
+# Expose the current shell session id for completion scoring
+export ZAGE_SESSION_ID=$$
+
+# Capture aliases from the running shell for completion scoring
+if [[ -z "$ZAGE_ALIASES" ]]; then
+    ZAGE_ALIASES="$(alias -p)"
+    export ZAGE_ALIASES
+fi
+
 # Variables to store command context
 _zage_cmd_start_time=""
 _zage_cmd_string=""

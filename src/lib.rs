@@ -3,10 +3,12 @@ pub use err::*;
 mod config;
 pub use config::*;
 pub mod db;
-pub mod embedding;
-pub mod model;
+pub mod indexer;
+pub mod predict;
+pub mod sequence;
+pub mod tokenize;
 pub mod shell_history;
-pub mod socket_server;
+pub mod repo;
 
 #[cfg(test)]
 mod tests {

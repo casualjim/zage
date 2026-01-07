@@ -8,8 +8,6 @@ mod zsh;
 pub use bash::parse_history_file as parse_bash_history;
 pub use zsh::parse_history_file as parse_zsh_history;
 
-use crate::db::DBInvocation;
-
 /// Which shell history format to import
 #[derive(Clone, Copy, Debug)]
 pub enum Shell {
@@ -45,56 +43,6 @@ pub struct Invocation {
 impl Invocation {
   fn sameish(&self, other: &Self) -> bool {
     self.command == other.command && self.start_unix_timestamp == other.start_unix_timestamp
-  }
-}
-
-impl From<DBInvocation> for Invocation {
-  fn from(db_inv: DBInvocation) -> Self {
-    Self {
-      command: db_inv.command,
-      shellname: db_inv.shellname,
-      working_directory: db_inv.working_directory,
-      hostname: db_inv.hostname,
-      username: db_inv.username,
-      exit_status: db_inv.exit_status,
-      start_unix_timestamp: db_inv.start_unix_timestamp,
-      end_unix_timestamp: db_inv.end_unix_timestamp,
-      session_id: db_inv.session_id,
-    }
-  }
-}
-
-impl From<Invocation> for DBInvocation {
-  fn from(inv: Invocation) -> Self {
-    Self {
-      id: uuid::Uuid::now_v7().to_string(),
-      command: inv.command,
-      shellname: inv.shellname,
-      working_directory: inv.working_directory,
-      hostname: inv.hostname,
-      username: inv.username,
-      exit_status: inv.exit_status,
-      start_unix_timestamp: inv.start_unix_timestamp,
-      end_unix_timestamp: inv.end_unix_timestamp,
-      session_id: inv.session_id,
-    }
-  }
-}
-
-impl From<&Invocation> for DBInvocation {
-  fn from(inv: &Invocation) -> Self {
-    Self {
-      id: uuid::Uuid::now_v7().to_string(),
-      command: inv.command.clone(),
-      shellname: inv.shellname.clone(),
-      working_directory: inv.working_directory.clone(),
-      hostname: inv.hostname.clone(),
-      username: inv.username.clone(),
-      exit_status: inv.exit_status,
-      start_unix_timestamp: inv.start_unix_timestamp,
-      end_unix_timestamp: inv.end_unix_timestamp,
-      session_id: inv.session_id,
-    }
   }
 }
 

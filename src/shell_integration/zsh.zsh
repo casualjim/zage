@@ -9,6 +9,18 @@ if ! command -v zage &> /dev/null; then
     return 1
 fi
 
+# Expose the current shell session id for completion scoring
+export ZAGE_SESSION_ID=$$
+
+# Capture aliases from the running shell for completion scoring
+if [[ -z "$ZAGE_ALIASES" ]]; then
+  ZAGE_ALIASES="$(alias -L)"
+  export ZAGE_ALIASES
+fi
+
+# Use zsh completion format for zage suggestions
+export ZAGE_COMPLETION_FORMAT="zsh"
+
 # Optional debug log file: set ZAGE_ZSH_DEBUG to a filepath to enable
 : ${ZAGE_ZSH_DEBUG:=""}
 
