@@ -21,6 +21,30 @@ fi
 # Use zsh completion format for zage suggestions
 export ZAGE_COMPLETION_FORMAT="zsh"
 
+# Enable zsh-autosuggestions backend unless explicitly disabled
+: ${ZAGE_AUTOSUGGEST_DISABLE:="0"}
+
+# Provide a zsh-autosuggestions strategy backed by zage
+_zsh_autosuggest_strategy_zage() {
+    emulate -L zsh
+    local prefix="$BUFFER"
+    local suggestion
+    suggestion="$(zage suggest --autosuggest --count 1 --current-line "$prefix" 2>/dev/null | head -n 1)"
+    if [[ -n "$suggestion" && "$suggestion" == "$prefix"* && "$suggestion" != "$prefix" ]]; then
+      suggestion="${suggestion}"
+    else
+      suggestion=""
+    fi
+}
+
+if [[ "$ZAGE_AUTOSUGGEST_DISABLE" != "1" ]]; then
+  if [[ -z "${ZSH_AUTOSUGGEST_STRATEGY+x}" ]]; then
+    ZSH_AUTOSUGGEST_STRATEGY=(zage)
+  elif (( ${ZSH_AUTOSUGGEST_STRATEGY[(I)zage]} == 0 )); then
+    ZSH_AUTOSUGGEST_STRATEGY=(zage $ZSH_AUTOSUGGEST_STRATEGY)
+  fi
+fi
+
 # Optional debug log file: set ZAGE_ZSH_DEBUG to a filepath to enable
 : ${ZAGE_ZSH_DEBUG:=""}
 

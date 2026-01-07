@@ -97,6 +97,10 @@ enum Commands {
     /// Show per-suggestion scores
     #[arg(long)]
     show_scores: bool,
+
+    /// Return full-line suggestions for autosuggest backends
+    #[arg(long)]
+    autosuggest: bool,
   },
 
   /// Analyze and store frequent command sequences
@@ -248,6 +252,7 @@ async fn main() -> Result<()> {
       no_sequences,
       completion_format,
       show_scores,
+      autosuggest,
     }) => {
       let cwd = match cwd.clone() {
         Some(val) => Some(val),
@@ -277,6 +282,13 @@ async fn main() -> Result<()> {
 
         let completions = suggest(&db.conn, base_config).await?;
         if completions.is_empty() {
+          return Ok(());
+        }
+
+        if *autosuggest {
+          if let Some(first) = completions.first() {
+            println!("{}", first.command);
+          }
           return Ok(());
         }
 
@@ -333,6 +345,12 @@ async fn main() -> Result<()> {
         };
 
         let suggestions = suggest(&db.conn, config).await?;
+        if *autosuggest {
+          if let Some(first) = suggestions.first() {
+            println!("{}", first.command);
+          }
+          return Ok(());
+        }
         for suggestion in suggestions {
           match completion_format {
             CompletionFormat::Plain => {

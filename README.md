@@ -46,6 +46,17 @@ Ask for suggestions:
 zage suggest --current-line "git " --count 5
 ```
 
+Zsh autosuggestions (ghost text):
+
+```bash
+# 1) Install zsh-autosuggestions with your plugin manager
+# 2) Source Zage's zsh integration after your plugins
+source /path/to/zage/src/shell_integration/zsh.zsh
+
+# Optional: disable zage's autosuggest backend
+# export ZAGE_AUTOSUGGEST_DISABLE=1
+```
+
 Completion tuning (optional):
 
 ```bash
