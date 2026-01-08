@@ -19,11 +19,12 @@ libsql = { version = "0.6.0", features = ["remote", "core", "replication"] }
 miette = { version = "7", features = ["fancy"] }
 ndarray = "0.17.0"
 rand = "0.9.1"
+rkyv = { version = "0.7.44", features = ["validation"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 serde_yaml = "0.9"
 thiserror = "2"
-tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
+tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 toml = "0.9"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }

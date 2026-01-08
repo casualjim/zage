@@ -10,9 +10,10 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use zage::db::{import_history, init, insert_invocation, open_db, update_stats_for_invocation};
 use zage::indexer::rebuild_stats;
-use zage::predict::{SuggestConfig, suggest};
+use zage::predict::{ScoreBreakdown, SuggestConfig, Suggestion, suggest};
 use zage::rerank::{TrainConfig, model_status, reset_model, train_model};
 use zage::sequence::{SequenceConfig, analyze_sequences, analyze_token_sequences};
+use zage::server::{self, Request, Response};
 use zage::shell_history::{Invocation, Shell, get_hostname, parse_bash_history, parse_zsh_history};
 use zage::tokenize::tokenize;
 
@@ -119,6 +120,12 @@ enum Commands {
     max_len: usize,
   },
 
+  /// Run or manage the suggestion daemon
+  Server {
+    #[command(subcommand)]
+    command: Option<ServerCommand>,
+  },
+
   /// Train the lightweight reranker model
   Train {
     /// Number of training epochs
@@ -162,6 +169,16 @@ enum Commands {
     #[arg(long)]
     session_id: Option<i64>, // Optional for now
   },
+}
+
+#[derive(Subcommand, Debug)]
+enum ServerCommand {
+  /// Start the daemon (foreground)
+  Start,
+  /// Stop a running daemon
+  Stop,
+  /// Query daemon status
+  Status,
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -296,6 +313,18 @@ async fn main() -> Result<()> {
         .map(|s| !s.is_empty())
         .unwrap_or(false);
 
+      let mut server_suggestions = None;
+      let request = Request::Suggest {
+        current_line: current_line.clone().unwrap_or_default(),
+        working_directory: cwd.clone().unwrap_or_else(|| "".to_string()),
+        session_id: session_id.unwrap_or_default() as u64,
+        limit: *count as u32,
+      };
+      if let Ok(Some(response)) = server::try_request(request).await
+        && let Response::Suggestions { items } = response {
+          server_suggestions = Some(map_server_suggestions(items));
+        }
+
       if has_prefix {
         let base_config = SuggestConfig {
           max_results: *count,
@@ -308,7 +337,11 @@ async fn main() -> Result<()> {
           use_sequences: !*no_sequences,
         };
 
-        let completions = suggest(&db.conn, base_config).await?;
+        let completions = if let Some(items) = server_suggestions {
+          items
+        } else {
+          suggest(&db.conn, base_config).await?
+        };
         if completions.is_empty() {
           return Ok(());
         }
@@ -372,7 +405,11 @@ async fn main() -> Result<()> {
           use_sequences: !*no_sequences,
         };
 
-        let suggestions = suggest(&db.conn, config).await?;
+        let suggestions = if let Some(items) = server_suggestions {
+          items
+        } else {
+          suggest(&db.conn, config).await?
+        };
         if *autosuggest {
           if let Some(first) = suggestions.first() {
             println!("{}", first.command);
@@ -467,6 +504,41 @@ async fn main() -> Result<()> {
       println!("Reranker model reset");
     }
 
+    Some(Commands::Server { command }) => match command {
+      Some(ServerCommand::Start) | None => {
+        server::run_server(db_path.as_path()).await?;
+      }
+      Some(ServerCommand::Status) => match server::try_request(Request::Status).await? {
+        Some(Response::Status {
+          model_loaded,
+          history_count,
+          last_train,
+        }) => {
+          println!(
+            "Daemon status: model_loaded={}, history_count={}, last_train={:?}",
+            model_loaded, history_count, last_train
+          );
+        }
+        Some(Response::Error { message }) => {
+          println!("Daemon error: {}", message);
+        }
+        _ => {
+          println!("Daemon not available");
+        }
+      },
+      Some(ServerCommand::Stop) => {
+        if let Some(response) = server::try_request(Request::Shutdown).await? {
+          match response {
+            Response::Ack => println!("Daemon shutdown requested"),
+            Response::Error { message } => println!("Daemon error: {}", message),
+            _ => println!("Daemon responded unexpectedly"),
+          }
+        } else {
+          println!("Daemon not available");
+        }
+      }
+    },
+
     Some(Commands::Record {
       command,
       working_directory,
@@ -476,6 +548,18 @@ async fn main() -> Result<()> {
       session_id,
     }) => {
       info!("Recording command invocation");
+
+      let server_req = Request::Record {
+        command: command.clone(),
+        working_directory: working_directory.clone(),
+        exit_status: *exit_status as i32,
+        start_timestamp: *start_timestamp,
+        end_timestamp: *end_timestamp,
+        session_id: session_id.unwrap_or_else(|| std::process::id() as i64) as u64,
+      };
+      if let Ok(Some(Response::Ack)) = server::try_request(server_req).await {
+        return Ok(());
+      }
 
       // Get hostname and username (best effort)
       let hostname = get_hostname();
@@ -560,4 +644,15 @@ fn format_zsh_item(word: &str, desc: Option<&str>) -> String {
     }
     None => format!("{}:", escaped),
   }
+}
+
+fn map_server_suggestions(items: Vec<server::Suggestion>) -> Vec<Suggestion> {
+  items
+    .into_iter()
+    .map(|item| Suggestion {
+      command: item.command,
+      score: item.score as f64,
+      breakdown: ScoreBreakdown::default(),
+    })
+    .collect()
 }
