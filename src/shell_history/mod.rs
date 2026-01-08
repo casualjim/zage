@@ -134,13 +134,13 @@ mod tests {
     file.write_all(history).unwrap();
     let invocations = parse_bash_history(&file_path, None, None).unwrap();
     assert_eq!(
-      invocations.iter().filter(|i| i.command == "echo foo").count(),
+      invocations
+        .iter()
+        .filter(|i| i.command == "echo foo")
+        .count(),
       2
     );
-    assert_eq!(
-      invocations.iter().filter(|i| i.command == "ls").count(),
-      1
-    );
+    assert_eq!(invocations.iter().filter(|i| i.command == "ls").count(), 1);
   }
 
   #[test]

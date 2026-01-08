@@ -32,6 +32,8 @@ struct PhaseStat {
   confidence_sum: f64,
 }
 
+type ContextKey = (String, Option<String>, Option<String>, Option<String>);
+
 pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Result<IndexReport> {
   let mut command_stats: HashMap<String, Stat> = HashMap::new();
   let mut transition_stats: HashMap<(String, String), Stat> = HashMap::new();
@@ -39,8 +41,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
   let mut repo_command_stats: HashMap<(String, String), Stat> = HashMap::new();
   let mut repo_transition_stats_v2: HashMap<(String, String, Option<i64>, String), Stat> =
     HashMap::new();
-  let mut context_stats: HashMap<(String, Option<String>, Option<String>, Option<String>), Stat> =
-    HashMap::new();
+  let mut context_stats: HashMap<ContextKey, Stat> = HashMap::new();
   let mut arg_stats: HashMap<(String, String, String, i64, String, String), Stat> = HashMap::new();
   let mut arg_stats_any: HashMap<(String, String, String, String, String), Stat> = HashMap::new();
   let mut flag_stats: HashMap<(String, String, String, String), Stat> = HashMap::new();
@@ -211,7 +212,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
     prev_exit_status = exit_status;
     prev_repo_root = repo_root;
     processed += 1;
-    if processed % progress_interval == 0 {
+    if processed.is_multiple_of(progress_interval) {
       info!("Indexed {} commands so far", processed);
     }
   }

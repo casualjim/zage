@@ -1,10 +1,10 @@
+use libsql::{Builder, Connection, Database};
 use std::env;
 use std::path::Path;
-use libsql::{Builder, Connection, Database};
 
-use crate::{Result, shell_history::Invocation};
 use crate::repo::find_repo_root;
 use crate::tokenize::{extract_command_parts, normalize_token, tokenize_index};
+use crate::{Result, shell_history::Invocation};
 use serde_json;
 use tracing::info;
 
@@ -14,7 +14,9 @@ pub struct Db {
 }
 
 pub async fn open_db<P: AsRef<Path>>(db_path: P) -> Result<Db> {
-  let url = env::var("TURSO_DATABASE_URL").ok().or_else(|| env::var("LIBSQL_URL").ok());
+  let url = env::var("TURSO_DATABASE_URL")
+    .ok()
+    .or_else(|| env::var("LIBSQL_URL").ok());
   let token = env::var("TURSO_AUTH_TOKEN")
     .ok()
     .or_else(|| env::var("LIBSQL_AUTH_TOKEN").ok());
@@ -23,7 +25,9 @@ pub async fn open_db<P: AsRef<Path>>(db_path: P) -> Result<Db> {
   let db = if let Some(url) = url {
     let token = token.unwrap_or_default();
     if let Some(replica_path) = replica_path {
-      Builder::new_remote_replica(replica_path, url, token).build().await?
+      Builder::new_remote_replica(replica_path, url, token)
+        .build()
+        .await?
     } else {
       Builder::new_remote(url, token).build().await?
     }
@@ -81,7 +85,7 @@ where
       continue;
     }
     inserted += 1;
-    if processed % progress_interval == 0 {
+    if processed.is_multiple_of(progress_interval) {
       info!(
         "Imported {} history entries ({} inserted)",
         processed, inserted
@@ -89,7 +93,10 @@ where
     }
   }
   conn.execute("COMMIT", ()).await?;
-  info!("Imported {} history entries ({} inserted)", processed, inserted);
+  info!(
+    "Imported {} history entries ({} inserted)",
+    processed, inserted
+  );
   Ok(())
 }
 
@@ -119,10 +126,7 @@ pub async fn get_recent_invocations(conn: &Connection, limit: usize) -> Result<V
   Ok(invs)
 }
 
-pub async fn update_stats_for_invocation(
-  conn: &Connection,
-  invocation: &Invocation,
-) -> Result<()> {
+pub async fn update_stats_for_invocation(conn: &Connection, invocation: &Invocation) -> Result<()> {
   let now = invocation
     .start_unix_timestamp
     .or(invocation.end_unix_timestamp)
@@ -388,7 +392,10 @@ mod import_tests {
     let invocations = shell_history::parse_zsh_history(tmp.path(), None, None)?;
     import_history(&db.conn, invocations).await?;
 
-    let mut rows = db.conn.query("SELECT COUNT(*) FROM shell_history", ()).await?;
+    let mut rows = db
+      .conn
+      .query("SELECT COUNT(*) FROM shell_history", ())
+      .await?;
     let row = rows.next().await?.expect("expected row");
     let count: i64 = row.get(0)?;
     assert_eq!(count, 3);
@@ -490,7 +497,7 @@ async fn execute_batch(conn: &Connection, sql: &str) -> Result<()> {
   }
 
   for stmt in statements {
-  conn.execute(stmt, ()).await?;
+    conn.execute(stmt, ()).await?;
   }
   Ok(())
 }

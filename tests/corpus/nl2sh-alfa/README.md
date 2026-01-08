@@ -20,7 +20,7 @@ This dataset is a collection of natural language (English) instructions and corr
 ### Dataset Description
 This dataset contains a test set of 600 manually verified instruction-command pairs, and a training set of 40,639 unverified pairs for the development and benchmarking of machine translation models. The creation of NL2SH-ALFA was motivated by the need for larger, more accurate NL2SH datasets. The associated [InterCode-ALFA](https://github.com/westenfelder/InterCode-ALFA) benchmark uses the NL2SH-ALFA test set. For more information, please refer to the [paper](https://arxiv.org/abs/2502.06858).
 - **Curated by:** [Anyscale Learning For All (ALFA) Group at MIT-CSAIL](https://alfagroup.csail.mit.edu/)
-- **Language:** English 
+- **Language:** English
 - **License:** MIT License
 
 ### Usage
@@ -45,13 +45,13 @@ This dataset is not intended for natural languages other than English, scripting
 ## Dataset Structure
 The training set contains two columns:
 - `nl`: string - natural language instruction
-- `bash`: string - Bash command  
+- `bash`: string - Bash command
 
 The test set contains four columns:
 - `nl`: string - natural language instruction
 - `bash`: string - Bash command
 - `bash2`: string - Bash command (alternative)
-- `difficulty`: int - difficulty level (0, 1, 2) corresponding to (easy, medium, hard)  
+- `difficulty`: int - difficulty level (0, 1, 2) corresponding to (easy, medium, hard)
 
 Both sets are unordered.
 
@@ -60,7 +60,7 @@ Both sets are unordered.
 The NL2SH-ALFA dataset was created to increase the amount of NL2SH training data and to address errors in the test sets of previous datasets.
 
 ### Source Data
-The dataset was produced by combining, deduplicating and filtering multiple datasets from previous work. Additionally, it includes instruction-command pairs scraped from the [tldr-pages](https://github.com/tldr-pages/tldr). Please refer to Section 4.1 of the [paper](https://arxiv.org/abs/2502.06858) for more information about data collection, processing and filtering.  
+The dataset was produced by combining, deduplicating and filtering multiple datasets from previous work. Additionally, it includes instruction-command pairs scraped from the [tldr-pages](https://github.com/tldr-pages/tldr). Please refer to Section 4.1 of the [paper](https://arxiv.org/abs/2502.06858) for more information about data collection, processing and filtering.
 Source datasets:
 - [nl2bash](https://huggingface.co/datasets/jiacheng-ye/nl2bash)
 - [LinuxCommands](https://huggingface.co/datasets/Romit2004/LinuxCommands)
@@ -79,17 +79,17 @@ Source datasets:
 - Users are encouraged to filter or balance the utilities in the dataset according to their use case.
 - Models trained on this dataset may produce incorrect Bash commands, especially for uncommon utilities. Users are encouraged to verify translations.
 
-## Citation 
+## Citation
 **BibTeX:**
 ```
 @misc{westenfelder2025llmsupportednaturallanguagebash,
-      title={LLM-Supported Natural Language to Bash Translation}, 
+      title={LLM-Supported Natural Language to Bash Translation},
       author={Finnian Westenfelder and Erik Hemberg and Miguel Tulla and Stephen Moskal and Una-May O'Reilly and Silviu Chiricescu},
       year={2025},
       eprint={2502.06858},
       archivePrefix={arXiv},
       primaryClass={cs.CL},
-      url={https://arxiv.org/abs/2502.06858}, 
+      url={https://arxiv.org/abs/2502.06858},
 }
 ```
 

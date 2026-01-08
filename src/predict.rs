@@ -2,19 +2,40 @@ use std::collections::{HashMap, HashSet};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use libsql::{Connection, Value};
-use serde_json;
 
 use crate::Result;
 use crate::db::get_recent_invocations;
 use crate::repo::find_repo_root;
-use crate::sequence::candidates_from_sequences;
-use crate::tokenize::{extract_command_parts, normalized_tokens, token_strings, tokenize, tokenize_index, Token, TokenKind};
+use crate::tokenize::normalized_tokens;
 
-#[derive(Clone, Debug)]
-struct PhaseSignal {
-  phase: String,
-  confidence: f64,
-}
+mod aliases;
+mod candidates;
+mod phase_support;
+mod ranking;
+mod sql;
+mod templates;
+
+use aliases::{add_alias_candidates, build_prefix_variants, expand_alias, load_aliases};
+use candidates::{
+  add_context_candidates, add_global_candidates, add_head_candidates, add_phase_candidates,
+  add_recent_candidates, add_repo_candidates, add_sequence_candidates, add_session_candidates,
+  add_template_candidates, add_transition_candidates, load_session_stats, push_opt_i64,
+  push_opt_string,
+};
+use phase_support::{
+  PhaseSignal, command_head_for_phase, detect_session_phase, load_phase_for_heads,
+  phase_match_boost,
+};
+use ranking::{load_normalized_tokens, low_confidence, recency_score, token_similarity};
+use sql::query_prepared;
+use templates::{
+  arg_template_candidates, env_template_candidates, split_env_prefix, token_sequence_predictions,
+};
+
+const GLOBAL_CANDIDATE_LIMIT: usize = 50;
+const GLOBAL_CANDIDATE_LIMIT_FALLBACK: usize = 200;
+const RECENT_CANDIDATE_LIMIT: usize = 200;
+const RECENT_CANDIDATE_LIMIT_FALLBACK: usize = 500;
 
 #[derive(Debug, Clone)]
 pub struct SuggestConfig {
@@ -125,6 +146,7 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
     return suggest_completions(conn, &config, &prefix, &prefix_norm).await;
   }
 
+  let aliases = load_aliases();
   let recent = get_recent_invocations(conn, config.recent_limit).await?;
   if recent.is_empty() {
     return Ok(Vec::new());
@@ -149,10 +171,23 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
     add_transition_candidates(conn, last, last_exit_status, &repo_root, &mut candidates).await?;
   }
 
+  if let Some(session_id) = config.session_id {
+    add_session_candidates(conn, session_id, &mut candidates).await?;
+  }
+
+  let recent_head_set: HashSet<String> = recent_heads.iter().cloned().collect();
+  let phase_for_recent = load_phase_for_heads(conn, &recent_head_set).await?;
+  let session_phase = detect_session_phase(&recent_heads, &phase_for_recent);
+  add_phase_candidates(conn, session_phase.as_ref(), &repo_root, &mut candidates).await?;
+
   add_context_candidates(conn, &config, &mut candidates).await?;
 
   if !repo_root.is_empty() {
     add_repo_candidates(conn, &repo_root, &mut candidates).await?;
+  }
+
+  if !recent_heads.is_empty() {
+    add_head_candidates(conn, &recent_heads, &repo_root, &mut candidates).await?;
   }
 
   if config.use_sequences {
@@ -164,16 +199,20 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
   }
 
   if candidates.is_empty() {
-    add_global_candidates(conn, &mut candidates).await?;
+    add_global_candidates(conn, &mut candidates, GLOBAL_CANDIDATE_LIMIT).await?;
     add_template_candidates(conn, &repo_root, &mut candidates).await?;
   }
 
-  let now = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs() as i64;
+  if candidates.len() < 25 {
+    add_recent_candidates(conn, &mut candidates, RECENT_CANDIDATE_LIMIT).await?;
+    add_global_candidates(conn, &mut candidates, GLOBAL_CANDIDATE_LIMIT).await?;
+    add_template_candidates(conn, &repo_root, &mut candidates).await?;
+  }
 
-  let weights = RankingWeights::default();
+  if !aliases.is_empty() {
+    add_alias_candidates(&aliases, &mut candidates);
+  }
+
   let session_stats = if let Some(session_id) = config.session_id {
     load_session_stats(conn, session_id, config.recent_limit).await?
   } else {
@@ -191,6 +230,61 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
     }
   }
 
+  let now = SystemTime::now()
+    .duration_since(UNIX_EPOCH)
+    .unwrap_or_default()
+    .as_secs() as i64;
+
+  let weights = RankingWeights::default();
+  let mut scored = score_candidates(
+    conn,
+    &candidates,
+    &prefix_norm,
+    session_phase.as_ref(),
+    &recent_heads,
+    &weights,
+    now,
+  )
+  .await?;
+
+  if low_confidence(&scored) {
+    let before = candidates.len();
+    expand_low_confidence_candidates(
+      conn,
+      &repo_root,
+      &recent_heads,
+      &recent_commands,
+      config.use_sequences,
+      &mut candidates,
+    )
+    .await?;
+    if candidates.len() > before {
+      scored = score_candidates(
+        conn,
+        &candidates,
+        &prefix_norm,
+        session_phase.as_ref(),
+        &recent_heads,
+        &weights,
+        now,
+      )
+      .await?;
+    }
+  }
+
+  scored.truncate(config.max_results);
+  Ok(scored)
+}
+
+async fn score_candidates(
+  conn: &Connection,
+  candidates: &HashMap<String, Candidate>,
+  prefix_norm: &[String],
+  session_phase: Option<&PhaseSignal>,
+  recent_heads: &[String],
+  weights: &RankingWeights,
+  now: i64,
+) -> Result<Vec<Suggestion>> {
   let mut candidate_heads: HashMap<String, String> = HashMap::new();
   let mut phase_heads: HashSet<String> = recent_heads.iter().cloned().collect();
   for candidate in candidates.values() {
@@ -200,31 +294,37 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
     }
   }
   let phase_for_head = load_phase_for_heads(conn, &phase_heads).await?;
-  let session_phase = detect_session_phase(&recent_heads, &phase_for_head);
-  let mut scored: Vec<Suggestion> = Vec::new();
 
+  let mut scored: Vec<Suggestion> = Vec::new();
   for candidate in candidates.values() {
     let recency = recency_score(now, candidate.last_seen);
-    let frequency = (candidate.freq as f64).ln_1p()
-      + 0.5 * (candidate.repo_freq as f64).ln_1p();
+    let frequency = (candidate.freq as f64).ln_1p() + 0.5 * (candidate.repo_freq as f64).ln_1p();
     let transition = (candidate.transition_freq as f64).ln_1p()
       + 0.7 * (candidate.repo_transition_freq as f64).ln_1p();
-    let mut context = (candidate.context_freq as f64).ln_1p()
-      + 0.8 * (candidate.session_freq as f64).ln_1p();
+    let mut context =
+      (candidate.context_freq as f64).ln_1p() + 0.8 * (candidate.session_freq as f64).ln_1p();
     let candidate_phase = candidate_heads
       .get(&candidate.command)
       .and_then(|head| phase_for_head.get(head));
-    context += phase_match_boost(session_phase.as_ref(), candidate_phase);
+    context += phase_match_boost(session_phase, candidate_phase);
     let sequence = if candidate.sequence_confidence > 0.0 {
-      let order_weight = if candidate.sequence_prefix_len >= 2 { 1.0 } else { 0.7 };
+      let order_weight = if candidate.sequence_prefix_len >= 2 {
+        1.0
+      } else {
+        0.7
+      };
       candidate.sequence_confidence * candidate.sequence_lift.max(1.0) * order_weight
     } else {
       0.0
     };
-    let similarity = token_similarity(
-      &prefix_norm,
-      &load_normalized_tokens(conn, &candidate.command).await?,
-    );
+    let similarity = if prefix_norm.is_empty() {
+      0.0
+    } else {
+      token_similarity(
+        prefix_norm,
+        &load_normalized_tokens(conn, &candidate.command).await?,
+      )
+    };
     let session_recency = if candidate.session_last_seen > 0 {
       recency_score(now, candidate.session_last_seen)
     } else {
@@ -253,9 +353,35 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
     });
   }
 
-  scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
-  scored.truncate(config.max_results);
+  scored.sort_by(|a, b| {
+    b.score
+      .partial_cmp(&a.score)
+      .unwrap_or(std::cmp::Ordering::Equal)
+  });
   Ok(scored)
+}
+
+async fn expand_low_confidence_candidates(
+  conn: &Connection,
+  repo_root: &str,
+  recent_heads: &[String],
+  recent_commands: &[String],
+  use_sequences: bool,
+  candidates: &mut HashMap<String, Candidate>,
+) -> Result<()> {
+  add_recent_candidates(conn, candidates, RECENT_CANDIDATE_LIMIT_FALLBACK).await?;
+  add_global_candidates(conn, candidates, GLOBAL_CANDIDATE_LIMIT_FALLBACK).await?;
+  if !repo_root.is_empty() {
+    add_repo_candidates(conn, repo_root, candidates).await?;
+  }
+  if !recent_heads.is_empty() {
+    add_head_candidates(conn, recent_heads, repo_root, candidates).await?;
+  }
+  if use_sequences {
+    add_sequence_candidates(conn, recent_commands, candidates).await?;
+  }
+  add_template_candidates(conn, repo_root, candidates).await?;
+  Ok(())
 }
 
 async fn suggest_completions(
@@ -296,9 +422,7 @@ async fn completion_candidates(
     .as_deref()
     .and_then(find_repo_root)
     .map(|root| root.trim_end_matches('/').to_string());
-  let project_like = project_root
-    .as_ref()
-    .map(|root| format!("{}/%", root));
+  let project_like = project_root.as_ref().map(|root| format!("{}/%", root));
 
   let (env_prefix, match_prefix) = split_env_prefix(prefix);
   let match_prefixes = build_prefix_variants(&match_prefix, aliases);
@@ -353,9 +477,7 @@ async fn completion_candidates(
     params.push(Value::from(format!("{prefix_value}%")));
   }
 
-  let mut rows = conn
-    .query(&sql, libsql::params_from_iter(params))
-    .await?;
+  let mut rows = query_prepared(conn, &sql, libsql::params_from_iter(params)).await?;
 
   let now = SystemTime::now()
     .duration_since(UNIX_EPOCH)
@@ -409,7 +531,12 @@ async fn completion_candidates(
 
     let mut suggestion_command = command;
     if !env_prefix.is_empty() {
-      let prefix = if env_prefix.chars().last().map(|c| c.is_whitespace()).unwrap_or(false) {
+      let prefix = if env_prefix
+        .chars()
+        .last()
+        .map(|c| c.is_whitespace())
+        .unwrap_or(false)
+      {
         env_prefix.clone()
       } else {
         format!("{env_prefix} ")
@@ -466,649 +593,23 @@ async fn completion_candidates(
     scored = merged.into_values().collect();
   }
 
-  scored.sort_by(|a, b| b.score.partial_cmp(&a.score).unwrap_or(std::cmp::Ordering::Equal));
+  scored.sort_by(|a, b| {
+    b.score
+      .partial_cmp(&a.score)
+      .unwrap_or(std::cmp::Ordering::Equal)
+  });
   scored.truncate(config.max_results);
   Ok(scored)
-}
-
-async fn add_transition_candidates(
-  conn: &Connection,
-  last_command: &str,
-  last_exit_status: Option<i64>,
-  repo_root: &str,
-  candidates: &mut HashMap<String, Candidate>,
-) -> Result<()> {
-  if !repo_root.is_empty() {
-    let found = fetch_transition_candidates(
-      conn,
-      "repo_transition_stats_v2",
-      Some(repo_root),
-      last_command,
-      last_exit_status,
-      true,
-      candidates,
-    )
-    .await?;
-    if !found {
-      let _ = fetch_transition_candidates(
-        conn,
-        "repo_transition_stats_v2",
-        Some(repo_root),
-        last_command,
-        None,
-        true,
-        candidates,
-      )
-      .await?;
-    }
-  }
-
-  let found = fetch_transition_candidates(
-    conn,
-    "transition_stats_v2",
-    None,
-    last_command,
-    last_exit_status,
-    false,
-    candidates,
-  )
-  .await?;
-  if !found {
-    let _ = fetch_transition_candidates(
-      conn,
-      "transition_stats_v2",
-      None,
-      last_command,
-      None,
-      false,
-      candidates,
-    )
-    .await?;
-  }
-  Ok(())
-}
-
-async fn fetch_transition_candidates(
-  conn: &Connection,
-  table: &str,
-  repo_root: Option<&str>,
-  last_command: &str,
-  last_exit_status: Option<i64>,
-  is_repo: bool,
-  candidates: &mut HashMap<String, Candidate>,
-) -> Result<bool> {
-  let mut sql = String::from("SELECT next_command, freq, last_seen FROM ");
-  sql.push_str(table);
-  sql.push_str(" WHERE ");
-  let mut clauses: Vec<String> = Vec::new();
-  let mut params: Vec<Value> = Vec::new();
-
-  if let Some(root) = repo_root {
-    clauses.push("repo_root = ?".to_string());
-    params.push(Value::from(root.to_string()));
-  }
-  clauses.push("prev_command = ?".to_string());
-  params.push(Value::from(last_command.to_string()));
-
-  if let Some(status) = last_exit_status {
-    clauses.push("prev_exit_status = ?".to_string());
-    params.push(Value::from(status));
-  } else {
-    clauses.push("prev_exit_status IS NULL".to_string());
-  }
-
-  sql.push_str(&clauses.join(" AND "));
-  sql.push_str(" ORDER BY freq DESC LIMIT 50");
-
-  let mut rows = conn
-    .query(&sql, libsql::params_from_iter(params))
-    .await?;
-  let mut found = false;
-  while let Some(row) = rows.next().await? {
-    let cmd = row.get::<String>(0)?;
-    let freq = row.get::<i64>(1)?;
-    let last_seen = row.get::<i64>(2)?;
-    let entry = candidates
-      .entry(cmd.clone())
-      .or_insert_with(|| new_candidate(&cmd));
-    if is_repo {
-      entry.repo_transition_freq = entry.repo_transition_freq.max(freq);
-    } else {
-      entry.transition_freq = entry.transition_freq.max(freq);
-    }
-    entry.last_seen = entry.last_seen.max(last_seen);
-    found = true;
-  }
-  Ok(found)
-}
-
-async fn add_context_candidates(
-  conn: &Connection,
-  config: &SuggestConfig,
-  candidates: &mut HashMap<String, Candidate>,
-) -> Result<()> {
-  let mut rows_vec: Vec<(String, i64, i64)> = Vec::new();
-
-  if let (Some(cwd), Some(host), Some(user)) =
-    (&config.cwd, &config.hostname, &config.username)
-  {
-    let mut rows = conn
-      .query(
-        "SELECT command, freq, last_seen FROM context_stats
-         WHERE working_directory = ? AND hostname = ? AND username = ?
-         ORDER BY freq DESC LIMIT 50",
-        (cwd.clone(), host.clone(), user.clone()),
-      )
-      .await?;
-    while let Some(row) = rows.next().await? {
-      rows_vec.push((row.get(0)?, row.get(1)?, row.get(2)?));
-    }
-  }
-
-  if rows_vec.is_empty() {
-    if let Some(cwd) = &config.cwd {
-      let mut rows = conn
-        .query(
-          "SELECT command, freq, last_seen FROM context_stats WHERE working_directory = ? ORDER BY freq DESC LIMIT 50",
-          libsql::params![cwd.clone()],
-        )
-        .await?;
-      while let Some(row) = rows.next().await? {
-        rows_vec.push((row.get(0)?, row.get(1)?, row.get(2)?));
-      }
-    }
-  }
-
-  for (cmd, freq, last_seen) in rows_vec {
-    let entry = candidates
-      .entry(cmd.clone())
-      .or_insert_with(|| new_candidate(&cmd));
-    entry.context_freq = entry.context_freq.max(freq);
-    entry.last_seen = entry.last_seen.max(last_seen);
-  }
-  Ok(())
-}
-
-async fn add_repo_candidates(
-  conn: &Connection,
-  repo_root: &str,
-  candidates: &mut HashMap<String, Candidate>,
-) -> Result<()> {
-  let mut rows = conn
-    .query(
-      "SELECT command, freq, last_seen FROM repo_command_stats WHERE repo_root = ? ORDER BY freq DESC LIMIT 50",
-      libsql::params![repo_root.to_string()],
-    )
-    .await?;
-  while let Some(row) = rows.next().await? {
-    let cmd = row.get::<String>(0)?;
-    let freq = row.get::<i64>(1)?;
-    let last_seen = row.get::<i64>(2)?;
-    let entry = candidates
-      .entry(cmd.clone())
-      .or_insert_with(|| new_candidate(&cmd));
-    entry.repo_freq = entry.repo_freq.max(freq);
-    entry.last_seen = entry.last_seen.max(last_seen);
-  }
-  Ok(())
-}
-
-async fn add_global_candidates(
-  conn: &Connection,
-  candidates: &mut HashMap<String, Candidate>,
-) -> Result<()> {
-  let mut rows = conn
-    .query(
-      "SELECT command, freq, last_seen FROM command_stats ORDER BY freq DESC LIMIT 50",
-      (),
-    )
-    .await?;
-  while let Some(row) = rows.next().await? {
-    let cmd = row.get::<String>(0)?;
-    let freq = row.get::<i64>(1)?;
-    let last_seen = row.get::<i64>(2)?;
-    let entry = candidates
-      .entry(cmd.clone())
-      .or_insert_with(|| new_candidate(&cmd));
-    entry.freq = entry.freq.max(freq);
-    entry.last_seen = entry.last_seen.max(last_seen);
-  }
-  Ok(())
-}
-
-async fn add_sequence_candidates(
-  conn: &Connection,
-  recent_commands: &[String],
-  candidates: &mut HashMap<String, Candidate>,
-) -> Result<()> {
-  let sequences = candidates_from_sequences(conn, recent_commands, 200).await?;
-  for seq in sequences {
-    let entry = candidates
-      .entry(seq.command.clone())
-      .or_insert_with(|| new_candidate(&seq.command));
-    if seq.prefix_len >= entry.sequence_prefix_len {
-      entry.sequence_confidence = entry.sequence_confidence.max(seq.confidence);
-      entry.sequence_lift = entry.sequence_lift.max(seq.lift);
-      entry.sequence_prefix_len = entry.sequence_prefix_len.max(seq.prefix_len);
-    }
-  }
-  Ok(())
-}
-
-#[derive(Debug)]
-struct TemplateStat {
-  value: String,
-  freq: i64,
-  last_seen: i64,
-}
-
-async fn add_template_candidates(
-  conn: &Connection,
-  repo_root: &str,
-  candidates: &mut HashMap<String, Candidate>,
-) -> Result<()> {
-  let mut heads: HashSet<String> = HashSet::new();
-  for cmd in candidates.keys() {
-    if let Some(head) = command_head_for_phase("sh", cmd) {
-      heads.insert(head);
-    }
-  }
-  if heads.is_empty() {
-    return Ok(());
-  }
-
-  let mut added = 0usize;
-  for head in heads {
-    let (flags, flags_repo) = fetch_template_flags(conn, repo_root, &head, 3).await?;
-    let (args0, args0_repo) = fetch_template_args(conn, repo_root, &head, 0, 3).await?;
-    let (args1, args1_repo) = fetch_template_args(conn, repo_root, &head, 1, 2).await?;
-
-    let mut base = head.clone();
-    let mut flags_freq = 0i64;
-    let mut flags_last_seen = 0i64;
-    if !flags.is_empty() {
-      base.push(' ');
-      base.push_str(
-        &flags
-          .iter()
-          .map(|stat| stat.value.clone())
-          .collect::<Vec<_>>()
-          .join(" "),
-      );
-      for stat in &flags {
-        flags_freq += stat.freq;
-        flags_last_seen = flags_last_seen.max(stat.last_seen);
-      }
-      add_template_candidate(
-        candidates,
-        &base,
-        flags_freq,
-        flags_last_seen,
-        flags_repo,
-      );
-    }
-
-    for arg0 in &args0 {
-      let mut cmd = base.clone();
-      if !cmd.is_empty() {
-        cmd.push(' ');
-      }
-      cmd.push_str(&arg0.value);
-      let freq = flags_freq + arg0.freq;
-      let last_seen = flags_last_seen.max(arg0.last_seen);
-      add_template_candidate(
-        candidates,
-        &cmd,
-        freq,
-        last_seen,
-        flags_repo || args0_repo,
-      );
-
-      for arg1 in &args1 {
-        let mut cmd = cmd.clone();
-        cmd.push(' ');
-        cmd.push_str(&arg1.value);
-        let freq = freq + arg1.freq;
-        let last_seen = last_seen.max(arg1.last_seen);
-        add_template_candidate(
-          candidates,
-          &cmd,
-          freq,
-          last_seen,
-          flags_repo || args0_repo || args1_repo,
-        );
-        added += 1;
-        if added > 50 {
-          return Ok(());
-        }
-      }
-    }
-  }
-
-  Ok(())
-}
-
-fn add_template_candidate(
-  candidates: &mut HashMap<String, Candidate>,
-  command: &str,
-  freq: i64,
-  last_seen: i64,
-  is_repo: bool,
-) {
-  if candidates.contains_key(command) {
-    return;
-  }
-  let mut entry = new_candidate(command);
-  if is_repo {
-    entry.repo_freq = freq;
-  } else {
-    entry.freq = freq;
-  }
-  entry.last_seen = last_seen;
-  candidates.insert(command.to_string(), entry);
-}
-
-async fn fetch_template_flags(
-  conn: &Connection,
-  repo_root: &str,
-  head: &str,
-  limit: usize,
-) -> Result<(Vec<TemplateStat>, bool)> {
-  let repo_flags = fetch_flag_stats(conn, repo_root, head, limit).await?;
-  if !repo_flags.is_empty() {
-    return Ok((repo_flags, true));
-  }
-  let global_flags = fetch_flag_stats(conn, "", head, limit).await?;
-  Ok((global_flags, false))
-}
-
-async fn fetch_flag_stats(
-  conn: &Connection,
-  repo_root: &str,
-  head: &str,
-  limit: usize,
-) -> Result<Vec<TemplateStat>> {
-  let mut rows = conn
-    .query(
-      "SELECT flag_raw, freq, last_seen FROM flag_stats
-       WHERE repo_root = ? AND command_head = ?
-       ORDER BY freq DESC LIMIT ?",
-      libsql::params![repo_root.to_string(), head.to_string(), limit as i64],
-    )
-    .await?;
-  let mut stats = Vec::new();
-  while let Some(row) = rows.next().await? {
-    stats.push(TemplateStat {
-      value: row.get::<String>(0)?,
-      freq: row.get::<i64>(1)?,
-      last_seen: row.get::<i64>(2)?,
-    });
-  }
-  Ok(stats)
-}
-
-async fn fetch_template_args(
-  conn: &Connection,
-  repo_root: &str,
-  head: &str,
-  index: i64,
-  limit: usize,
-) -> Result<(Vec<TemplateStat>, bool)> {
-  let repo_args = fetch_arg_stats(conn, repo_root, head, index, limit).await?;
-  if !repo_args.is_empty() {
-    return Ok((repo_args, true));
-  }
-  let global_args = fetch_arg_stats(conn, "", head, index, limit).await?;
-  if !global_args.is_empty() {
-    return Ok((global_args, false));
-  }
-  let repo_any = fetch_arg_stats_any(conn, repo_root, head, limit).await?;
-  if !repo_any.is_empty() {
-    return Ok((repo_any, true));
-  }
-  let global_any = fetch_arg_stats_any(conn, "", head, limit).await?;
-  Ok((global_any, false))
-}
-
-async fn fetch_arg_stats(
-  conn: &Connection,
-  repo_root: &str,
-  head: &str,
-  index: i64,
-  limit: usize,
-) -> Result<Vec<TemplateStat>> {
-  let mut rows = conn
-    .query(
-      "SELECT arg_raw, freq, last_seen FROM arg_stats
-       WHERE repo_root = ? AND command_head = ? AND arg_index = ?
-       ORDER BY freq DESC LIMIT ?",
-      libsql::params![repo_root.to_string(), head.to_string(), index, limit as i64],
-    )
-    .await?;
-  let mut stats = Vec::new();
-  while let Some(row) = rows.next().await? {
-    stats.push(TemplateStat {
-      value: row.get::<String>(0)?,
-      freq: row.get::<i64>(1)?,
-      last_seen: row.get::<i64>(2)?,
-    });
-  }
-  Ok(stats)
-}
-
-async fn fetch_arg_stats_any(
-  conn: &Connection,
-  repo_root: &str,
-  head: &str,
-  limit: usize,
-) -> Result<Vec<TemplateStat>> {
-  let mut rows = conn
-    .query(
-      "SELECT arg_raw, freq, last_seen FROM arg_stats_any
-       WHERE repo_root = ? AND command_head = ?
-       ORDER BY freq DESC LIMIT ?",
-      libsql::params![repo_root.to_string(), head.to_string(), limit as i64],
-    )
-    .await?;
-  let mut stats = Vec::new();
-  while let Some(row) = rows.next().await? {
-    stats.push(TemplateStat {
-      value: row.get::<String>(0)?,
-      freq: row.get::<i64>(1)?,
-      last_seen: row.get::<i64>(2)?,
-    });
-  }
-  Ok(stats)
-}
-
-fn push_opt_string(params: &mut Vec<Value>, value: &Option<String>) {
-  if let Some(val) = value {
-    params.push(Value::from(val.clone()));
-  } else {
-    params.push(Value::Null);
-  }
-}
-
-fn push_opt_i64(params: &mut Vec<Value>, value: Option<i64>) {
-  if let Some(val) = value {
-    params.push(Value::from(val));
-  } else {
-    params.push(Value::Null);
-  }
-}
-
-fn build_prefix_variants(prefix: &str, aliases: &HashMap<String, String>) -> Vec<String> {
-  let mut variants = Vec::new();
-  let trimmed = prefix.trim_start();
-  if !trimmed.is_empty() {
-    variants.push(trimmed.to_string());
-  }
-  for (alias, expansion) in aliases {
-    if expansion.starts_with(trimmed) {
-      variants.push(alias.clone());
-    }
-  }
-  variants.sort();
-  variants.dedup();
-  variants
-}
-
-fn load_aliases() -> HashMap<String, String> {
-  let mut map = HashMap::new();
-  if let Ok(value) = std::env::var("ZAGE_ALIASES") {
-    parse_aliases_into(&value, &mut map);
-  }
-  if let Ok(path) = std::env::var("ZAGE_ALIAS_FILE") {
-    if let Ok(contents) = std::fs::read_to_string(path) {
-      parse_aliases_into(&contents, &mut map);
-    }
-  }
-  map
-}
-
-fn parse_aliases_into(input: &str, map: &mut HashMap<String, String>) {
-  for raw in input.split(|ch| ch == '\n' || ch == ';') {
-    if let Some((name, value)) = parse_alias_line(raw) {
-      map.insert(name, value);
-    }
-  }
-}
-
-fn parse_alias_line(raw: &str) -> Option<(String, String)> {
-  let mut line = raw.trim();
-  if line.is_empty() {
-    return None;
-  }
-  if let Some(rest) = line.strip_prefix("alias ") {
-    line = rest.trim();
-  }
-  if line.starts_with("-") {
-    return None;
-  }
-  let (name, value) = line.split_once('=')?;
-  let name = name.trim();
-  if name.is_empty() {
-    return None;
-  }
-  let mut value = value.trim().to_string();
-  if (value.starts_with('\'') && value.ends_with('\'')) || (value.starts_with('"') && value.ends_with('"')) {
-    value = value[1..value.len() - 1].to_string();
-  }
-  if value.is_empty() {
-    return None;
-  }
-  Some((name.to_string(), value))
-}
-
-fn command_head_for_phase(shellname: &str, command: &str) -> Option<String> {
-  let tokens = tokenize_index(shellname, command);
-  if let Some(parts) = extract_command_parts(command, &tokens) {
-    return Some(parts.head);
-  }
-  tokens.first().map(|token| token.raw.clone())
-}
-
-async fn load_phase_for_heads(
-  conn: &Connection,
-  heads: &HashSet<String>,
-) -> Result<HashMap<String, PhaseSignal>> {
-  if heads.is_empty() {
-    return Ok(HashMap::new());
-  }
-
-  let mut placeholders = String::new();
-  for idx in 0..heads.len() {
-    if idx > 0 {
-      placeholders.push(',');
-    }
-    placeholders.push('?');
-  }
-  let mut params: Vec<Value> = Vec::with_capacity(heads.len());
-  for head in heads {
-    params.push(Value::from(head.clone()));
-  }
-
-  let sql = format!(
-    "SELECT command_head, phase, confidence, freq
-     FROM phase_stats
-     WHERE command_head IN ({})",
-    placeholders
-  );
-  let mut rows = conn.query(&sql, params).await?;
-  let mut best: HashMap<String, (f64, PhaseSignal)> = HashMap::new();
-
-  while let Some(row) = rows.next().await? {
-    let head = row.get::<String>(0)?;
-    let phase = row.get::<String>(1)?;
-    let confidence = row.get::<f64>(2)?;
-    let freq = row.get::<i64>(3)?;
-    let score = confidence * (freq as f64).ln_1p();
-    let entry = best.entry(head.clone()).or_insert_with(|| {
-      (
-        score,
-        PhaseSignal {
-          phase: phase.clone(),
-          confidence,
-        },
-      )
-    });
-    if score > entry.0 {
-      *entry = (
-        score,
-        PhaseSignal {
-          phase: phase.clone(),
-          confidence,
-        },
-      );
-    }
-  }
-
-  Ok(
-    best
-      .into_iter()
-      .map(|(head, (_score, signal))| (head, signal))
-      .collect(),
-  )
-}
-
-fn detect_session_phase(
-  recent_heads: &[String],
-  phase_for_head: &HashMap<String, PhaseSignal>,
-) -> Option<PhaseSignal> {
-  let mut scores: HashMap<String, f64> = HashMap::new();
-  let mut total = 0.0;
-  for (idx, head) in recent_heads.iter().rev().take(6).enumerate() {
-    if let Some(phase) = phase_for_head.get(head) {
-      let weight = 1.0 / (idx as f64 + 1.0);
-      let score = phase.confidence * weight;
-      *scores.entry(phase.phase.clone()).or_insert(0.0) += score;
-      total += score;
-    }
-  }
-
-  let (phase, score) = scores
-    .into_iter()
-    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
-  let confidence = if total > 0.0 { score / total } else { 0.0 };
-  Some(PhaseSignal { phase, confidence })
-}
-
-fn phase_match_boost(
-  session_phase: Option<&PhaseSignal>,
-  candidate_phase: Option<&PhaseSignal>,
-) -> f64 {
-  let (Some(session), Some(candidate)) = (session_phase, candidate_phase) else {
-    return 0.0;
-  };
-  if session.phase != candidate.phase {
-    return 0.0;
-  }
-  0.35 * session.confidence * candidate.confidence
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::db::{init, open_db};
+
+  use super::aliases::{add_alias_candidates, alias_for_command};
+  use super::candidates::{add_head_candidates, add_phase_candidates};
+  use super::phase_support::{PhaseSignal, detect_session_phase, phase_match_boost};
 
   #[test]
   fn detects_session_phase_from_phase_stats() {
@@ -1150,906 +651,111 @@ mod tests {
     };
     assert_eq!(phase_match_boost(Some(&session), Some(&other)), 0.0);
   }
-}
 
-struct PrefixContext {
-  base: String,
-  head: String,
-  flags_json: String,
-  flags: Vec<String>,
-  arg_index: i64,
-  partial: Option<String>,
-  partial_is_flag: bool,
-  repo_root: String,
-}
-
-struct EnvPrefixContext {
-  base: String,
-  partial: Option<String>,
-  repo_root: String,
-  match_on_key: bool,
-}
-
-async fn arg_template_candidates(
-  conn: &Connection,
-  prefix: &str,
-  repo_root: &str,
-  token_priors: &HashMap<String, f64>,
-) -> Result<Option<Vec<Suggestion>>> {
-  let ctx = match analyze_prefix(prefix, repo_root) {
-    Some(ctx) => ctx,
-    None => return Ok(None),
-  };
-
-  if ctx.partial_is_flag {
-    return flag_candidates(conn, &ctx, token_priors).await;
+  #[test]
+  fn alias_for_command_matches_exact() {
+    let alias = alias_for_command("gst", "git status", "git status");
+    assert_eq!(alias.as_deref(), Some("gst"));
   }
 
-  let like = ctx
-    .partial
-    .as_ref()
-    .map(|p| format!("{p}%"))
-    .unwrap_or_else(|| "%".to_string());
-
-  let repo_positional = fetch_arg_candidates(
-    conn,
-    &ctx.repo_root,
-    &ctx.head,
-    &ctx.flags_json,
-    ctx.arg_index,
-    &like,
-    &ctx.base,
-    token_priors,
-  )
-  .await?;
-
-  let mut repo_any = fetch_arg_candidates_any(
-    conn,
-    &ctx.repo_root,
-    &ctx.head,
-    &ctx.flags_json,
-    &like,
-    &ctx.base,
-    token_priors,
-  )
-  .await?;
-
-  let mut global_positional = Vec::new();
-  let mut global_any = Vec::new();
-  if !ctx.repo_root.is_empty() {
-    global_positional = fetch_arg_candidates(
-      conn,
-      "",
-      &ctx.head,
-      &ctx.flags_json,
-      ctx.arg_index,
-      &like,
-      &ctx.base,
-      token_priors,
-    )
-    .await?;
-
-    global_any = fetch_arg_candidates_any(
-      conn,
-      "",
-      &ctx.head,
-      &ctx.flags_json,
-      &like,
-      &ctx.base,
-      token_priors,
-    )
-    .await?;
+  #[test]
+  fn alias_for_command_matches_prefix() {
+    let alias = alias_for_command("gst", "git status", "git status -sb");
+    assert_eq!(alias.as_deref(), Some("gst -sb"));
   }
 
-  if repo_positional.is_empty()
-    && repo_any.is_empty()
-    && global_positional.is_empty()
-    && global_any.is_empty()
-  {
-    Ok(None)
-  } else {
-    let mut merged: HashMap<String, Suggestion> = HashMap::new();
-    scale_suggestions(&mut repo_any, 0.6);
-    scale_suggestions(&mut global_positional, 0.75);
-    scale_suggestions(&mut global_any, 0.45);
-
-    for list in [repo_positional, repo_any, global_positional, global_any] {
-      for suggestion in list {
-        match merged.get(&suggestion.command) {
-          Some(existing) if existing.score >= suggestion.score => {}
-          _ => {
-            merged.insert(suggestion.command.clone(), suggestion);
-          }
-        }
-      }
-    }
-    Ok(Some(merged.into_values().collect()))
+  #[test]
+  fn alias_for_command_rejects_mismatch() {
+    let alias = alias_for_command("gst", "git status", "git diff");
+    assert!(alias.is_none());
   }
-}
 
-async fn env_template_candidates(
-  conn: &Connection,
-  prefix: &str,
-  repo_root: &str,
-  token_priors: &HashMap<String, f64>,
-) -> Result<Option<Vec<Suggestion>>> {
-  let ctx = match analyze_env_prefix(prefix, repo_root) {
-    Some(ctx) => ctx,
-    None => return Ok(None),
-  };
+  #[test]
+  fn add_alias_candidates_clones_stats() {
+    let mut candidates = HashMap::new();
+    let mut base = new_candidate("git status");
+    base.freq = 4;
+    base.last_seen = 123;
+    candidates.insert(base.command.clone(), base.clone());
 
-  let like = ctx
-    .partial
-    .as_ref()
-    .map(|p| format!("{p}%"))
-    .unwrap_or_else(|| "%".to_string());
+    let mut aliases = HashMap::new();
+    aliases.insert("gst".to_string(), "git status".to_string());
+    add_alias_candidates(&aliases, &mut candidates);
 
-  let repo_env = if ctx.match_on_key {
-    fetch_env_key_candidates(conn, &ctx.repo_root, &like, &ctx.base).await?
-  } else {
-    fetch_env_candidates(
-      conn,
-      &ctx.repo_root,
-      &like,
-      &ctx.base,
-      token_priors,
-    )
-    .await?
-  };
+    let alias_candidate = candidates.get("gst").expect("alias candidate");
+    assert_eq!(alias_candidate.freq, 4);
+    assert_eq!(alias_candidate.last_seen, 123);
+  }
 
-  let mut global_env = Vec::new();
-  if !ctx.repo_root.is_empty() {
-    global_env = if ctx.match_on_key {
-      fetch_env_key_candidates(conn, "", &like, &ctx.base).await?
-    } else {
-      fetch_env_candidates(conn, "", &like, &ctx.base, token_priors).await?
+  #[tokio::test]
+  async fn adds_head_candidates_from_stats() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db = open_db(tmp.path()).await.unwrap();
+    init(&db.conn).await.unwrap();
+
+    db.conn
+      .execute(
+        "INSERT INTO command_stats (command, freq, last_seen) VALUES (?, ?, ?)",
+        ("git status", 5, 10),
+      )
+      .await
+      .unwrap();
+    db.conn
+      .execute(
+        "INSERT INTO command_stats (command, freq, last_seen) VALUES (?, ?, ?)",
+        ("git diff", 3, 8),
+      )
+      .await
+      .unwrap();
+    db.conn
+      .execute(
+        "INSERT INTO command_stats (command, freq, last_seen) VALUES (?, ?, ?)",
+        ("cargo build", 4, 9),
+      )
+      .await
+      .unwrap();
+
+    let mut candidates = HashMap::new();
+    add_head_candidates(&db.conn, &["git".to_string()], "", &mut candidates)
+      .await
+      .unwrap();
+
+    assert!(candidates.contains_key("git status"));
+    assert!(candidates.contains_key("git diff"));
+    assert!(!candidates.contains_key("cargo build"));
+  }
+
+  #[tokio::test]
+  async fn adds_phase_candidates_from_stats() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db = open_db(tmp.path()).await.unwrap();
+    init(&db.conn).await.unwrap();
+
+    db.conn
+      .execute(
+        "INSERT INTO command_stats (command, freq, last_seen) VALUES (?, ?, ?)",
+        ("git status", 5, 10),
+      )
+      .await
+      .unwrap();
+    db.conn
+      .execute(
+        "INSERT INTO phase_stats (command_head, phase, confidence, freq, last_seen)
+         VALUES (?, ?, ?, ?, ?)",
+        ("git", "build", 0.9, 5, 10),
+      )
+      .await
+      .unwrap();
+
+    let mut candidates = HashMap::new();
+    let phase = PhaseSignal {
+      phase: "build".to_string(),
+      confidence: 0.9,
     };
+    add_phase_candidates(&db.conn, Some(&phase), "", &mut candidates)
+      .await
+      .unwrap();
+
+    assert!(candidates.contains_key("git status"));
   }
-
-  if repo_env.is_empty() && global_env.is_empty() {
-    Ok(None)
-  } else {
-    let mut merged: HashMap<String, Suggestion> = HashMap::new();
-    scale_suggestions(&mut global_env, 0.75);
-    for suggestion in repo_env.into_iter().chain(global_env.into_iter()) {
-      match merged.get(&suggestion.command) {
-        Some(existing) if existing.score >= suggestion.score => {}
-        _ => {
-          merged.insert(suggestion.command.clone(), suggestion);
-        }
-      }
-    }
-    Ok(Some(merged.into_values().collect()))
-  }
-}
-
-async fn flag_candidates(
-  conn: &Connection,
-  ctx: &PrefixContext,
-  token_priors: &HashMap<String, f64>,
-) -> Result<Option<Vec<Suggestion>>> {
-  let like = ctx
-    .partial
-    .as_ref()
-    .map(|p| format!("{p}%"))
-    .unwrap_or_else(|| "%".to_string());
-
-  let exclude: HashSet<String> = ctx.flags.iter().cloned().collect();
-
-  let repo_flags = fetch_flag_candidates(
-    conn,
-    &ctx.repo_root,
-    &ctx.head,
-    &like,
-    &ctx.base,
-    token_priors,
-    &exclude,
-  )
-  .await?;
-
-  let mut global_flags = Vec::new();
-  if !ctx.repo_root.is_empty() {
-    global_flags = fetch_flag_candidates(
-      conn,
-      "",
-      &ctx.head,
-      &like,
-      &ctx.base,
-      token_priors,
-      &exclude,
-    )
-    .await?;
-  }
-
-  if repo_flags.is_empty() && global_flags.is_empty() {
-    Ok(None)
-  } else {
-    let mut merged: HashMap<String, Suggestion> = HashMap::new();
-    scale_suggestions(&mut global_flags, 0.75);
-    for suggestion in repo_flags.into_iter().chain(global_flags.into_iter()) {
-      match merged.get(&suggestion.command) {
-        Some(existing) if existing.score >= suggestion.score => {}
-        _ => {
-          merged.insert(suggestion.command.clone(), suggestion);
-        }
-      }
-    }
-    Ok(Some(merged.into_values().collect()))
-  }
-}
-
-async fn fetch_arg_candidates(
-  conn: &Connection,
-  repo_root: &str,
-  head: &str,
-  flags_json: &str,
-  arg_index: i64,
-  like: &str,
-  base_prefix: &str,
-  token_priors: &HashMap<String, f64>,
-) -> Result<Vec<Suggestion>> {
-  let mut rows = conn
-    .query(
-      "SELECT arg_raw, arg_norm, freq, last_seen
-       FROM arg_stats
-       WHERE repo_root = ? AND command_head = ? AND flags_json = ? AND arg_index = ? AND arg_raw LIKE ?
-       ORDER BY freq DESC, last_seen DESC
-       LIMIT 50",
-      libsql::params![repo_root, head, flags_json, arg_index, like],
-    )
-    .await?;
-
-  let now = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs() as i64;
-
-  let mut results = Vec::new();
-  while let Some(row) = rows.next().await? {
-    let arg_raw = row.get::<String>(0)?;
-    let arg_norm = row.get::<String>(1)?;
-    let freq = row.get::<i64>(2)?;
-    let last_seen = row.get::<i64>(3)?;
-
-    let recency = recency_score(now, last_seen);
-    let frequency = (freq as f64).ln_1p();
-    let token_prior = token_priors.get(&arg_norm).copied().unwrap_or(0.0);
-    let context = if repo_root.is_empty() { 0.0 } else { 1.0 };
-    let score = 0.45 * recency + 0.3 * frequency + 0.2 * token_prior + 0.05 * context;
-
-    let mut base = base_prefix.to_string();
-    if !base.is_empty() && !base.chars().last().map(|c| c.is_whitespace()).unwrap_or(false) {
-      base.push(' ');
-    }
-    let suggestion = format!("{}{}", base, arg_raw);
-
-    results.push(Suggestion {
-      command: suggestion,
-      score,
-      breakdown: ScoreBreakdown {
-        recency,
-        frequency,
-        transition: 0.0,
-        context,
-        sequence: token_prior,
-        similarity: 0.0,
-      },
-    });
-  }
-
-  Ok(results)
-}
-
-async fn fetch_arg_candidates_any(
-  conn: &Connection,
-  repo_root: &str,
-  head: &str,
-  flags_json: &str,
-  like: &str,
-  base_prefix: &str,
-  token_priors: &HashMap<String, f64>,
-) -> Result<Vec<Suggestion>> {
-  let mut rows = conn
-    .query(
-      "SELECT arg_raw, arg_norm, freq, last_seen
-       FROM arg_stats_any
-       WHERE repo_root = ? AND command_head = ? AND flags_json = ? AND arg_raw LIKE ?
-       ORDER BY freq DESC, last_seen DESC
-       LIMIT 50",
-      libsql::params![repo_root, head, flags_json, like],
-    )
-    .await?;
-
-  let now = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs() as i64;
-
-  let mut results = Vec::new();
-  while let Some(row) = rows.next().await? {
-    let arg_raw = row.get::<String>(0)?;
-    let arg_norm = row.get::<String>(1)?;
-    let freq = row.get::<i64>(2)?;
-    let last_seen = row.get::<i64>(3)?;
-
-    let recency = recency_score(now, last_seen);
-    let frequency = (freq as f64).ln_1p();
-    let token_prior = token_priors.get(&arg_norm).copied().unwrap_or(0.0);
-    let context = if repo_root.is_empty() { 0.0 } else { 1.0 };
-    let score = 0.4 * recency + 0.3 * frequency + 0.25 * token_prior + 0.05 * context;
-
-    let mut base = base_prefix.to_string();
-    if !base.is_empty() && !base.chars().last().map(|c| c.is_whitespace()).unwrap_or(false) {
-      base.push(' ');
-    }
-    let suggestion = format!("{}{}", base, arg_raw);
-
-    results.push(Suggestion {
-      command: suggestion,
-      score,
-      breakdown: ScoreBreakdown {
-        recency,
-        frequency,
-        transition: 0.0,
-        context,
-        sequence: token_prior,
-        similarity: 0.0,
-      },
-    });
-  }
-
-  Ok(results)
-}
-
-async fn fetch_env_candidates(
-  conn: &Connection,
-  repo_root: &str,
-  like: &str,
-  base_prefix: &str,
-  token_priors: &HashMap<String, f64>,
-) -> Result<Vec<Suggestion>> {
-  let (sql, params): (&str, Vec<Value>) = if repo_root.is_empty() {
-    (
-      "SELECT env_raw, env_norm, freq, last_seen
-       FROM env_stats
-       WHERE env_raw LIKE ?
-       ORDER BY freq DESC, last_seen DESC
-       LIMIT 50",
-      vec![Value::from(like.to_string())],
-    )
-  } else {
-    (
-      "SELECT env_raw, env_norm, freq, last_seen
-       FROM env_stats
-       WHERE repo_root = ? AND env_raw LIKE ?
-       ORDER BY freq DESC, last_seen DESC
-       LIMIT 50",
-      vec![Value::from(repo_root.to_string()), Value::from(like.to_string())],
-    )
-  };
-
-  let mut rows = conn.query(sql, libsql::params_from_iter(params)).await?;
-  let now = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs() as i64;
-
-  let mut results = Vec::new();
-  while let Some(row) = rows.next().await? {
-    let env_raw = row.get::<String>(0)?;
-    let env_norm = row.get::<String>(1)?;
-    let freq = row.get::<i64>(2)?;
-    let last_seen = row.get::<i64>(3)?;
-
-    let recency = recency_score(now, last_seen);
-    let frequency = (freq as f64).ln_1p();
-    let token_prior = token_priors.get(&env_norm).copied().unwrap_or(0.0);
-    let context = if repo_root.is_empty() { 0.0 } else { 1.0 };
-    let score = 0.45 * recency + 0.3 * frequency + 0.2 * token_prior + 0.05 * context;
-
-    let mut base = base_prefix.to_string();
-    if !base.is_empty() && !base.chars().last().map(|c| c.is_whitespace()).unwrap_or(false) {
-      base.push(' ');
-    }
-    let suggestion = format!("{}{}", base, env_raw);
-
-    results.push(Suggestion {
-      command: suggestion,
-      score,
-      breakdown: ScoreBreakdown {
-        recency,
-        frequency,
-        transition: 0.0,
-        context,
-        sequence: token_prior,
-        similarity: 0.0,
-      },
-    });
-  }
-
-  Ok(results)
-}
-
-async fn fetch_env_key_candidates(
-  conn: &Connection,
-  repo_root: &str,
-  like: &str,
-  base_prefix: &str,
-) -> Result<Vec<Suggestion>> {
-  let (sql, params): (&str, Vec<Value>) = if repo_root.is_empty() {
-    (
-      "SELECT env_key, SUM(freq) as freq, MAX(last_seen) as last_seen
-       FROM env_stats
-       WHERE env_key LIKE ?
-       GROUP BY env_key
-       ORDER BY freq DESC, last_seen DESC
-       LIMIT 50",
-      vec![Value::from(like.to_string())],
-    )
-  } else {
-    (
-      "SELECT env_key, SUM(freq) as freq, MAX(last_seen) as last_seen
-       FROM env_stats
-       WHERE repo_root = ? AND env_key LIKE ?
-       GROUP BY env_key
-       ORDER BY freq DESC, last_seen DESC
-       LIMIT 50",
-      vec![Value::from(repo_root.to_string()), Value::from(like.to_string())],
-    )
-  };
-
-  let mut rows = conn.query(sql, libsql::params_from_iter(params)).await?;
-  let now = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs() as i64;
-
-  let mut results = Vec::new();
-  while let Some(row) = rows.next().await? {
-    let env_key = row.get::<String>(0)?;
-    let freq = row.get::<i64>(1)?;
-    let last_seen = row.get::<i64>(2)?;
-
-    let recency = recency_score(now, last_seen);
-    let frequency = (freq as f64).ln_1p();
-    let context = if repo_root.is_empty() { 0.0 } else { 1.0 };
-    let score = 0.55 * recency + 0.35 * frequency + 0.1 * context;
-
-    let mut base = base_prefix.to_string();
-    if !base.is_empty() && !base.chars().last().map(|c| c.is_whitespace()).unwrap_or(false) {
-      base.push(' ');
-    }
-    let suggestion = format!("{}{}=", base, env_key);
-
-    results.push(Suggestion {
-      command: suggestion,
-      score,
-      breakdown: ScoreBreakdown {
-        recency,
-        frequency,
-        transition: 0.0,
-        context,
-        sequence: 0.0,
-        similarity: 0.0,
-      },
-    });
-  }
-
-  Ok(results)
-}
-
-async fn fetch_flag_candidates(
-  conn: &Connection,
-  repo_root: &str,
-  head: &str,
-  like: &str,
-  base_prefix: &str,
-  token_priors: &HashMap<String, f64>,
-  exclude: &HashSet<String>,
-) -> Result<Vec<Suggestion>> {
-  let mut rows = conn
-    .query(
-      "SELECT flag_raw, flag_norm, freq, last_seen
-       FROM flag_stats
-       WHERE repo_root = ? AND command_head = ? AND flag_raw LIKE ?
-       ORDER BY freq DESC, last_seen DESC
-       LIMIT 50",
-      libsql::params![repo_root, head, like],
-    )
-    .await?;
-
-  let now = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs() as i64;
-
-  let mut results = Vec::new();
-  while let Some(row) = rows.next().await? {
-    let flag_raw = row.get::<String>(0)?;
-    let flag_norm = row.get::<String>(1)?;
-    if exclude.contains(&flag_raw) {
-      continue;
-    }
-    let freq = row.get::<i64>(2)?;
-    let last_seen = row.get::<i64>(3)?;
-
-    let recency = recency_score(now, last_seen);
-    let frequency = (freq as f64).ln_1p();
-    let token_prior = token_priors.get(&flag_norm).copied().unwrap_or(0.0);
-    let context = if repo_root.is_empty() { 0.0 } else { 1.0 };
-    let score = 0.45 * recency + 0.3 * frequency + 0.2 * token_prior + 0.05 * context;
-
-    let mut base = base_prefix.to_string();
-    if !base.is_empty() && !base.chars().last().map(|c| c.is_whitespace()).unwrap_or(false) {
-      base.push(' ');
-    }
-    let suggestion = format!("{}{}", base, flag_raw);
-
-    results.push(Suggestion {
-      command: suggestion,
-      score,
-      breakdown: ScoreBreakdown {
-        recency,
-        frequency,
-        transition: 0.0,
-        context,
-        sequence: token_prior,
-        similarity: 0.0,
-      },
-    });
-  }
-
-  Ok(results)
-}
-
-fn analyze_prefix(prefix: &str, repo_root: &str) -> Option<PrefixContext> {
-  let tokens = tokenize(prefix);
-  if tokens.is_empty() {
-    return None;
-  }
-  let parts = extract_command_parts(prefix, &tokens)?;
-  let mut flags = parts.flags;
-  flags.sort();
-  let flags_json = serde_json::to_string(&flags).ok()?;
-
-  let ends_with_space = prefix
-    .chars()
-    .last()
-    .map(|c| c.is_whitespace())
-    .unwrap_or(false);
-
-  let mut arg_index = parts.args.len() as i64;
-  let mut partial = None;
-
-  if !ends_with_space {
-    if let Some(last) = tokens.last() {
-      if matches!(last.kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment) {
-        partial = Some(last.raw.clone());
-      } else {
-        return None;
-      }
-    }
-  }
-
-  let partial_is_flag = partial.as_deref().map(|p| p.starts_with('-')).unwrap_or(false);
-  if partial_is_flag {
-    if let Some(ref part) = partial {
-      flags.retain(|flag| flag != part);
-    }
-  } else if partial.is_some() {
-    if arg_index > 0 {
-      arg_index -= 1;
-    }
-  }
-
-  let mut base = if let Some(ref part) = partial {
-    if let Some(pos) = prefix.rfind(part) {
-      prefix[..pos].to_string()
-    } else {
-      prefix.to_string()
-    }
-  } else {
-    prefix.to_string()
-  };
-
-  if !base.is_empty() && !base.chars().last().map(|c| c.is_whitespace()).unwrap_or(false) {
-    base.push(' ');
-  }
-
-  Some(PrefixContext {
-    base,
-    head: parts.head,
-    flags_json,
-    flags,
-    arg_index,
-    partial,
-    partial_is_flag,
-    repo_root: repo_root.to_string(),
-  })
-}
-
-fn analyze_env_prefix(prefix: &str, repo_root: &str) -> Option<EnvPrefixContext> {
-  let tokens = tokenize(prefix);
-  if tokens.is_empty() {
-    return None;
-  }
-
-  let ends_with_space = prefix
-    .chars()
-    .last()
-    .map(|c| c.is_whitespace())
-    .unwrap_or(false);
-
-  let env_count = leading_env_count(&tokens);
-  let last_idx = tokens.len().saturating_sub(1);
-
-  let (partial, match_on_key) = if ends_with_space {
-    (None, true)
-  } else if env_count == tokens.len() {
-    let last = tokens.last()?;
-    if let Some(eq_idx) = last.raw.find('=') {
-      if looks_like_env_lhs(&last.raw[..eq_idx]) {
-        (Some(last.raw.clone()), false)
-      } else {
-        return None;
-      }
-    } else if looks_like_env_lhs(&last.raw) {
-      (Some(last.raw.clone()), true)
-    } else {
-      return None;
-    }
-  } else if env_count == last_idx {
-    let last = tokens.last()?;
-    if looks_like_env_lhs(&last.raw) {
-      (Some(last.raw.clone()), true)
-    } else {
-      return None;
-    }
-  } else {
-    return None;
-  };
-
-  let mut base = if let Some(ref part) = partial {
-    if let Some(pos) = prefix.rfind(part) {
-      prefix[..pos].to_string()
-    } else {
-      prefix.to_string()
-    }
-  } else {
-    prefix.to_string()
-  };
-
-  if !base.is_empty() && !base.chars().last().map(|c| c.is_whitespace()).unwrap_or(false) {
-    base.push(' ');
-  }
-
-  Some(EnvPrefixContext {
-    base,
-    partial,
-    repo_root: repo_root.to_string(),
-    match_on_key,
-  })
-}
-
-fn scale_suggestions(list: &mut [Suggestion], weight: f64) {
-  if (weight - 1.0).abs() < f64::EPSILON {
-    return;
-  }
-  for suggestion in list.iter_mut() {
-    suggestion.score *= weight;
-    suggestion.breakdown.recency *= weight;
-    suggestion.breakdown.frequency *= weight;
-    suggestion.breakdown.context *= weight;
-    suggestion.breakdown.sequence *= weight;
-    suggestion.breakdown.similarity *= weight;
-  }
-}
-
-fn split_env_prefix(prefix: &str) -> (String, String) {
-  let tokens = tokenize(prefix);
-  if tokens.is_empty() {
-    return (String::new(), prefix.to_string());
-  }
-  let env_count = leading_env_count(&tokens);
-  if env_count == 0 {
-    return (String::new(), prefix.to_string());
-  }
-
-  let mut search_start = 0usize;
-  let mut end = 0usize;
-  for idx in 0..env_count {
-    if let Some(found) = prefix[search_start..].find(&tokens[idx].raw) {
-      let start = search_start + found;
-      end = start + tokens[idx].raw.len();
-      search_start = end;
-    } else {
-      return (String::new(), prefix.to_string());
-    }
-  }
-
-  let bytes = prefix.as_bytes();
-  let mut end_with_space = end;
-  while end_with_space < bytes.len() && bytes[end_with_space].is_ascii_whitespace() {
-    end_with_space += 1;
-  }
-
-  let env_prefix = prefix[..end_with_space].to_string();
-  let command_prefix = prefix[end_with_space..].to_string();
-  (env_prefix, command_prefix)
-}
-
-fn leading_env_count(tokens: &[Token]) -> usize {
-  let mut idx = 0usize;
-  while idx < tokens.len() {
-    let token = &tokens[idx];
-    if matches!(token.kind, TokenKind::Assignment) {
-      idx += 1;
-      continue;
-    }
-    if looks_like_env_lhs(&token.raw) {
-      if let Some(next) = tokens.get(idx + 1) {
-        if next.raw == "=" {
-          idx += if tokens.get(idx + 2).is_some() { 3 } else { 2 };
-          continue;
-        }
-        if next.raw.starts_with('=') {
-          idx += 2;
-          continue;
-        }
-      }
-    }
-    break;
-  }
-  idx
-}
-
-fn looks_like_env_lhs(raw: &str) -> bool {
-  if raw.is_empty() || raw.starts_with('-') {
-    return false;
-  }
-  let mut chars = raw.chars();
-  let first = match chars.next() {
-    Some(c) => c,
-    None => return false,
-  };
-  if !(first.is_ascii_alphabetic() || first == '_') {
-    return false;
-  }
-  chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-}
-
-async fn token_sequence_predictions(
-  conn: &Connection,
-  prefix_norm: &[String],
-) -> Result<HashMap<String, f64>> {
-  if prefix_norm.is_empty() {
-    return Ok(HashMap::new());
-  }
-  let mut rows = conn
-    .query(
-      "SELECT sequence_json, confidence, lift, prefix_len
-       FROM token_sequence_stats
-       ORDER BY lift DESC
-       LIMIT 500",
-      (),
-    )
-    .await?;
-
-  let mut scores: HashMap<String, f64> = HashMap::new();
-  while let Some(row) = rows.next().await? {
-    let sequence_json = row.get::<String>(0)?;
-    let confidence = row.get::<f64>(1)?;
-    let lift = row.get::<f64>(2)?;
-    let prefix_len = row.get::<i64>(3)? as usize;
-
-    let sequence: Vec<String> = serde_json::from_str(&sequence_json)?;
-    if sequence.len() < 2 || prefix_len == 0 {
-      continue;
-    }
-    if prefix_norm.len() < prefix_len {
-      continue;
-    }
-    let recent_slice = &prefix_norm[prefix_norm.len() - prefix_len..];
-    if sequence[..prefix_len] == *recent_slice {
-      if let Some(next_token) = sequence.last() {
-        let score = confidence * lift;
-        let entry = scores.entry(next_token.clone()).or_insert(0.0);
-        if score > *entry {
-          *entry = score;
-        }
-      }
-    }
-  }
-  Ok(scores)
-}
-
-fn expand_alias(command: &str, aliases: &HashMap<String, String>) -> Option<String> {
-  let mut parts = command.splitn(2, char::is_whitespace);
-  let head = parts.next()?;
-  let tail = parts.next().unwrap_or("");
-  let expansion = aliases.get(head)?;
-  if tail.is_empty() {
-    Some(expansion.clone())
-  } else {
-    Some(format!("{} {}", expansion, tail.trim_start()))
-  }
-}
-
-async fn load_session_stats(
-  conn: &Connection,
-  session_id: i64,
-  recent_limit: usize,
-) -> Result<HashMap<String, (i64, i64)>> {
-  let mut rows = conn
-    .query(
-      "SELECT command, COUNT(*) as freq, MAX(COALESCE(start_unix_timestamp, 0)) as last_seen
-       FROM (
-         SELECT command, start_unix_timestamp
-         FROM shell_history
-         WHERE session_id = ?
-         ORDER BY COALESCE(start_unix_timestamp, 0) DESC, id DESC
-         LIMIT ?
-       )
-       GROUP BY command",
-      libsql::params![session_id, recent_limit as i64],
-    )
-    .await?;
-
-  let mut stats = HashMap::new();
-  while let Some(row) = rows.next().await? {
-    let command = row.get::<String>(0)?;
-    let freq = row.get::<i64>(1)?;
-    let last_seen = row.get::<i64>(2)?;
-    stats.insert(command, (freq, last_seen));
-  }
-  Ok(stats)
-}
-
-fn recency_score(now: i64, last_seen: i64) -> f64 {
-  if last_seen <= 0 || now <= last_seen {
-    return 0.0;
-  }
-  let half_life = 60.0 * 60.0 * 24.0 * 7.0;
-  let age = (now - last_seen) as f64;
-  (-age / half_life).exp()
-}
-
-fn token_similarity(a: &[String], b: &[String]) -> f64 {
-  if a.is_empty() || b.is_empty() {
-    return 0.0;
-  }
-  let set_a: HashSet<&str> = a.iter().map(|s| s.as_str()).collect();
-  let set_b: HashSet<&str> = b.iter().map(|s| s.as_str()).collect();
-  let intersection = set_a.intersection(&set_b).count() as f64;
-  (2.0 * intersection) / (set_a.len() as f64 + set_b.len() as f64)
-}
-
-async fn load_normalized_tokens(conn: &Connection, command: &str) -> Result<Vec<String>> {
-  let mut rows = conn
-    .query(
-      "SELECT normalized_json FROM token_cache WHERE command = ?",
-      libsql::params![command.to_string()],
-    )
-    .await?;
-  if let Some(row) = rows.next().await? {
-    let json = row.get::<String>(0)?;
-    let tokens: Vec<String> = serde_json::from_str(&json)?;
-    return Ok(tokens);
-  }
-
-  let (raw_tokens, norm_tokens) = token_strings(command);
-  let raw_json = serde_json::to_string(&raw_tokens)?;
-  let norm_json = serde_json::to_string(&norm_tokens)?;
-  let now = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs() as i64;
-  conn
-    .execute(
-      "INSERT OR REPLACE INTO token_cache (command, tokens_json, normalized_json, updated_at)
-       VALUES (?, ?, ?, ?)",
-      (command.to_string(), raw_json, norm_json, now),
-    )
-    .await?;
-  Ok(norm_tokens)
 }

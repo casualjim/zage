@@ -6,7 +6,7 @@ use tree_sitter::{Node, Parser};
 use csv::ReaderBuilder;
 use xz2::read::XzDecoder;
 
-use crate::tokenize::{extract_command_parts, tokenize_index, Token, TokenKind};
+use crate::tokenize::{Token, TokenKind, extract_command_parts, tokenize_index};
 
 #[test]
 fn test_bash_corpus_parsing() {
@@ -105,7 +105,8 @@ fn run_corpus(corpus_dir: &Path, shell: &str, language: tree_sitter::Language) {
           .map(|val| normalize_for_compare(val))
           .collect();
         assert_eq!(
-          env_raw, env_expected,
+          env_raw,
+          env_expected,
           "env mismatch for {} case {}:{}\ninput: {}\ncommand: {}",
           shell,
           path.display(),
@@ -156,8 +157,16 @@ fn run_corpus(corpus_dir: &Path, shell: &str, language: tree_sitter::Language) {
 fn run_nl2sh_alfa(corpus_dir: &Path) {
   let train = choose_nl2sh_path(corpus_dir, "train");
   let test = corpus_dir.join("test.csv");
-  assert!(train.exists(), "missing NL2SH-ALFA train.csv at {}", train.display());
-  assert!(test.exists(), "missing NL2SH-ALFA test.csv at {}", test.display());
+  assert!(
+    train.exists(),
+    "missing NL2SH-ALFA train.csv at {}",
+    train.display()
+  );
+  assert!(
+    test.exists(),
+    "missing NL2SH-ALFA test.csv at {}",
+    test.display()
+  );
 
   let mut parser = Parser::new();
   parser
@@ -194,9 +203,8 @@ fn run_nl2sh_csv(path: &Path, parser: &mut Parser, columns: &[&str]) -> usize {
 
   let mut count = 0usize;
   for record in reader.records() {
-    let record = record.unwrap_or_else(|err| {
-      panic!("failed to parse CSV record in {}: {}", path.display(), err)
-    });
+    let record = record
+      .unwrap_or_else(|err| panic!("failed to parse CSV record in {}: {}", path.display(), err));
     for (name, idx) in &col_indices {
       let value = record.get(*idx).unwrap_or("").trim();
       if value.is_empty() {
@@ -224,8 +232,7 @@ fn choose_nl2sh_path(dir: &Path, stem: &str) -> PathBuf {
 
 fn open_nl2sh_reader(path: &Path) -> csv::Reader<Box<dyn std::io::Read>> {
   let file = fs::File::open(path).expect("open NL2SH-ALFA file");
-  let reader: Box<dyn std::io::Read> = if path.extension().map(|ext| ext == "xz").unwrap_or(false)
-  {
+  let reader: Box<dyn std::io::Read> = if path.extension().map(|ext| ext == "xz").unwrap_or(false) {
     Box::new(XzDecoder::new(file))
   } else {
     Box::new(file)
@@ -363,7 +370,10 @@ fn collect_arg_sequence(_input: &str, tokens: &[Token], head: &str) -> Vec<Strin
 
   for token in tokens.iter().skip(start_idx) {
     if skip_redirect {
-      if matches!(token.kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment) {
+      if matches!(
+        token.kind,
+        TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment
+      ) {
         skip_redirect = false;
       }
       continue;
@@ -389,12 +399,11 @@ fn list_corpus_files(dir: &Path) -> Vec<PathBuf> {
   };
   for entry in entries.flatten() {
     let path = entry.path();
-    if path.is_file() {
-      if let Some(ext) = path.extension().and_then(|e| e.to_str()) {
-        if ext == "txt" {
-          files.push(path);
-        }
-      }
+    if path.is_file()
+      && let Some(ext) = path.extension().and_then(|e| e.to_str())
+      && ext == "txt"
+    {
+      files.push(path);
     }
   }
   files.sort();
@@ -403,8 +412,10 @@ fn list_corpus_files(dir: &Path) -> Vec<PathBuf> {
 
 fn is_simple_command_tokens(tokens: &[Token]) -> bool {
   tokens.iter().all(|token| {
-    matches!(token.kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Assignment)
-      && !token.raw.contains('\n')
+    matches!(
+      token.kind,
+      TokenKind::Word | TokenKind::Quoted | TokenKind::Assignment
+    ) && !token.raw.contains('\n')
       && !token.raw.contains(';')
   })
 }
@@ -423,21 +434,19 @@ fn is_simple_token(token: &str) -> bool {
 
 fn is_simple_head_token(token: &str) -> bool {
   !token.is_empty()
-    && token.chars().all(|c| {
-      c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':')
-    })
+    && token
+      .chars()
+      .all(|c| c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':'))
 }
 
 fn normalize_for_compare(input: &str) -> String {
   input
-    .replace('"', "")
-    .replace('\'', "")
+    .replace(['"', '\''], "")
     .replace("\\\n", "")
     .replace("\\", "")
     .trim()
     .to_string()
 }
-
 
 fn normalize_join(parts: &[String]) -> String {
   parts

@@ -4,12 +4,12 @@ mod config;
 pub use config::*;
 pub mod db;
 pub mod indexer;
-pub mod predict;
-pub mod sequence;
-pub mod tokenize;
-pub mod shell_history;
-pub mod repo;
 pub mod phase;
+pub mod predict;
+pub mod repo;
+pub mod sequence;
+pub mod shell_history;
+pub mod tokenize;
 
 #[cfg(test)]
 mod corpus_tests;

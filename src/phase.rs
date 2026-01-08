@@ -161,9 +161,7 @@ impl PhaseConfig {
 
   pub fn match_label(&self, command: &str) -> Option<usize> {
     let tokens = crate::tokenize::tokenize(command);
-    let Some(parts) = crate::tokenize::extract_command_parts(command, &tokens) else {
-      return None;
-    };
+    let parts = crate::tokenize::extract_command_parts(command, &tokens)?;
     for (idx, patterns) in &self.patterns {
       if patterns.iter().any(|pattern| pattern.matches(&parts)) {
         return Some(*idx);

@@ -101,80 +101,84 @@ pub fn extract_command_parts(input: &str, tokens: &[Token]) -> Option<CommandPar
       idx += 1;
       continue;
     }
-    if is_number(&token.raw) {
-      if let Some(next) = tokens.get(idx + 1) {
-        if matches!(next.kind, TokenKind::Redirect) {
-          if redirect_needs_target(&next.raw) {
-            skip_next = true;
-          }
-          idx += 2;
-          continue;
-        }
+    if is_number(&token.raw)
+      && let Some(next) = tokens.get(idx + 1)
+      && matches!(next.kind, TokenKind::Redirect)
+    {
+      if redirect_needs_target(&next.raw) {
+        skip_next = true;
       }
+      idx += 2;
+      continue;
     }
     if matches!(token.kind, TokenKind::Assignment) {
-      if token.raw.ends_with('=') {
-        if let Some(val) = tokens.get(idx + 1) {
-          if matches!(val.kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment) {
-            let cur_span = spans.get(idx);
-            let val_span = spans.get(idx + 1);
-            if let (Some(cur), Some(val_span)) = (cur_span, val_span) {
-              if is_adjacent_or_quoted(input, cur.end, val_span.start) {
-                let raw = format!("{}{}", token.raw, val.raw);
-                env.push(make_assignment_token(raw));
-                idx += 2;
-                continue;
-              }
-            }
-          }
+      if token.raw.ends_with('=')
+        && let Some(val) = tokens.get(idx + 1)
+        && matches!(
+          val.kind,
+          TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment
+        )
+      {
+        let cur_span = spans.get(idx);
+        let val_span = spans.get(idx + 1);
+        if let (Some(cur), Some(val_span)) = (cur_span, val_span)
+          && is_adjacent_or_quoted(input, cur.end, val_span.start)
+        {
+          let raw = format!("{}{}", token.raw, val.raw);
+          env.push(make_assignment_token(raw));
+          idx += 2;
+          continue;
         }
       }
       env.push(token.clone());
       idx += 1;
       continue;
     }
-    if looks_like_assignment_lhs(token.raw.as_str()) {
-      if let Some(next) = tokens.get(idx + 1) {
-        if next.raw == "=" {
-          let lhs_span = spans.get(idx);
-          let eq_span = spans.get(idx + 1);
-          let adjacent = matches!((lhs_span, eq_span), (Some(lhs), Some(eq)) if lhs.end == eq.start);
-          if adjacent {
-            let mut raw = token.raw.clone();
-            raw.push('=');
-            if let Some(val) = tokens.get(idx + 2) {
-              if matches!(val.kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment) {
-                let val_span = spans.get(idx + 2);
-                let adjacent_val = match (eq_span, val_span) {
-                  (Some(eq), Some(val)) => is_adjacent_or_quoted(input, eq.end, val.start),
-                  _ => false,
-                };
-                if adjacent_val {
-                  raw.push_str(&val.raw);
-                  env.push(make_assignment_token(raw));
-                  idx += 3;
-                  continue;
-                }
-              }
+    if looks_like_assignment_lhs(token.raw.as_str())
+      && let Some(next) = tokens.get(idx + 1)
+    {
+      if next.raw == "=" {
+        let lhs_span = spans.get(idx);
+        let eq_span = spans.get(idx + 1);
+        let adjacent = matches!((lhs_span, eq_span), (Some(lhs), Some(eq)) if lhs.end == eq.start);
+        if adjacent {
+          let mut raw = token.raw.clone();
+          raw.push('=');
+          if let Some(val) = tokens.get(idx + 2)
+            && matches!(
+              val.kind,
+              TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment
+            )
+          {
+            let val_span = spans.get(idx + 2);
+            let adjacent_val = match (eq_span, val_span) {
+              (Some(eq), Some(val)) => is_adjacent_or_quoted(input, eq.end, val.start),
+              _ => false,
+            };
+            if adjacent_val {
+              raw.push_str(&val.raw);
+              env.push(make_assignment_token(raw));
+              idx += 3;
+              continue;
             }
-            env.push(make_assignment_token(raw));
-            idx += 2;
-            continue;
           }
+          env.push(make_assignment_token(raw));
+          idx += 2;
+          continue;
         }
-        if next.raw.starts_with('=') {
-          let lhs_span = spans.get(idx);
-          let eq_span = spans.get(idx + 1);
-          let adjacent = matches!(
-            (lhs_span, eq_span),
-            (Some(lhs), Some(eq)) if is_adjacent_or_quoted(input, lhs.end, eq.start)
-          );
-          if adjacent {
-            let raw = format!("{}{}", token.raw, next.raw);
-            env.push(make_assignment_token(raw));
-            idx += 2;
-            continue;
-          }
+      }
+      if next.raw.starts_with('=') {
+        let lhs_span = spans.get(idx);
+        let eq_span = spans.get(idx + 1);
+        let adjacent = matches!(
+          (lhs_span, eq_span),
+          (Some(lhs), Some(eq)) if is_adjacent_or_quoted(input, lhs.end, eq.start)
+        );
+        if adjacent {
+          let raw = format!("{}{}", token.raw, next.raw);
+          env.push(make_assignment_token(raw));
+          idx += 2;
+          continue;
         }
       }
     }
@@ -210,16 +214,18 @@ pub fn extract_command_parts(input: &str, tokens: &[Token]) -> Option<CommandPar
       skip_next = true;
       continue;
     }
-    if is_number(&token.raw) {
-      if let Some(next) = tokens.get(idx + 1) {
-        if matches!(next.kind, TokenKind::Redirect) {
-          skip_next = true;
-          continue;
-        }
-      }
+    if is_number(&token.raw)
+      && let Some(next) = tokens.get(idx + 1)
+      && matches!(next.kind, TokenKind::Redirect)
+    {
+      skip_next = true;
+      continue;
     }
     if skip_next {
-      if matches!(token.kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment) {
+      if matches!(
+        token.kind,
+        TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment
+      ) {
         skip_next = false;
       }
       continue;
@@ -232,7 +238,10 @@ pub fn extract_command_parts(input: &str, tokens: &[Token]) -> Option<CommandPar
       flags.push(token.raw.clone());
       continue;
     }
-    if matches!(token.kind, TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment) {
+    if matches!(
+      token.kind,
+      TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment
+    ) {
       args.push(token.clone());
     }
   }
@@ -248,10 +257,7 @@ pub fn extract_command_parts(input: &str, tokens: &[Token]) -> Option<CommandPar
 }
 
 pub fn normalized_tokens(input: &str) -> Vec<String> {
-  tokenize(input)
-    .into_iter()
-    .map(|t| t.normalized)
-    .collect()
+  tokenize(input).into_iter().map(|t| t.normalized).collect()
 }
 
 pub fn normalize_token(raw: &str) -> String {
@@ -322,11 +328,11 @@ fn parse_redirect(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Optio
   };
   buf.push(op);
 
-  if let Some(next) = iter.peek().copied() {
-    if next == op {
-      buf.push(next);
-      iter.next();
-    }
+  if let Some(next) = iter.peek().copied()
+    && next == op
+  {
+    buf.push(next);
+    iter.next();
   }
 
   if let Some('&') = iter.peek().copied() {
@@ -360,11 +366,12 @@ fn parse_quoted(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Token {
     if ch == quote {
       break;
     }
-    if quote == '"' && ch == '\\' {
-      if let Some(escaped) = chars.next() {
-        buf.push(escaped);
-        continue;
-      }
+    if quote == '"'
+      && ch == '\\'
+      && let Some(escaped) = chars.next()
+    {
+      buf.push(escaped);
+      continue;
     }
     buf.push(ch);
   }
@@ -521,8 +528,7 @@ fn is_hash(raw: &str) -> bool {
   if raw.len() < 8 {
     return false;
   }
-  raw.chars()
-    .all(|c| c.is_ascii_hexdigit())
+  raw.chars().all(|c| c.is_ascii_hexdigit())
 }
 
 fn is_ip(raw: &str) -> bool {
@@ -604,7 +610,11 @@ fn collect_tokens(node: Node<'_>, source: &[u8], tokens: &mut Vec<Token>) {
       if !raw.is_empty() {
         let kind = TokenKind::Word;
         let normalized = normalize(&raw, &kind);
-        tokens.push(Token { raw, kind, normalized });
+        tokens.push(Token {
+          raw,
+          kind,
+          normalized,
+        });
       }
     }
     return;
@@ -724,10 +734,7 @@ fn strip_quotes(input: &str) -> &str {
 }
 
 fn strip_quote_chars(input: &str) -> String {
-  input
-    .chars()
-    .filter(|c| !matches!(c, '"' | '\''))
-    .collect()
+  input.chars().filter(|c| !matches!(c, '"' | '\'')).collect()
 }
 
 fn is_operator_text(raw: &str) -> bool {
@@ -738,7 +745,8 @@ fn is_redirect_text(raw: &str) -> bool {
   if !raw.contains('<') && !raw.contains('>') {
     return false;
   }
-  raw.chars()
+  raw
+    .chars()
     .all(|c| c.is_ascii_digit() || c == '<' || c == '>' || c == '&')
 }
 
@@ -758,23 +766,16 @@ fn is_adjacent_or_quoted(input: &str, left_end: usize, right_start: usize) -> bo
 }
 
 fn is_atomic_expansion(kind: &str) -> bool {
-  if kind.contains("expansion")
-    || kind.contains("substitution")
-    || kind.contains("variable_ref")
-  {
+  if kind.contains("expansion") || kind.contains("substitution") || kind.contains("variable_ref") {
     return true;
   }
-  matches!(
-    kind,
-    "raw_string"
-  )
+  matches!(kind, "raw_string")
 }
 
 fn is_wordish(raw: &str) -> bool {
-  raw.chars()
-    .any(|c| {
-      c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '$' | '=' | '{' | '}')
-    })
+  raw.chars().any(|c| {
+    c.is_ascii_alphanumeric() || matches!(c, '_' | '-' | '.' | '/' | ':' | '$' | '=' | '{' | '}')
+  })
 }
 
 fn is_flag_token(raw: &str) -> bool {
@@ -788,7 +789,11 @@ fn is_command_separator(raw: &str) -> bool {
 fn make_assignment_token(raw: String) -> Token {
   let kind = TokenKind::Assignment;
   let normalized = normalize(&raw, &kind);
-  Token { raw, kind, normalized }
+  Token {
+    raw,
+    kind,
+    normalized,
+  }
 }
 
 fn merge_url_tokens(args: Vec<Token>) -> Vec<Token> {
@@ -803,7 +808,11 @@ fn merge_url_tokens(args: Vec<Token>) -> Vec<Token> {
       let raw = format!("{}{}{}", args[i].raw, args[i + 1].raw, args[i + 2].raw);
       let kind = TokenKind::Word;
       let normalized = normalize(&raw, &kind);
-      merged.push(Token { raw, kind, normalized });
+      merged.push(Token {
+        raw,
+        kind,
+        normalized,
+      });
       i += 3;
       continue;
     }
@@ -811,7 +820,11 @@ fn merge_url_tokens(args: Vec<Token>) -> Vec<Token> {
       let raw = format!("${}", args[i + 1].raw);
       let kind = TokenKind::Variable;
       let normalized = normalize(&raw, &kind);
-      merged.push(Token { raw, kind, normalized });
+      merged.push(Token {
+        raw,
+        kind,
+        normalized,
+      });
       i += 2;
       continue;
     }
@@ -845,7 +858,11 @@ fn merge_special_tokens(input: &str, tokens: Vec<Token>) -> Vec<Token> {
         let raw = format!("{}{}", current.raw, next.raw);
         let kind = classify_word(&raw);
         let normalized = normalize(&raw, &kind);
-        current = Token { raw, kind, normalized };
+        current = Token {
+          raw,
+          kind,
+          normalized,
+        };
         j += 1;
         continue;
       }
@@ -1034,7 +1051,8 @@ mod tests {
 
       let mut flags = parts.flags.clone();
       flags.sort();
-      let mut expected_flags: Vec<String> = expected.flags.iter().map(|f| (*f).to_string()).collect();
+      let mut expected_flags: Vec<String> =
+        expected.flags.iter().map(|f| (*f).to_string()).collect();
       expected_flags.sort();
       assert_eq!(
         flags, expected_flags,
@@ -1356,8 +1374,8 @@ mod tests {
       .join("tests")
       .join("data")
       .join("zsh.history");
-    let zsh_invocations = shell_history::parse_zsh_history(&zsh_history_path, None, None)
-      .expect("parse zsh history");
+    let zsh_invocations =
+      shell_history::parse_zsh_history(&zsh_history_path, None, None).expect("parse zsh history");
     for invocation in zsh_invocations {
       let tokens = tokenize_index("zsh", &invocation.command);
       assert!(

@@ -8,7 +8,6 @@ use tracing::debug;
 use tracing::info;
 use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
-use uzers;
 use zage::db::{import_history, init, insert_invocation, open_db, update_stats_for_invocation};
 use zage::indexer::rebuild_stats;
 use zage::predict::{SuggestConfig, suggest};
@@ -140,7 +139,6 @@ enum Commands {
     #[arg(long)]
     session_id: Option<i64>, // Optional for now
   },
-
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -266,11 +264,14 @@ async fn main() -> Result<()> {
       };
 
       let hostname = hostname.clone().or_else(|| Some(get_hostname()));
-      let username = username.clone().or_else(|| {
-        uzers::get_current_username().map(|v| v.to_string_lossy().into_owned())
-      });
+      let username = username
+        .clone()
+        .or_else(|| uzers::get_current_username().map(|v| v.to_string_lossy().into_owned()));
 
-      let has_prefix = current_line.as_ref().map(|s| !s.is_empty()).unwrap_or(false);
+      let has_prefix = current_line
+        .as_ref()
+        .map(|s| !s.is_empty())
+        .unwrap_or(false);
 
       if has_prefix {
         let base_config = SuggestConfig {
@@ -314,24 +315,24 @@ async fn main() -> Result<()> {
         let mut seen = std::collections::HashSet::new();
         for suggestion in completions {
           let candidate_tokens = tokenize(&suggestion.command);
-          if let Some(tok) = candidate_tokens.get(target_index) {
-            if seen.insert(tok.raw.clone()) {
-              match completion_format {
-                CompletionFormat::Plain => {
-                  if *show_scores {
-                    println!("{}\t{:.4}", tok.raw, suggestion.score);
-                  } else {
-                    println!("{}", tok.raw);
-                  }
+          if let Some(tok) = candidate_tokens.get(target_index)
+            && seen.insert(tok.raw.clone())
+          {
+            match completion_format {
+              CompletionFormat::Plain => {
+                if *show_scores {
+                  println!("{}\t{:.4}", tok.raw, suggestion.score);
+                } else {
+                  println!("{}", tok.raw);
                 }
-                CompletionFormat::Zsh => {
-                  let desc = if *show_scores {
-                    Some(format!("{:.4}", suggestion.score))
-                  } else {
-                    None
-                  };
-                  println!("{}", format_zsh_item(&tok.raw, desc.as_deref()));
-                }
+              }
+              CompletionFormat::Zsh => {
+                let desc = if *show_scores {
+                  Some(format!("{:.4}", suggestion.score))
+                } else {
+                  None
+                };
+                println!("{}", format_zsh_item(&tok.raw, desc.as_deref()));
               }
             }
           }

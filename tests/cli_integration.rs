@@ -11,7 +11,7 @@ use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 use tempfile::TempDir;
-use zage::db::{open_db, init};
+use zage::db::{init, open_db};
 
 /// Helper to write a minimal shell history file (zsh format)
 fn write_zsh_history(path: &Path) {

@@ -49,7 +49,10 @@ pub struct SequenceCandidate {
   pub prefix_len: usize,
 }
 
-pub async fn analyze_sequences(conn: &Connection, config: SequenceConfig) -> Result<SequenceReport> {
+pub async fn analyze_sequences(
+  conn: &Connection,
+  config: SequenceConfig,
+) -> Result<SequenceReport> {
   let mut total: usize = 0;
   let mut unigram_counts: HashMap<String, usize> = HashMap::new();
   let mut bigram_counts: HashMap<(String, String), usize> = HashMap::new();
@@ -76,18 +79,18 @@ pub async fn analyze_sequences(conn: &Connection, config: SequenceConfig) -> Res
         .or_insert(0) += 1;
     }
 
-    if config.max_len >= 3 {
-      if let (Some(p2), Some(p1)) = (&prev2, &prev1) {
-        *trigram_counts
-          .entry((p2.clone(), p1.clone(), cmd.clone()))
-          .or_insert(0) += 1;
-      }
+    if config.max_len >= 3
+      && let (Some(p2), Some(p1)) = (&prev2, &prev1)
+    {
+      *trigram_counts
+        .entry((p2.clone(), p1.clone(), cmd.clone()))
+        .or_insert(0) += 1;
     }
 
     prev2 = prev1.take();
     prev1 = Some(cmd);
 
-    if total % progress_interval == 0 {
+    if total.is_multiple_of(progress_interval) {
       info!("Scanned {} commands for sequences so far", total);
     }
   }
@@ -237,7 +240,7 @@ pub async fn analyze_token_sequences(
       }
     }
 
-    if total % progress_interval == 0 {
+    if total.is_multiple_of(progress_interval) {
       info!("Scanned {} tokens for token sequences so far", total);
     }
   }
@@ -390,7 +393,7 @@ pub async fn candidates_from_sequences(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::db::{open_db, init, insert_invocation};
+  use crate::db::{init, insert_invocation, open_db};
   use crate::shell_history::Invocation;
 
   async fn insert_cmd(conn: &libsql::Connection, command: &str, ts: i64) {

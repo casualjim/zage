@@ -226,7 +226,7 @@ Zsh glob - modifiers
 ================================================================================
 
 echo *.txt(:r)
-echo *.tar.gz(:r:r)  
+echo *.tar.gz(:r:r)
 echo /path/file(:h)
 echo /path/file(:t)
 

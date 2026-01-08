@@ -67,7 +67,7 @@ _zage_preexec() {
     fi
 }
 
-# Function to run before prompt (precmd) 
+# Function to run before prompt (precmd)
 _zage_precmd() {
     # Placeholder - Logic to capture end time, exit status, and call zage record goes here
     # Requires access to _zage_cmd_start_time, _zage_cmd_string, _zage_cmd_pwd and $?

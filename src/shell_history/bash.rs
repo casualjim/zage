@@ -30,20 +30,20 @@ pub fn parse_history_file(
       Ok(bytes) => bytes,
       Err(_) => continue,
     };
-    if line_bytes.ends_with(&[b'\r']) {
+    if line_bytes.ends_with(b"\r") {
       line_bytes.pop();
     }
     if line_bytes.is_empty() {
       continue;
     }
 
-    if line_bytes[0] == b'#' {
-      if let Ok(ts) = str::parse::<i64>(std::str::from_utf8(&line_bytes[1..]).unwrap_or("0")) {
-        if ts > 0 {
-          last_ts = Some(ts);
-        }
-        continue;
+    if line_bytes[0] == b'#'
+      && let Ok(ts) = str::parse::<i64>(std::str::from_utf8(&line_bytes[1..]).unwrap_or("0"))
+    {
+      if ts > 0 {
+        last_ts = Some(ts);
       }
+      continue;
     }
     let command = String::from_utf8_lossy(&line_bytes).into_owned();
     let invocation = Invocation {

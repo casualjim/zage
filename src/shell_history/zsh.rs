@@ -33,7 +33,7 @@ pub fn parse_history_file(
       Ok(bytes) => bytes,
       Err(_) => continue,
     };
-    if line_bytes.ends_with(&[b'\r']) {
+    if line_bytes.ends_with(b"\r") {
       line_bytes.pop();
     }
     if line_bytes.is_empty() {
@@ -52,8 +52,8 @@ pub fn parse_history_file(
     let command_s = String::from_utf8_lossy(command).into_owned();
 
     // Update current directory based on 'cd' commands
-    if command_s.starts_with("cd ") {
-      let target = command_s[3..].trim();
+    if let Some(target) = command_s.strip_prefix("cd ") {
+      let target = target.trim();
       if !target.is_empty() {
         let target_path = PathBuf::from(target);
         if target_path.is_absolute() {

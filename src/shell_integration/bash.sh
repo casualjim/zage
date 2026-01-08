@@ -23,7 +23,9 @@ _zage_cmd_pwd=""
 
 # Function to run before each command (preexec)
 _zage_preexec() {
-    _zage_cmd_start_time=$(date +%s)
+    local start_time
+    start_time=$(date +%s)
+    _zage_cmd_start_time="$start_time"
     _zage_cmd_string="$1"
     _zage_cmd_pwd="$PWD"
 }
@@ -31,7 +33,8 @@ _zage_preexec() {
 # Function to run before prompt (precmd)
 _zage_precmd() {
     local exit_status=$?
-    local end_time=$(date +%s)
+    local end_time
+    end_time=$(date +%s)
 
     # Skip empty or record commands
     if [[ -z "$_zage_cmd_string" || "$_zage_cmd_string" =~ ^zage[[:space:]]+record ]]; then
@@ -46,7 +49,10 @@ _zage_precmd() {
         --exit-status "$exit_status" \
         --start-timestamp "$_zage_cmd_start_time" \
         --end-timestamp "$end_time" \
-        --session-id $$ > /dev/null 2>&1 &!
+        --session-id $$ > /dev/null 2>&1 &
+    if command -v disown >/dev/null 2>&1; then
+        disown
+    fi
 
     # Clear for next command
     _zage_cmd_string=""
