@@ -6,15 +6,17 @@ use libsql::{Connection, Value};
 use crate::Result;
 use crate::db::get_recent_invocations;
 use crate::repo::find_repo_root;
+use crate::rerank;
 use crate::tokenize::normalized_tokens;
 
 mod aliases;
 mod candidates;
 mod phase_support;
-mod ranking;
+pub(crate) mod ranking;
 mod sql;
 mod templates;
 
+use crate::rerank_config::RerankConfig;
 use aliases::{add_alias_candidates, build_prefix_variants, expand_alias, load_aliases};
 use candidates::{
   add_context_candidates, add_global_candidates, add_head_candidates, add_phase_candidates,
@@ -82,15 +84,15 @@ pub struct ScoreBreakdown {
 }
 
 #[derive(Debug, Clone)]
-struct Candidate {
+pub(crate) struct Candidate {
   command: String,
   freq: i64,
   last_seen: i64,
   transition_freq: i64,
   repo_transition_freq: i64,
-  repo_freq: i64,
+  pub(crate) repo_freq: i64,
   context_freq: i64,
-  session_freq: i64,
+  pub(crate) session_freq: i64,
   session_last_seen: i64,
   sequence_confidence: f64,
   sequence_lift: f64,
@@ -137,6 +139,11 @@ fn new_candidate(command: &str) -> Candidate {
   }
 }
 
+#[cfg(test)]
+pub(crate) fn candidate_for_test(command: &str) -> Candidate {
+  new_candidate(command)
+}
+
 pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Suggestion>> {
   let prefix = config.prefix.clone().unwrap_or_default();
   let prefix_norm = normalized_tokens(&prefix);
@@ -157,6 +164,10 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
     .iter()
     .filter_map(|inv| command_head_for_phase(&inv.shellname, &inv.command))
     .collect();
+  let session_tokens = recent_commands
+    .iter()
+    .flat_map(|cmd| normalized_tokens(cmd))
+    .collect::<Vec<_>>();
   let last_command = recent_commands.last().cloned();
   let last_exit_status = recent.last().and_then(|inv| inv.exit_status);
   let repo_root = config
@@ -247,7 +258,8 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
   )
   .await?;
 
-  if low_confidence(&scored) {
+  let rerank_config = RerankConfig::load()?;
+  if low_confidence(&scored, &rerank_config) {
     let before = candidates.len();
     expand_low_confidence_candidates(
       conn,
@@ -271,6 +283,14 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
       .await?;
     }
   }
+
+  let context = rerank::runtime_context(
+    &repo_root,
+    &recent_heads,
+    session_tokens,
+    session_phase.as_ref().map(|phase| phase.phase.as_str()),
+  );
+  let _ = rerank::rerank_suggestions(&mut scored, &candidates, &context, &rerank_config);
 
   scored.truncate(config.max_results);
   Ok(scored)

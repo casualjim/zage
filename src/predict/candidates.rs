@@ -130,10 +130,7 @@ pub(crate) async fn add_context_candidates(
     sql.push_str(" AND username = ?");
     params.push(Value::from(username.clone()));
   }
-  if let Some(session_id) = config.session_id {
-    sql.push_str(" AND session_id = ?");
-    params.push(Value::from(session_id));
-  }
+  // context_stats is keyed by (command, cwd, hostname, username); session_id is tracked elsewhere
   sql.push_str(" ORDER BY freq DESC LIMIT 50");
 
   let mut rows = query_prepared(conn, &sql, libsql::params_from_iter(params)).await?;

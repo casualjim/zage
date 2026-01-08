@@ -1,6 +1,6 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
-use clap::{Parser, Subcommand};
+use clap::{CommandFactory, Parser, Subcommand};
 use color_eyre::eyre::Result;
 use dirs::home_dir;
 use human_panic::setup_panic;
@@ -11,6 +11,7 @@ use tracing_subscriber::fmt;
 use zage::db::{import_history, init, insert_invocation, open_db, update_stats_for_invocation};
 use zage::indexer::rebuild_stats;
 use zage::predict::{SuggestConfig, suggest};
+use zage::rerank::{TrainConfig, model_status, reset_model, train_model};
 use zage::sequence::{SequenceConfig, analyze_sequences, analyze_token_sequences};
 use zage::shell_history::{Invocation, Shell, get_hostname, parse_bash_history, parse_zsh_history};
 use zage::tokenize::tokenize;
@@ -117,6 +118,28 @@ enum Commands {
     #[arg(long, default_value = "3")]
     max_len: usize,
   },
+
+  /// Train the lightweight reranker model
+  Train {
+    /// Number of training epochs
+    #[arg(long, default_value = "3")]
+    epochs: usize,
+    /// Number of negatives per positive example
+    #[arg(long, default_value = "6")]
+    negatives: usize,
+    /// Minimum history size required to train
+    #[arg(long, default_value = "1000")]
+    min_history: usize,
+    /// Maximum number of history entries to use
+    #[arg(long, default_value = "25000")]
+    max_samples: usize,
+  },
+
+  /// Show reranker model status
+  ModelStatus,
+
+  /// Reset (delete) the reranker model
+  ModelReset,
 
   /// (Internal) Record a single command invocation (used by shell hooks)
   Record {
@@ -401,6 +424,48 @@ async fn main() -> Result<()> {
         token_report.sequences, token_report.bigrams, token_report.trigrams
       );
     }
+    Some(Commands::Train {
+      epochs,
+      negatives,
+      min_history,
+      max_samples,
+    }) => {
+      let report = train_model(
+        &db.conn,
+        TrainConfig {
+          epochs: *epochs,
+          negatives_per_pos: *negatives,
+          min_history: *min_history,
+          max_samples: *max_samples,
+        },
+      )
+      .await?;
+      println!(
+        "Trained reranker: samples={}, pairs={}, validation_accuracy={:.2}, model={}",
+        report.samples,
+        report.pairs,
+        report.validation_accuracy,
+        report.model_path.display()
+      );
+    }
+    Some(Commands::ModelStatus) => {
+      if let Some(model) = model_status()? {
+        println!(
+          "Reranker model (trees={}, objective={}, loss={}, created_at={}, path={})",
+          model.n_trees,
+          model.objective,
+          model.loss,
+          model.created_at,
+          model.model_path.display()
+        );
+      } else {
+        println!("Reranker model not found");
+      }
+    }
+    Some(Commands::ModelReset) => {
+      reset_model()?;
+      println!("Reranker model reset");
+    }
 
     Some(Commands::Record {
       command,
@@ -426,7 +491,7 @@ async fn main() -> Result<()> {
       // Create Invocation struct
       let invocation = Invocation {
         command: command.clone(),
-        shellname: "zsh".to_string(), // Assume zsh for now
+        shellname: detect_shellname(),
         working_directory: Some(working_directory.clone()),
         hostname: Some(hostname.clone()),
         username: Some(username.clone()),
@@ -448,13 +513,28 @@ async fn main() -> Result<()> {
     }
 
     None => {
-      // Default application behavior
-      println!("Starting Zage application...");
-      println!("Use --help to see available commands");
+      let mut cmd = Cli::command();
+      cmd.print_help()?;
+      println!();
     }
   }
 
   Ok(())
+}
+
+fn detect_shellname() -> String {
+  let Some(shell) = std::env::var("SHELL").ok().and_then(|value| {
+    Path::new(&value)
+      .file_name()
+      .map(|name| name.to_string_lossy().to_string())
+  }) else {
+    return "sh".to_string();
+  };
+  let normalized = shell.to_lowercase();
+  match normalized.as_str() {
+    "zsh" | "bash" | "sh" | "fish" | "nushell" | "nu" => normalized,
+    _ => shell,
+  }
 }
 
 fn format_zsh_item(word: &str, desc: Option<&str>) -> String {

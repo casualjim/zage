@@ -51,7 +51,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
   let mut command_shell: HashMap<String, String> = HashMap::new();
   let phase_config = PhaseConfig::load()?;
   let mut phase_samples: Vec<PhaseSample> = Vec::new();
-  let mut phase_unlabeled: Vec<Vec<f32>> = Vec::new();
+  let mut phase_unlabeled: Vec<Vec<f64>> = Vec::new();
 
   let mut prev_command: Option<String> = None;
   let mut prev_exit_status: Option<i64> = None;

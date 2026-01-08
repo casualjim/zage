@@ -3,17 +3,12 @@ use std::env;
 use std::fs;
 use std::path::PathBuf;
 
-use burn::backend::{Autodiff, NdArray};
-use burn::module::AutodiffModule;
-use burn::nn::loss::CrossEntropyLossConfig;
-use burn::nn::{Linear, LinearConfig};
-use burn::optim::{AdamConfig, GradientsParams, Optimizer};
-use burn::prelude::*;
-use burn::tensor::TensorData;
-use burn::tensor::activation::softmax;
-use rand::seq::SliceRandom;
+use gbrt_rs::boosting::GBRTConfig;
+use gbrt_rs::{Dataset, FeatureMatrix, GBRTModel};
+use ndarray::Array2;
 use serde::Deserialize;
 
+use crate::hash_util::stable_hash;
 use crate::tokenize::Token;
 use crate::{Result, ZageError};
 
@@ -22,12 +17,7 @@ const PHASE_FEATURES: usize = 512;
 const PHASE_MIN_SAMPLES: usize = 100;
 const PHASE_MIN_PER_CLASS: usize = 8;
 const PHASE_DEFAULT_LIMIT: usize = 5_000;
-const PHASE_EPOCHS: usize = 12;
-const PHASE_BATCH_SIZE: usize = 64;
-const PHASE_LR: f64 = 1e-2;
-
-type PhaseBackend = NdArray<f32>;
-type PhaseAutodiff = Autodiff<PhaseBackend>;
+const PHASE_ESTIMATORS: usize = 120;
 
 #[derive(Debug, Clone, Deserialize)]
 struct PhaseConfigFile {
@@ -55,32 +45,15 @@ pub struct PhaseConfig {
 
 #[derive(Debug, Clone)]
 pub struct PhaseSample {
-  pub features: Vec<f32>,
+  pub features: Vec<f64>,
   pub label: usize,
 }
 
-#[derive(Debug, Clone)]
 pub struct PhasePredictor {
   labels: Vec<String>,
   hash_size: usize,
-  model: PhaseClassifier<PhaseBackend>,
-}
-
-#[derive(Module, Debug)]
-struct PhaseClassifier<B: Backend> {
-  linear: Linear<B>,
-}
-
-impl<B: Backend> PhaseClassifier<B> {
-  fn new(features: usize, classes: usize, device: &B::Device) -> Self {
-    Self {
-      linear: LinearConfig::new(features, classes).init(device),
-    }
-  }
-
-  fn forward(&self, input: Tensor<B, 2>) -> Tensor<B, 2> {
-    self.linear.forward(input)
-  }
+  default_idx: usize,
+  models: Vec<Option<GBRTModel>>,
 }
 
 impl PhaseConfig {
@@ -183,10 +156,10 @@ impl PhaseConfig {
   }
 }
 
-pub fn features_from_tokens(tokens: &[Token], hash_size: usize) -> Vec<f32> {
-  let mut features = vec![0.0f32; hash_size];
+pub fn features_from_tokens(tokens: &[Token], hash_size: usize) -> Vec<f64> {
+  let mut features = vec![0.0f64; hash_size];
   for token in tokens {
-    let idx = (hash_token(&token.normalized) as usize) % hash_size;
+    let idx = (stable_hash(&token.normalized) as usize) % hash_size;
     features[idx] += 1.0;
   }
   features
@@ -195,7 +168,7 @@ pub fn features_from_tokens(tokens: &[Token], hash_size: usize) -> Vec<f32> {
 pub fn train_phase_predictor(
   config: &PhaseConfig,
   mut samples: Vec<PhaseSample>,
-  unlabeled: Vec<Vec<f32>>,
+  unlabeled: Vec<Vec<f64>>,
 ) -> Option<PhasePredictor> {
   if config.labels.len() <= 1 {
     return None;
@@ -229,34 +202,47 @@ pub fn train_phase_predictor(
     });
   }
 
-  let device = Default::default();
-  let mut model =
-    PhaseClassifier::<PhaseAutodiff>::new(PHASE_FEATURES, config.labels.len(), &device);
-  let mut optimizer = AdamConfig::new().init();
+  let feature_names = phase_feature_names();
+  let feature_matrix = match build_feature_matrix(&samples, config.hash_size()) {
+    Ok(matrix) => matrix,
+    Err(_) => return None,
+  };
 
-  let mut rng = rand::rng();
-  for _epoch in 0..PHASE_EPOCHS {
-    samples.shuffle(&mut rng);
-    for batch in samples.chunks(PHASE_BATCH_SIZE) {
-      if batch.is_empty() {
+  let mut models: Vec<Option<GBRTModel>> = Vec::with_capacity(config.labels.len());
+  for label_idx in 0..config.labels.len() {
+    let targets: Vec<f64> = samples
+      .iter()
+      .map(|sample| if sample.label == label_idx { 1.0 } else { 0.0 })
+      .collect();
+    let dataset = match Dataset::new(feature_matrix.clone(), targets) {
+      Ok(dataset) => dataset,
+      Err(_) => {
+        models.push(None);
         continue;
       }
-      let (x, y) = batch_tensors::<PhaseAutodiff>(batch, PHASE_FEATURES, &device);
-      let logits = model.forward(x);
-      let loss = CrossEntropyLossConfig::new()
-        .init(&device)
-        .forward(logits, y);
-      let grads = loss.backward();
-      let grads = GradientsParams::from_grads(grads, &model);
-      model = optimizer.step(PHASE_LR, model, grads);
+    };
+    let mut gbrt_config = GBRTConfig::for_binary_classification();
+    gbrt_config.n_estimators = PHASE_ESTIMATORS;
+    let mut model = match GBRTModel::with_config(gbrt_config) {
+      Ok(model) => model,
+      Err(_) => {
+        models.push(None);
+        continue;
+      }
+    };
+    model.set_feature_names(feature_names.clone());
+    if model.fit(&dataset).is_err() {
+      models.push(None);
+      continue;
     }
+    models.push(Some(model));
   }
 
-  let model = model.valid();
   Some(PhasePredictor {
     labels: config.labels.clone(),
     hash_size: PHASE_FEATURES,
-    model,
+    default_idx: config.default_idx,
+    models,
   })
 }
 
@@ -269,46 +255,56 @@ impl PhasePredictor {
     self.hash_size
   }
 
-  pub fn predict(&self, features: &[f32]) -> Vec<f32> {
-    let device = Default::default();
-    let data = TensorData::new(features.to_vec(), [1, self.hash_size]);
-    let input = Tensor::<PhaseBackend, 2>::from_data(data, &device);
-    let logits = self.model.forward(input);
-    let probs = softmax(logits, 1);
-    probs
-      .into_data()
-      .into_vec::<f32>()
-      .unwrap_or_else(|_| vec![0.0; self.labels.len()])
+  pub fn predict(&self, features: &[f64]) -> Vec<f32> {
+    if features.len() != self.hash_size {
+      return self.default_distribution();
+    }
+    let mut scores = vec![0.0f64; self.labels.len()];
+    for (idx, model) in self.models.iter().enumerate() {
+      if let Some(model) = model
+        && let Ok(score) = model.predict_single(features)
+      {
+        scores[idx] = score;
+      }
+    }
+    let sum: f64 = scores.iter().sum();
+    if sum > 0.0 {
+      scores.iter_mut().for_each(|s| *s /= sum);
+      scores.into_iter().map(|s| s as f32).collect()
+    } else {
+      self.default_distribution()
+    }
+  }
+
+  fn default_distribution(&self) -> Vec<f32> {
+    let mut scores = vec![0.0; self.labels.len()];
+    if self.default_idx < scores.len() {
+      scores[self.default_idx] = 1.0;
+    }
+    scores
   }
 }
 
-fn batch_tensors<B: burn::tensor::backend::AutodiffBackend>(
-  batch: &[PhaseSample],
-  features: usize,
-  device: &B::Device,
-) -> (Tensor<B, 2>, Tensor<B, 1, Int>) {
-  let mut flattened = Vec::with_capacity(batch.len() * features);
-  let mut labels = Vec::with_capacity(batch.len());
-  for sample in batch {
-    flattened.extend_from_slice(&sample.features);
-    labels.push(sample.label as i32);
+fn build_feature_matrix(samples: &[PhaseSample], feature_len: usize) -> Result<FeatureMatrix> {
+  let rows = samples.len();
+  let cols = feature_len;
+  let mut data = Array2::<f64>::zeros((rows, cols));
+  for (row, sample) in samples.iter().enumerate() {
+    if sample.features.len() != cols {
+      return Err(ZageError::ConfigError(format!(
+        "phase feature length mismatch: expected {cols}, got {}",
+        sample.features.len()
+      )));
+    }
+    for (col, value) in sample.features.iter().enumerate() {
+      data[(row, col)] = *value;
+    }
   }
-  let data = TensorData::new(flattened, [batch.len(), features]);
-  let input = Tensor::<B, 2>::from_data(data, device);
-  let label_data = TensorData::new(labels, [batch.len()]);
-  let target = Tensor::<B, 1, Int>::from_data(label_data, device);
-  (input, target)
+  FeatureMatrix::new(data).map_err(|err| ZageError::GenericError(Box::new(err)))
 }
 
-fn hash_token(token: &str) -> u64 {
-  const FNV_OFFSET: u64 = 0xcbf29ce484222325;
-  const FNV_PRIME: u64 = 0x100000001b3;
-  let mut hash = FNV_OFFSET;
-  for byte in token.as_bytes() {
-    hash ^= *byte as u64;
-    hash = hash.wrapping_mul(FNV_PRIME);
-  }
-  hash
+fn phase_feature_names() -> Vec<String> {
+  (0..PHASE_FEATURES).map(|i| format!("p{i}")).collect()
 }
 
 fn parse_phase_pattern(pattern: &str) -> Option<PhasePattern> {

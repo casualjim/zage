@@ -1,12 +1,15 @@
 mod err;
 pub use err::*;
 mod config;
+mod hash_util;
 pub use config::*;
 pub mod db;
 pub mod indexer;
 pub mod phase;
 pub mod predict;
 pub mod repo;
+pub mod rerank;
+pub mod rerank_config;
 pub mod sequence;
 pub mod shell_history;
 pub mod tokenize;
