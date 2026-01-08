@@ -7,6 +7,7 @@ use tracing::info;
 
 use crate::Result;
 use crate::phase::{PhaseConfig, PhaseSample, features_from_tokens, train_phase_predictor};
+use crate::predict::aliases::{expand_alias, load_aliases};
 use crate::repo::find_repo_root;
 use crate::tokenize::{extract_command_parts, normalize_token, tokenize_index};
 
@@ -36,10 +37,9 @@ type ContextKey = (String, Option<String>, Option<String>, Option<String>);
 
 pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Result<IndexReport> {
   let mut command_stats: HashMap<String, Stat> = HashMap::new();
-  let mut transition_stats: HashMap<(String, String), Stat> = HashMap::new();
-  let mut transition_stats_v2: HashMap<(String, Option<i64>, String), Stat> = HashMap::new();
+  let mut transition_stats: HashMap<(String, Option<i64>, String), Stat> = HashMap::new();
   let mut repo_command_stats: HashMap<(String, String), Stat> = HashMap::new();
-  let mut repo_transition_stats_v2: HashMap<(String, String, Option<i64>, String), Stat> =
+  let mut repo_transition_stats: HashMap<(String, String, Option<i64>, String), Stat> =
     HashMap::new();
   let mut context_stats: HashMap<ContextKey, Stat> = HashMap::new();
   let mut arg_stats: HashMap<(String, String, String, i64, String, String), Stat> = HashMap::new();
@@ -59,9 +59,10 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
   let mut processed: usize = 0;
   let progress_interval = 50_000usize;
   let max_unlabeled = 10_000usize;
+  let aliases = load_aliases();
 
   let mut sql = String::from(
-    "SELECT command, shellname, working_directory, hostname, username, exit_status, start_unix_timestamp
+    "SELECT command, expanded_command, shellname, working_directory, hostname, username, exit_status, start_unix_timestamp
      FROM shell_history
      ORDER BY COALESCE(start_unix_timestamp, 0) ASC, id ASC",
   );
@@ -77,27 +78,34 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
 
   while let Some(row) = rows.next().await? {
     let command = row.get::<String>(0)?;
-    let shellname = row.get::<String>(1)?;
-    let working_directory = row.get::<Option<String>>(2)?;
-    let hostname = row.get::<Option<String>>(3)?;
-    let username = row.get::<Option<String>>(4)?;
-    let exit_status = row.get::<Option<i64>>(5)?;
-    let ts: Option<i64> = row.get(6)?;
+    let expanded_command = row.get::<String>(1)?;
+    let shellname = row.get::<String>(2)?;
+    let working_directory = row.get::<Option<String>>(3)?;
+    let hostname = row.get::<Option<String>>(4)?;
+    let username = row.get::<Option<String>>(5)?;
+    let exit_status = row.get::<Option<i64>>(6)?;
+    let ts: Option<i64> = row.get(7)?;
     let ts = ts.unwrap_or(0);
     let repo_root = working_directory
       .as_deref()
       .and_then(find_repo_root)
       .unwrap_or_default();
 
-    update_stat(&mut command_stats, &command, ts);
+    let stats_command = if !expanded_command.is_empty() {
+      expanded_command
+    } else {
+      expand_alias(&command, &aliases).unwrap_or(command.clone())
+    };
+
+    update_stat(&mut command_stats, &stats_command, ts);
     update_stat_key(
       &mut repo_command_stats,
-      (repo_root.clone(), command.clone()),
+      (repo_root.clone(), stats_command.clone()),
       ts,
     );
 
     let ctx_key = (
-      command.clone(),
+      stats_command.clone(),
       working_directory.clone(),
       hostname.clone(),
       username.clone(),
@@ -105,52 +113,56 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
     update_stat_key(&mut context_stats, ctx_key, ts);
 
     if let Some(prev) = &prev_command {
-      update_stat_key(&mut transition_stats, (prev.clone(), command.clone()), ts);
       update_stat_key(
-        &mut transition_stats_v2,
-        (prev.clone(), prev_exit_status, command.clone()),
+        &mut transition_stats,
+        (prev.clone(), prev_exit_status, stats_command.clone()),
         ts,
       );
       update_stat_key(
-        &mut transition_stats_v2,
-        (prev.clone(), None, command.clone()),
+        &mut transition_stats,
+        (prev.clone(), None, stats_command.clone()),
         ts,
       );
       update_stat_key(
-        &mut repo_transition_stats_v2,
+        &mut repo_transition_stats,
         (
           prev_repo_root.clone(),
           prev.clone(),
           prev_exit_status,
-          command.clone(),
+          stats_command.clone(),
         ),
         ts,
       );
       update_stat_key(
-        &mut repo_transition_stats_v2,
-        (prev_repo_root.clone(), prev.clone(), None, command.clone()),
+        &mut repo_transition_stats,
+        (
+          prev_repo_root.clone(),
+          prev.clone(),
+          None,
+          stats_command.clone(),
+        ),
         ts,
       );
     }
 
-    command_shell.insert(command.clone(), shellname.clone());
+    command_shell.insert(stats_command.clone(), shellname.clone());
 
-    let tokens = tokenize_index(&shellname, &command);
-    if !token_cache.contains_key(&command) {
+    let tokens = tokenize_index(&shellname, &stats_command);
+    if !token_cache.contains_key(&stats_command) {
       let raw = tokens.iter().map(|t| t.raw.clone()).collect();
       let normalized = tokens.iter().map(|t| t.normalized.clone()).collect();
-      token_cache.insert(command.clone(), (raw, normalized));
+      token_cache.insert(stats_command.clone(), (raw, normalized));
     }
 
     if phase_config.labels().len() > 1 {
       let features = features_from_tokens(&tokens, phase_config.hash_size());
-      if let Some(label) = phase_config.match_label(&command) {
+      if let Some(label) = phase_config.match_label(&stats_command) {
         phase_samples.push(PhaseSample { features, label });
       } else if phase_unlabeled.len() < max_unlabeled {
         phase_unlabeled.push(features);
       }
     }
-    if let Some(parts) = extract_command_parts(&command, &tokens) {
+    if let Some(parts) = extract_command_parts(&stats_command, &tokens) {
       let mut flags = parts.flags;
       flags.sort();
       let flags_json = serde_json::to_string(&flags)?;
@@ -208,7 +220,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
       }
     }
 
-    prev_command = Some(command);
+    prev_command = Some(stats_command);
     prev_exit_status = exit_status;
     prev_repo_root = repo_root;
     processed += 1;
@@ -273,9 +285,8 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
   let write_result: Result<()> = async {
     conn.execute("DELETE FROM command_stats", ()).await?;
     conn.execute("DELETE FROM transition_stats", ()).await?;
-    conn.execute("DELETE FROM transition_stats_v2", ()).await?;
     conn.execute("DELETE FROM repo_command_stats", ()).await?;
-    conn.execute("DELETE FROM repo_transition_stats_v2", ()).await?;
+    conn.execute("DELETE FROM repo_transition_stats", ()).await?;
     conn.execute("DELETE FROM context_stats", ()).await?;
     conn.execute("DELETE FROM arg_stats", ()).await?;
     conn.execute("DELETE FROM arg_stats_any", ()).await?;
@@ -303,29 +314,20 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
         .await?;
     }
 
-    for ((prev, next), stat) in &transition_stats {
+    for ((prev, status, next), stat) in &transition_stats {
       conn
         .execute(
-          "INSERT INTO transition_stats (prev_command, next_command, freq, last_seen) VALUES (?, ?, ?, ?)",
-          (prev.clone(), next.clone(), stat.freq, stat.last_seen),
-        )
-        .await?;
-    }
-
-    for ((prev, status, next), stat) in &transition_stats_v2 {
-      conn
-        .execute(
-          "INSERT INTO transition_stats_v2 (prev_command, prev_exit_status, next_command, freq, last_seen)
+          "INSERT INTO transition_stats (prev_command, prev_exit_status, next_command, freq, last_seen)
            VALUES (?, ?, ?, ?, ?)",
           (prev.clone(), *status, next.clone(), stat.freq, stat.last_seen),
         )
         .await?;
     }
 
-    for ((repo_root, prev, status, next), stat) in &repo_transition_stats_v2 {
+    for ((repo_root, prev, status, next), stat) in &repo_transition_stats {
       conn
         .execute(
-          "INSERT INTO repo_transition_stats_v2 (repo_root, prev_command, prev_exit_status, next_command, freq, last_seen)
+          "INSERT INTO repo_transition_stats (repo_root, prev_command, prev_exit_status, next_command, freq, last_seen)
            VALUES (?, ?, ?, ?, ?, ?)",
           (
             repo_root.clone(),

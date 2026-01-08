@@ -8,7 +8,7 @@ pub(crate) async fn query_prepared(
   sql: &str,
   params: impl IntoParams,
 ) -> Result<Rows> {
-  let mut stmt = conn.prepare(sql).await?;
+  let stmt = conn.prepare(sql).await?;
   let rows = stmt.query(params).await?;
   Ok(rows)
 }

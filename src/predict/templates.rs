@@ -70,7 +70,7 @@ pub(crate) async fn arg_template_candidates(
 
   let repo_positional = fetch_arg_candidates(conn, &repo_query, ctx.arg_index, &like).await?;
 
-  let mut repo_any = fetch_arg_candidates_any(conn, &repo_query, &like).await?;
+  let repo_any = fetch_arg_candidates_any(conn, &repo_query, &like).await?;
 
   let mut global_positional = Vec::new();
   let mut global_any = Vec::new();
@@ -88,25 +88,31 @@ pub(crate) async fn arg_template_candidates(
     global_any = fetch_arg_candidates_any(conn, &global_query, &like).await?;
   }
 
-  if repo_positional.is_empty()
-    && repo_any.is_empty()
-    && global_positional.is_empty()
-    && global_any.is_empty()
-  {
-    Ok(None)
-  } else {
+  let has_positional = !(repo_positional.is_empty() && global_positional.is_empty());
+  if has_positional {
     let mut merged: HashMap<String, Suggestion> = HashMap::new();
-    scale_suggestions(&mut repo_any, 0.6);
     scale_suggestions(&mut global_positional, 0.75);
-    scale_suggestions(&mut global_any, 0.45);
-
-    for list in [repo_positional, repo_any, global_positional, global_any] {
+    for list in [repo_positional, global_positional] {
       for suggestion in list {
         match merged.get(&suggestion.command) {
           Some(existing) if existing.score >= suggestion.score => {}
           _ => {
             merged.insert(suggestion.command.clone(), suggestion);
           }
+        }
+      }
+    }
+    Ok(Some(merged.into_values().collect()))
+  } else if repo_any.is_empty() && global_any.is_empty() {
+    Ok(None)
+  } else {
+    let mut merged: HashMap<String, Suggestion> = HashMap::new();
+    scale_suggestions(&mut global_any, 0.75);
+    for suggestion in repo_any.into_iter().chain(global_any.into_iter()) {
+      match merged.get(&suggestion.command) {
+        Some(existing) if existing.score >= suggestion.score => {}
+        _ => {
+          merged.insert(suggestion.command.clone(), suggestion);
         }
       }
     }
@@ -660,6 +666,9 @@ fn analyze_env_prefix(prefix: &str, repo_root: &str) -> Option<EnvPrefixContext>
   let last_idx = tokens.len().saturating_sub(1);
 
   let (partial, match_on_key) = if ends_with_space {
+    if env_count == 0 {
+      return None;
+    }
     (None, true)
   } else if env_count == tokens.len() {
     let last = tokens.last()?;
@@ -844,4 +853,69 @@ pub(crate) async fn token_sequence_predictions(
     }
   }
   Ok(scores)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::db::{init, open_db};
+
+  #[tokio::test]
+  async fn arg_templates_prefer_positional_matches() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db = open_db(tmp.path()).await.unwrap();
+    init(&db.conn).await.unwrap();
+
+    db.conn
+      .execute(
+        "INSERT INTO arg_stats (repo_root, command_head, flags_json, arg_index, arg_raw, arg_norm, freq, last_seen)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        ("", "git", "[]", 0i64, "status", "status", 5i64, 10i64),
+      )
+      .await
+      .unwrap();
+    db.conn
+      .execute(
+        "INSERT INTO arg_stats_any (repo_root, command_head, flags_json, arg_raw, arg_norm, freq, last_seen)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("", "git", "[]", "commit", "commit", 4i64, 9i64),
+      )
+      .await
+      .unwrap();
+
+    let token_priors = HashMap::new();
+    let suggestions = arg_template_candidates(&db.conn, "git ", "", &token_priors)
+      .await
+      .unwrap()
+      .unwrap();
+    let commands: Vec<String> = suggestions.into_iter().map(|s| s.command).collect();
+
+    assert!(commands.iter().any(|c| c == "git status"));
+    assert!(!commands.iter().any(|c| c == "git commit"));
+  }
+
+  #[tokio::test]
+  async fn arg_templates_fall_back_to_any_position() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db = open_db(tmp.path()).await.unwrap();
+    init(&db.conn).await.unwrap();
+
+    db.conn
+      .execute(
+        "INSERT INTO arg_stats_any (repo_root, command_head, flags_json, arg_raw, arg_norm, freq, last_seen)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+        ("", "git", "[]", "commit", "commit", 4i64, 9i64),
+      )
+      .await
+      .unwrap();
+
+    let token_priors = HashMap::new();
+    let suggestions = arg_template_candidates(&db.conn, "git ", "", &token_priors)
+      .await
+      .unwrap()
+      .unwrap();
+    let commands: Vec<String> = suggestions.into_iter().map(|s| s.command).collect();
+
+    assert!(commands.iter().any(|c| c == "git commit"));
+  }
 }

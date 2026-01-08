@@ -49,11 +49,12 @@ pub async fn insert_invocation(conn: &Connection, invocation: &Invocation) -> Re
   let id = uuid::Uuid::now_v7().to_string();
   let changed = conn
     .execute(
-      "INSERT OR IGNORE INTO shell_history (id, command, shellname, working_directory, hostname, username, exit_status, start_unix_timestamp, end_unix_timestamp, session_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO shell_history (id, command, expanded_command, shellname, working_directory, hostname, username, exit_status, start_unix_timestamp, end_unix_timestamp, session_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       (
         id,
         invocation.command.clone(),
+        invocation.expanded_command.clone(),
         invocation.shellname.clone(),
         invocation.working_directory.clone(),
         invocation.hostname.clone(),
@@ -78,7 +79,10 @@ where
 
   conn.execute("BEGIN", ()).await?;
 
-  for invocation in invocations {
+  for mut invocation in invocations {
+    if invocation.expanded_command.is_empty() {
+      invocation.expanded_command = invocation.command.clone();
+    }
     processed += 1;
     let did_insert = insert_invocation(conn, &invocation).await?;
     if !did_insert {
@@ -112,14 +116,15 @@ pub async fn get_recent_invocations(conn: &Connection, limit: usize) -> Result<V
   while let Some(row) = rows.next().await? {
     invs.push(Invocation {
       command: row.get::<String>(1)?,
-      shellname: row.get::<String>(2)?,
-      working_directory: row.get::<Option<String>>(3)?,
-      hostname: row.get::<Option<String>>(4)?,
-      username: row.get::<Option<String>>(5)?,
-      exit_status: row.get::<Option<i64>>(6)?,
-      start_unix_timestamp: row.get::<Option<i64>>(7)?,
-      end_unix_timestamp: row.get::<Option<i64>>(8)?,
-      session_id: row.get::<i64>(9)?,
+      expanded_command: row.get::<String>(2)?,
+      shellname: row.get::<String>(3)?,
+      working_directory: row.get::<Option<String>>(4)?,
+      hostname: row.get::<Option<String>>(5)?,
+      username: row.get::<Option<String>>(6)?,
+      exit_status: row.get::<Option<i64>>(7)?,
+      start_unix_timestamp: row.get::<Option<i64>>(8)?,
+      end_unix_timestamp: row.get::<Option<i64>>(9)?,
+      session_id: row.get::<i64>(10)?,
     });
   }
   invs.reverse();
@@ -142,7 +147,12 @@ pub async fn update_stats_for_invocation(conn: &Connection, invocation: &Invocat
     .as_deref()
     .and_then(find_repo_root)
     .unwrap_or_default();
-  let tokens = tokenize_index(&invocation.shellname, &invocation.command);
+  let stats_command = if invocation.expanded_command.is_empty() {
+    invocation.command.as_str()
+  } else {
+    invocation.expanded_command.as_str()
+  };
+  let tokens = tokenize_index(&invocation.shellname, stats_command);
   let raw_tokens: Vec<String> = tokens.iter().map(|t| t.raw.clone()).collect();
   let norm_tokens: Vec<String> = tokens.iter().map(|t| t.normalized.clone()).collect();
 
@@ -155,7 +165,7 @@ pub async fn update_stats_for_invocation(conn: &Connection, invocation: &Invocat
          ON CONFLICT(command) DO UPDATE SET
            freq = freq + 1,
            last_seen = MAX(last_seen, excluded.last_seen)",
-        (invocation.command.clone(), now),
+        (stats_command.to_string(), now),
       )
       .await?;
 
@@ -166,7 +176,7 @@ pub async fn update_stats_for_invocation(conn: &Connection, invocation: &Invocat
          ON CONFLICT(repo_root, command) DO UPDATE SET
            freq = freq + 1,
            last_seen = MAX(last_seen, excluded.last_seen)",
-        (repo_root.clone(), invocation.command.clone(), now),
+        (repo_root.clone(), stats_command.to_string(), now),
       )
       .await?;
 
@@ -178,7 +188,7 @@ pub async fn update_stats_for_invocation(conn: &Connection, invocation: &Invocat
            freq = freq + 1,
            last_seen = MAX(last_seen, excluded.last_seen)",
         (
-          invocation.command.clone(),
+          stats_command.to_string(),
           invocation.working_directory.clone(),
           invocation.hostname.clone(),
           invocation.username.clone(),
@@ -190,6 +200,11 @@ pub async fn update_stats_for_invocation(conn: &Connection, invocation: &Invocat
     if let Some(prev) =
       previous_invocation_for_session(conn, invocation.session_id, now).await?
     {
+      let prev_command = if prev.expanded_command.is_empty() {
+        prev.command.as_str()
+      } else {
+        prev.expanded_command.as_str()
+      };
       let prev_status = prev.exit_status;
       let prev_repo_root = prev
         .working_directory
@@ -199,38 +214,15 @@ pub async fn update_stats_for_invocation(conn: &Connection, invocation: &Invocat
 
       conn
         .execute(
-          "INSERT INTO transition_stats_v2 (prev_command, prev_exit_status, next_command, freq, last_seen)
+        "INSERT INTO transition_stats (prev_command, prev_exit_status, next_command, freq, last_seen)
            VALUES (?, ?, ?, 1, ?)
            ON CONFLICT(prev_command, prev_exit_status, next_command) DO UPDATE SET
              freq = freq + 1,
              last_seen = MAX(last_seen, excluded.last_seen)",
-          (prev.command.clone(), prev_status, invocation.command.clone(), now),
-        )
-        .await?;
-
-      conn
-        .execute(
-          "INSERT INTO transition_stats_v2 (prev_command, prev_exit_status, next_command, freq, last_seen)
-           VALUES (?, NULL, ?, 1, ?)
-           ON CONFLICT(prev_command, prev_exit_status, next_command) DO UPDATE SET
-             freq = freq + 1,
-             last_seen = MAX(last_seen, excluded.last_seen)",
-          (prev.command.clone(), invocation.command.clone(), now),
-        )
-        .await?;
-
-      conn
-        .execute(
-          "INSERT INTO repo_transition_stats_v2 (repo_root, prev_command, prev_exit_status, next_command, freq, last_seen)
-           VALUES (?, ?, ?, ?, 1, ?)
-           ON CONFLICT(repo_root, prev_command, prev_exit_status, next_command) DO UPDATE SET
-             freq = freq + 1,
-             last_seen = MAX(last_seen, excluded.last_seen)",
           (
-            prev_repo_root.clone(),
-            prev.command.clone(),
+            prev_command.to_string(),
             prev_status,
-            invocation.command.clone(),
+            stats_command.to_string(),
             now,
           ),
         )
@@ -238,15 +230,43 @@ pub async fn update_stats_for_invocation(conn: &Connection, invocation: &Invocat
 
       conn
         .execute(
-          "INSERT INTO repo_transition_stats_v2 (repo_root, prev_command, prev_exit_status, next_command, freq, last_seen)
+        "INSERT INTO transition_stats (prev_command, prev_exit_status, next_command, freq, last_seen)
+           VALUES (?, NULL, ?, 1, ?)
+           ON CONFLICT(prev_command, prev_exit_status, next_command) DO UPDATE SET
+             freq = freq + 1,
+             last_seen = MAX(last_seen, excluded.last_seen)",
+          (prev_command.to_string(), stats_command.to_string(), now),
+        )
+        .await?;
+
+      conn
+        .execute(
+        "INSERT INTO repo_transition_stats (repo_root, prev_command, prev_exit_status, next_command, freq, last_seen)
+           VALUES (?, ?, ?, ?, 1, ?)
+           ON CONFLICT(repo_root, prev_command, prev_exit_status, next_command) DO UPDATE SET
+             freq = freq + 1,
+             last_seen = MAX(last_seen, excluded.last_seen)",
+          (
+            prev_repo_root.clone(),
+            prev_command.to_string(),
+            prev_status,
+            stats_command.to_string(),
+            now,
+          ),
+        )
+        .await?;
+
+      conn
+        .execute(
+        "INSERT INTO repo_transition_stats (repo_root, prev_command, prev_exit_status, next_command, freq, last_seen)
            VALUES (?, ?, NULL, ?, 1, ?)
            ON CONFLICT(repo_root, prev_command, prev_exit_status, next_command) DO UPDATE SET
              freq = freq + 1,
              last_seen = MAX(last_seen, excluded.last_seen)",
           (
             prev_repo_root,
-            prev.command.clone(),
-            invocation.command.clone(),
+            prev_command.to_string(),
+            stats_command.to_string(),
             now,
           ),
         )
@@ -263,11 +283,11 @@ pub async fn update_stats_for_invocation(conn: &Connection, invocation: &Invocat
            tokens_json = excluded.tokens_json,
            normalized_json = excluded.normalized_json,
            updated_at = excluded.updated_at",
-        (invocation.command.clone(), raw_json, norm_json, now),
+        (stats_command.to_string(), raw_json, norm_json, now),
       )
       .await?;
 
-    if let Some(parts) = extract_command_parts(&invocation.command, &tokens) {
+    if let Some(parts) = extract_command_parts(stats_command, &tokens) {
       let mut flags = parts.flags;
       flags.sort();
       let flags_json = serde_json::to_string(&flags)?;
@@ -448,6 +468,7 @@ mod import_tests {
 
 struct PrevInvocation {
   command: String,
+  expanded_command: String,
   exit_status: Option<i64>,
   working_directory: Option<String>,
 }
@@ -459,7 +480,7 @@ async fn previous_invocation_for_session(
 ) -> Result<Option<PrevInvocation>> {
   let mut rows = conn
     .query(
-      "SELECT command, exit_status, working_directory FROM shell_history
+      "SELECT command, expanded_command, exit_status, working_directory FROM shell_history
        WHERE session_id = ? AND COALESCE(start_unix_timestamp, 0) < ?
        ORDER BY COALESCE(start_unix_timestamp, 0) DESC, id DESC
        LIMIT 1",
@@ -469,8 +490,9 @@ async fn previous_invocation_for_session(
   if let Some(row) = rows.next().await? {
     Ok(Some(PrevInvocation {
       command: row.get(0)?,
-      exit_status: row.get::<Option<i64>>(1)?,
-      working_directory: row.get::<Option<String>>(2)?,
+      expanded_command: row.get(1)?,
+      exit_status: row.get::<Option<i64>>(2)?,
+      working_directory: row.get::<Option<String>>(3)?,
     }))
   } else {
     Ok(None)
@@ -533,6 +555,7 @@ mod tests {
 
     let invocation = Invocation {
       command: "ls -la".to_string(),
+      expanded_command: "ls -la".to_string(),
       shellname: "zsh".to_string(),
       working_directory: Some("/tmp".to_string()),
       hostname: Some("host".to_string()),

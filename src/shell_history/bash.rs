@@ -47,6 +47,7 @@ pub fn parse_history_file(
     }
     let command = String::from_utf8_lossy(&line_bytes).into_owned();
     let invocation = Invocation {
+      expanded_command: String::new(),
       command,
       shellname: "bash".to_string(),
       hostname: Some(hostname.clone()),

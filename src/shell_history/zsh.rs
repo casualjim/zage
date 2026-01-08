@@ -97,6 +97,7 @@ pub fn parse_history_file(
     let end_unix_timestamp = Some(start_unix_timestamp_value + duration);
 
     let invocation = Invocation {
+      expanded_command: String::new(),
       command: command_s.clone(),
       shellname: "zsh".to_string(),
       hostname: Some(hostname_s.clone()),

@@ -326,9 +326,7 @@ If daemon is unavailable (not running, socket missing, timeout):
 ### CLI Integration
 ```bash
 # Daemon management
-zage server start    # Start daemon (usually handled by systemd/launchd)
-zage server stop     # Graceful shutdown
-zage server status   # Check daemon status
+zage server          # Start server (foreground)
 
 # These commands communicate with daemon if available, fallback otherwise
 zage suggest --current-line "git " --count 5

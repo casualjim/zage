@@ -1,0 +1,178 @@
+[[case]]
+name = "head_completion_long_history"
+mode = "completion"
+position = "head"
+prefix_kind = "partial"
+prefix = "g"
+k = 5
+history = [
+  { cmd = "git status", exit = 0 },
+  { cmd = "git diff", exit = 0 },
+  { cmd = "git log --oneline", exit = 0 },
+  { cmd = "cargo build", exit = 0 },
+  { cmd = "cargo test", exit = 0 },
+  { cmd = "rg foo bar", exit = 0 },
+  { cmd = "rg foo baz", exit = 0 },
+  { cmd = "rg bar baz", exit = 0 },
+  { cmd = "make test", exit = 0 },
+  { cmd = "make build", exit = 0 },
+  { cmd = "RUST_LOG=debug cargo test", exit = 0 },
+  { cmd = "RUST_LOG=info cargo build", exit = 0 },
+  { cmd = "git status", exit = 0 },
+  { cmd = "git status -sb", exit = 0 },
+  { cmd = "git diff --stat", exit = 0 },
+  { cmd = "rg foo bar", exit = 0 },
+  { cmd = "rg foo bar", exit = 0 },
+  { cmd = "rg bar baz", exit = 0 },
+  { cmd = "git status", exit = 0 },
+  { cmd = "git status", exit = 0 }
+]
+expected_top = ["git status"]
+expected_absent = ["RUST_LOG="]
+
+[[case]]
+name = "first_arg_position"
+mode = "completion"
+position = "arg1"
+prefix_kind = "trailing_space"
+prefix = "rg "
+k = 5
+history = [
+  { cmd = "rg foo bar", exit = 0 },
+  { cmd = "rg foo baz", exit = 0 },
+  { cmd = "rg foo qux", exit = 0 },
+  { cmd = "rg bar baz", exit = 0 },
+  { cmd = "rg bar qux", exit = 0 },
+  { cmd = "rg foo bar", exit = 0 },
+  { cmd = "rg bar baz", exit = 0 },
+  { cmd = "rg foo baz", exit = 0 },
+  { cmd = "rg foo bar", exit = 0 },
+  { cmd = "rg bar baz", exit = 0 }
+]
+expected_contains = ["rg foo", "rg bar"]
+expected_absent = ["rg baz"]
+
+[[case]]
+name = "second_arg_position"
+mode = "completion"
+position = "arg2"
+prefix_kind = "trailing_space"
+prefix = "rg foo "
+k = 5
+history = [
+  { cmd = "rg foo bar", exit = 0 },
+  { cmd = "rg foo baz", exit = 0 },
+  { cmd = "rg foo qux", exit = 0 },
+  { cmd = "rg bar baz", exit = 0 },
+  { cmd = "rg foo bar", exit = 0 },
+  { cmd = "rg foo baz", exit = 0 },
+  { cmd = "rg foo qux", exit = 0 },
+  { cmd = "rg foo bar", exit = 0 },
+  { cmd = "rg foo baz", exit = 0 },
+  { cmd = "rg bar qux", exit = 0 }
+]
+expected_contains = ["rg foo bar", "rg foo baz"]
+
+[[case]]
+name = "flag_position"
+mode = "completion"
+position = "flag"
+prefix_kind = "partial"
+prefix = "git commit -"
+k = 5
+history = [
+  { cmd = "git commit -m msg", exit = 0 },
+  { cmd = "git commit -s -m msg", exit = 0 },
+  { cmd = "git commit --amend", exit = 0 },
+  { cmd = "git commit -m \"fix\"", exit = 0 },
+  { cmd = "git commit -m msg", exit = 0 },
+  { cmd = "git commit -s -m msg", exit = 0 },
+  { cmd = "git commit --amend", exit = 0 },
+  { cmd = "git commit -m msg", exit = 0 }
+]
+expected_contains = ["git commit -m", "git commit -s"]
+
+[[case]]
+name = "env_key_partial"
+mode = "completion"
+position = "env_key"
+prefix_kind = "partial"
+prefix = "FOO"
+k = 5
+history = [
+  { cmd = "FOO=1 git status", exit = 0 },
+  { cmd = "BAR=2 git status", exit = 0 }
+]
+expected_contains = ["FOO="]
+expected_absent = ["BAR="]
+
+[[case]]
+name = "env_value_partial"
+mode = "completion"
+position = "env_value"
+prefix_kind = "partial"
+prefix = "FOO="
+k = 5
+history = [
+  { cmd = "FOO=1 git status", exit = 0 },
+  { cmd = "FOO=2 git diff", exit = 0 }
+]
+expected_contains = ["FOO=1", "FOO=2"]
+
+[[case]]
+name = "env_key_after_env_prefix"
+mode = "completion"
+position = "env_key"
+prefix_kind = "trailing_space"
+prefix = "FOO=1 "
+k = 5
+history = [
+  { cmd = "FOO=1 BAR=2 git status", exit = 0 },
+  { cmd = "FOO=1 BAZ=3 git diff", exit = 0 }
+]
+expected_contains = ["FOO=1 BAR="]
+
+[[case]]
+name = "flag_excludes_used"
+mode = "completion"
+position = "flag"
+prefix_kind = "partial"
+prefix = "git commit -m msg -"
+k = 5
+history = [
+  { cmd = "git commit -m msg", exit = 0 },
+  { cmd = "git commit -s -m msg", exit = 0 },
+  { cmd = "git commit --amend", exit = 0 },
+  { cmd = "git commit -m msg", exit = 0 }
+]
+expected_contains = ["git commit -m msg -s"]
+expected_absent = ["git commit -m msg -m"]
+
+[[case]]
+name = "arg_with_flag_filters"
+mode = "completion"
+position = "arg2"
+prefix_kind = "trailing_space"
+prefix = "git checkout -b "
+k = 5
+history = [
+  { cmd = "git checkout -b feature", exit = 0 },
+  { cmd = "git checkout -b bugfix", exit = 0 },
+  { cmd = "git checkout main", exit = 0 }
+]
+expected_contains = ["git checkout -b feature"]
+expected_absent = ["git checkout main"]
+
+[[case]]
+name = "context_prefers_cwd"
+mode = "completion"
+position = "head"
+prefix_kind = "partial"
+prefix = "rg"
+k = 3
+context = { cwd = "/tmp/project" }
+history = [
+  { cmd = "rg foo bar", exit = 0, ts = 10, cwd = "/tmp/project" },
+  { cmd = "rg foo baz", exit = 0, ts = 10, cwd = "/tmp/other" }
+]
+expected_top = ["rg foo bar"]

@@ -8,6 +8,14 @@
   - Intended use here: harden shell parsing/tokenization against real-world command constructs.
   - Non-goals: sequence modeling or personalized ranking (dataset has no temporal/session order).
 
+## Pretrain workflow
+
+- `mise pretrain` scans `data/pretrain/derived` for `.bash_history`, `.zsh_history`, or `.history` files.
+  Convert the datasets below into one of those formats to include them in global pretraining.
+  The built-in fetch pipeline writes to `data/pretrain/derived` and uses:
+  - Masaryk Hands-on Cybersecurity Training (Zenodo data.zip)
+  (History datasets with session/timestamp context only.)
+
 ## Shell history datasets (from "Public Shell Command History Datasets for Predictive Terminal Training")
 
 - **Masaryk University Hands-on Cybersecurity Training** — sanitized, structured JSON with rich context
@@ -25,7 +33,7 @@
   - Info: http://saul.cpsc.ucalgary.ca/pmwiki.php/HCIResources/HCIWWWUnixDataSets
 
 - **SEA Masquerade Dataset (Schonlau et al., 2001)** — 50 users, 15k commands each, command names only
-  (truncated). Useful for sequence-only modeling or anomaly detection.
+  (truncated). Useful for sequence-only modeling or anomaly detection. Not used for pretrain.
   - Report: https://www.niss.org/sites/default/files/technicalreports/tr95.pdf
 
 - **Purdue Unix Command Dataset (Lane & Brodley, late 1990s)** — small user set, sanitized streams.
@@ -64,6 +72,7 @@
 ## Context corpora and system signals (from the same report)
 
 - **UCI UNIX User Data** — anonymized multi‑user command streams; useful for user‑specific transition modeling.
+  Command‑only; not used for pretrain.
 
 - **Asciinema session recordings** — real command sequences with timing + output; enables state-aware suggestion
   when paired with terminal output parsing.

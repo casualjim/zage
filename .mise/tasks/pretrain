@@ -1,0 +1,58 @@
+#!/usr/bin/env bash
+
+#MISE description="Pretrain a global reranker model from public corpora"
+#MISE sources=["data/pretrain/**/*", "Cargo.toml", "src/**/*.rs"]
+
+set -euo pipefail
+
+proj_dir=$(git rev-parse --show-toplevel)
+cd "$proj_dir" || exit 1
+
+data_dir="$proj_dir/data/pretrain"
+raw_dir="$data_dir/raw"
+derived_dir="$data_dir/derived"
+db_path="$data_dir/pretrain.db"
+model_dir="$data_dir/model"
+
+mkdir -p "$data_dir" "$raw_dir" "$derived_dir" "$model_dir"
+
+if [ "${ZAGE_PRETRAIN_FETCH:-1}" != "0" ]; then
+  if [ -x "$proj_dir/scripts/corpora/fetch_all.sh" ]; then
+    "$proj_dir/scripts/corpora/fetch_all.sh"
+  fi
+fi
+
+mapfile -t history_files < <(
+  find "$derived_dir" -type f \( -name "*.zsh_history" -o -name "*.bash_history" -o -name "*.history" \)
+)
+
+if [ ${#history_files[@]} -eq 0 ]; then
+  cat <<'EOF'
+No corpora found in data/pretrain.
+
+Place public corpora converted to bash/zsh history files here, then rerun:
+  data/pretrain/derived/*.bash_history
+  data/pretrain/derived/*.zsh_history
+
+See docs/references.md for suggested datasets.
+EOF
+  exit 1
+fi
+
+rm -f "$db_path"
+
+export ZAGE_DB_PATH="$db_path"
+export ZAGE_MODEL_PATH="$model_dir"
+
+for file in "${history_files[@]}"; do
+  shell="bash"
+  if [[ "$file" == *.zsh_history* ]] || [[ "$file" == *zsh* ]]; then
+    shell="zsh"
+  fi
+  cargo run --quiet -- import "$file" --shell "$shell"
+done
+
+cargo run --quiet -- index --with-sequences
+cargo run --quiet -- train --min-history 1000 --max-samples 25000
+
+echo "Pretrain complete: $model_dir"

@@ -10,6 +10,7 @@ const DEFAULT_LOW_CONF_TOP: f64 = 0.15;
 const DEFAULT_LOW_CONF_MARGIN: f64 = 0.02;
 const DEFAULT_RERANK_MIN_PROB: f64 = 0.30;
 const DEFAULT_RERANK_MIN_MARGIN: f64 = 0.02;
+const DEFAULT_RERANK_TIMEOUT_MS: u64 = 50;
 
 #[derive(Debug, Clone, Deserialize, Default)]
 struct LowConfidenceConfig {
@@ -21,6 +22,7 @@ struct LowConfidenceConfig {
 struct RerankThresholdConfig {
   min_prob: Option<f64>,
   min_margin: Option<f64>,
+  timeout_ms: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize, Default)]
@@ -35,6 +37,7 @@ pub struct RerankConfig {
   pub low_confidence_margin: f64,
   pub rerank_min_prob: f64,
   pub rerank_min_margin: f64,
+  pub rerank_timeout_ms: u64,
 }
 
 impl Default for RerankConfig {
@@ -44,6 +47,7 @@ impl Default for RerankConfig {
       low_confidence_margin: DEFAULT_LOW_CONF_MARGIN,
       rerank_min_prob: DEFAULT_RERANK_MIN_PROB,
       rerank_min_margin: DEFAULT_RERANK_MIN_MARGIN,
+      rerank_timeout_ms: DEFAULT_RERANK_TIMEOUT_MS,
     }
   }
 }
@@ -87,6 +91,9 @@ impl RerankConfig {
       }
       if let Some(min_margin) = rerank.min_margin {
         config.rerank_min_margin = min_margin;
+      }
+      if let Some(timeout_ms) = rerank.timeout_ms {
+        config.rerank_timeout_ms = timeout_ms;
       }
     }
     Ok(config)

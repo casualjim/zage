@@ -30,6 +30,7 @@ impl std::str::FromStr for Shell {
 #[derive(Debug, Default, Serialize, Deserialize, Clone)]
 pub struct Invocation {
   pub command: String,
+  pub expanded_command: String,
   pub shellname: String,
   pub working_directory: Option<String>,
   pub hostname: Option<String>,
@@ -63,6 +64,21 @@ pub fn get_hostname() -> String {
       .into_string()
       .unwrap_or_default()
   })
+}
+
+pub fn detect_shellname() -> String {
+  let Some(shell) = std::env::var("SHELL").ok().and_then(|value| {
+    Path::new(&value)
+      .file_name()
+      .map(|name| name.to_string_lossy().to_string())
+  }) else {
+    return "sh".to_string();
+  };
+  let normalized = shell.to_lowercase();
+  match normalized.as_str() {
+    "zsh" | "bash" | "sh" | "fish" | "nushell" | "nu" => normalized,
+    _ => shell,
+  }
 }
 
 fn dedup_invocations(invocations: Vec<Invocation>) -> Vec<Invocation> {

@@ -1,6 +1,7 @@
 CREATE TABLE IF NOT EXISTS shell_history (
   id TEXT PRIMARY KEY,
   command TEXT NOT NULL,
+  expanded_command TEXT NOT NULL,
   shellname TEXT NOT NULL,
   working_directory TEXT,
   hostname TEXT,
@@ -13,6 +14,7 @@ CREATE TABLE IF NOT EXISTS shell_history (
 
 CREATE UNIQUE INDEX IF NOT EXISTS idx_shell_history_unique ON shell_history (
   command,
+  expanded_command,
   shellname,
   working_directory,
   hostname,
@@ -30,17 +32,6 @@ CREATE TABLE IF NOT EXISTS command_stats (
 );
 
 CREATE INDEX IF NOT EXISTS idx_command_stats_last_seen ON command_stats(last_seen);
-
-CREATE TABLE IF NOT EXISTS transition_stats (
-  prev_command TEXT NOT NULL,
-  next_command TEXT NOT NULL,
-  freq INTEGER NOT NULL,
-  last_seen INTEGER NOT NULL,
-  PRIMARY KEY (prev_command, next_command)
-);
-
-CREATE INDEX IF NOT EXISTS idx_transition_prev ON transition_stats(prev_command);
-CREATE INDEX IF NOT EXISTS idx_transition_next ON transition_stats(next_command);
 
 CREATE TABLE IF NOT EXISTS context_stats (
   command TEXT NOT NULL,
@@ -71,7 +62,7 @@ CREATE TABLE IF NOT EXISTS token_cache (
   updated_at INTEGER NOT NULL
 );
 
-CREATE TABLE IF NOT EXISTS transition_stats_v2 (
+CREATE TABLE IF NOT EXISTS transition_stats (
   prev_command TEXT NOT NULL,
   prev_exit_status INTEGER,
   next_command TEXT NOT NULL,
@@ -80,8 +71,8 @@ CREATE TABLE IF NOT EXISTS transition_stats_v2 (
   PRIMARY KEY (prev_command, prev_exit_status, next_command)
 );
 
-CREATE INDEX IF NOT EXISTS idx_transition_v2_prev ON transition_stats_v2(prev_command, prev_exit_status);
-CREATE INDEX IF NOT EXISTS idx_transition_v2_next ON transition_stats_v2(next_command);
+CREATE INDEX IF NOT EXISTS idx_transition_prev ON transition_stats(prev_command, prev_exit_status);
+CREATE INDEX IF NOT EXISTS idx_transition_next ON transition_stats(next_command);
 
 CREATE TABLE IF NOT EXISTS repo_command_stats (
   repo_root TEXT NOT NULL,
@@ -93,7 +84,7 @@ CREATE TABLE IF NOT EXISTS repo_command_stats (
 
 CREATE INDEX IF NOT EXISTS idx_repo_command_root ON repo_command_stats(repo_root);
 
-CREATE TABLE IF NOT EXISTS repo_transition_stats_v2 (
+CREATE TABLE IF NOT EXISTS repo_transition_stats (
   repo_root TEXT NOT NULL,
   prev_command TEXT NOT NULL,
   prev_exit_status INTEGER,
@@ -103,7 +94,7 @@ CREATE TABLE IF NOT EXISTS repo_transition_stats_v2 (
   PRIMARY KEY (repo_root, prev_command, prev_exit_status, next_command)
 );
 
-CREATE INDEX IF NOT EXISTS idx_repo_transition_root_prev ON repo_transition_stats_v2(repo_root, prev_command, prev_exit_status);
+CREATE INDEX IF NOT EXISTS idx_repo_transition_root_prev ON repo_transition_stats(repo_root, prev_command, prev_exit_status);
 
 CREATE TABLE IF NOT EXISTS arg_stats (
   repo_root TEXT NOT NULL,

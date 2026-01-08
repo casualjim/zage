@@ -60,7 +60,7 @@ pub async fn analyze_sequences(
 
   let mut rows = conn
     .query(
-      "SELECT command FROM shell_history ORDER BY COALESCE(start_unix_timestamp, 0) ASC, id ASC",
+      "SELECT expanded_command FROM shell_history ORDER BY COALESCE(start_unix_timestamp, 0) ASC, id ASC",
       (),
     )
     .await?;
@@ -208,7 +208,7 @@ pub async fn analyze_token_sequences(
 
   let mut rows = conn
     .query(
-      "SELECT command, shellname FROM shell_history ORDER BY COALESCE(start_unix_timestamp, 0) ASC, id ASC",
+      "SELECT expanded_command, shellname FROM shell_history ORDER BY COALESCE(start_unix_timestamp, 0) ASC, id ASC",
       (),
     )
     .await?;
@@ -399,6 +399,7 @@ mod tests {
   async fn insert_cmd(conn: &libsql::Connection, command: &str, ts: i64) {
     let inv = Invocation {
       command: command.to_string(),
+      expanded_command: command.to_string(),
       shellname: "zsh".to_string(),
       working_directory: Some("/tmp".to_string()),
       hostname: Some("host".to_string()),

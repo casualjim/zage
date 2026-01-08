@@ -1,7 +1,8 @@
-use std::path::{Path, PathBuf};
+use std::env;
+use std::path::PathBuf;
 
 use clap::{CommandFactory, Parser, Subcommand};
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, eyre};
 use dirs::home_dir;
 use human_panic::setup_panic;
 use tracing::debug;
@@ -10,11 +11,14 @@ use tracing_subscriber::EnvFilter;
 use tracing_subscriber::fmt;
 use zage::db::{import_history, init, insert_invocation, open_db, update_stats_for_invocation};
 use zage::indexer::rebuild_stats;
+use zage::predict::aliases::{expand_alias, load_aliases};
 use zage::predict::{ScoreBreakdown, SuggestConfig, Suggestion, suggest};
 use zage::rerank::{TrainConfig, model_status, reset_model, train_model};
 use zage::sequence::{SequenceConfig, analyze_sequences, analyze_token_sequences};
 use zage::server::{self, Request, Response};
-use zage::shell_history::{Invocation, Shell, get_hostname, parse_bash_history, parse_zsh_history};
+use zage::shell_history::{
+  Invocation, Shell, detect_shellname, get_hostname, parse_bash_history, parse_zsh_history,
+};
 use zage::tokenize::tokenize;
 
 /// CLI for Zage
@@ -120,11 +124,8 @@ enum Commands {
     max_len: usize,
   },
 
-  /// Run or manage the suggestion daemon
-  Server {
-    #[command(subcommand)]
-    command: Option<ServerCommand>,
-  },
+  /// Run the suggestion server (foreground)
+  Server {},
 
   /// Train the lightweight reranker model
   Train {
@@ -171,16 +172,6 @@ enum Commands {
   },
 }
 
-#[derive(Subcommand, Debug)]
-enum ServerCommand {
-  /// Start the daemon (foreground)
-  Start,
-  /// Stop a running daemon
-  Stop,
-  /// Query daemon status
-  Status,
-}
-
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
 enum CompletionFormat {
   Plain,
@@ -194,7 +185,9 @@ async fn main() -> Result<()> {
   color_eyre::install()?;
 
   // Initialize tracing
-  fmt().with_env_filter(EnvFilter::from_default_env()).init();
+  fmt()
+    .with_env_filter(EnvFilter::from_env("ZAGE_LOG"))
+    .init();
 
   // Debug environment variables
   let histfile = std::env::var("HISTFILE").unwrap_or_else(|_| "NOT SET".to_string());
@@ -213,7 +206,7 @@ async fn main() -> Result<()> {
   } else {
     dirs::data_dir()
       .map(|v| v.join("zage/zage.db"))
-      .expect("Could not determine data directory")
+      .ok_or_else(|| eyre!("Could not determine data directory"))?
   };
   debug!("Initializing db at {}", db_path.display());
   if let Some(parent) = db_path.parent() {
@@ -232,9 +225,11 @@ async fn main() -> Result<()> {
       // Import history and exit
       debug!("File argument value: {:?}", file);
 
-      let history_file = file.clone().unwrap_or_else(|| {
+      let history_file = if let Some(path) = file.clone() {
+        path
+      } else {
         debug!("No file specified, falling back to default path");
-        let mut path = home_dir().expect("Cannot find home directory");
+        let mut path = home_dir().ok_or_else(|| eyre!("Cannot find home directory"))?;
         let filename = match shell {
           Shell::Zsh => ".zsh_history",
           Shell::Bash => ".bash_history",
@@ -242,16 +237,42 @@ async fn main() -> Result<()> {
         path.push(filename);
         debug!("Using default history file path: {:?}", path);
         path
-      });
+      };
 
       let hostname_s = hostname.clone();
       let username_s = username.clone();
-      let invocations = match shell {
+      let aliases = load_aliases();
+      let mut invocations = match shell {
         Shell::Zsh => parse_zsh_history(&history_file, hostname_s.clone(), username_s.clone())?,
         Shell::Bash => parse_bash_history(&history_file, hostname_s, username_s)?,
       };
+      for invocation in invocations.iter_mut() {
+        if invocation.expanded_command.is_empty() {
+          invocation.expanded_command = expand_alias(&invocation.command, &aliases)
+            .unwrap_or_else(|| invocation.command.clone());
+        }
+      }
       import_history(&db.conn, invocations).await?;
+      let report = rebuild_stats(&db.conn, None).await?;
+      let seq_report = analyze_sequences(&db.conn, SequenceConfig::default()).await?;
+      let token_seq_report = analyze_token_sequences(&db.conn, SequenceConfig::default()).await?;
       println!("Imported history from {:?}", history_file);
+      println!(
+        "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}, phase_stats={}",
+        report.commands,
+        report.transitions,
+        report.contexts,
+        report.token_cache,
+        report.phase_stats
+      );
+      println!(
+        "Command sequence stats: sequences={}, bigrams={}, trigrams={}",
+        seq_report.sequences, seq_report.bigrams, seq_report.trigrams
+      );
+      println!(
+        "Token sequence stats: sequences={}, bigrams={}, trigrams={}",
+        token_seq_report.sequences, token_seq_report.bigrams, token_seq_report.trigrams
+      );
       info!("Imported history from {:?}", history_file);
     }
 
@@ -321,9 +342,10 @@ async fn main() -> Result<()> {
         limit: *count as u32,
       };
       if let Ok(Some(response)) = server::try_request(request).await
-        && let Response::Suggestions { items } = response {
-          server_suggestions = Some(map_server_suggestions(items));
-        }
+        && let Response::Suggestions { items } = response
+      {
+        server_suggestions = Some(map_server_suggestions(items));
+      }
 
       if has_prefix {
         let base_config = SuggestConfig {
@@ -504,40 +526,9 @@ async fn main() -> Result<()> {
       println!("Reranker model reset");
     }
 
-    Some(Commands::Server { command }) => match command {
-      Some(ServerCommand::Start) | None => {
-        server::run_server(db_path.as_path()).await?;
-      }
-      Some(ServerCommand::Status) => match server::try_request(Request::Status).await? {
-        Some(Response::Status {
-          model_loaded,
-          history_count,
-          last_train,
-        }) => {
-          println!(
-            "Daemon status: model_loaded={}, history_count={}, last_train={:?}",
-            model_loaded, history_count, last_train
-          );
-        }
-        Some(Response::Error { message }) => {
-          println!("Daemon error: {}", message);
-        }
-        _ => {
-          println!("Daemon not available");
-        }
-      },
-      Some(ServerCommand::Stop) => {
-        if let Some(response) = server::try_request(Request::Shutdown).await? {
-          match response {
-            Response::Ack => println!("Daemon shutdown requested"),
-            Response::Error { message } => println!("Daemon error: {}", message),
-            _ => println!("Daemon responded unexpectedly"),
-          }
-        } else {
-          println!("Daemon not available");
-        }
-      }
-    },
+    Some(Commands::Server { .. }) => {
+      server::run_server(db_path.as_path()).await?;
+    }
 
     Some(Commands::Record {
       command,
@@ -548,9 +539,12 @@ async fn main() -> Result<()> {
       session_id,
     }) => {
       info!("Recording command invocation");
+      let aliases = load_aliases();
+      let expanded_command = expand_alias(command, &aliases).unwrap_or_else(|| command.clone());
 
       let server_req = Request::Record {
         command: command.clone(),
+        expanded_command: expanded_command.clone(),
         working_directory: working_directory.clone(),
         exit_status: *exit_status as i32,
         start_timestamp: *start_timestamp,
@@ -575,6 +569,7 @@ async fn main() -> Result<()> {
       // Create Invocation struct
       let invocation = Invocation {
         command: command.clone(),
+        expanded_command: expanded_command.clone(),
         shellname: detect_shellname(),
         working_directory: Some(working_directory.clone()),
         hostname: Some(hostname.clone()),
@@ -604,21 +599,6 @@ async fn main() -> Result<()> {
   }
 
   Ok(())
-}
-
-fn detect_shellname() -> String {
-  let Some(shell) = std::env::var("SHELL").ok().and_then(|value| {
-    Path::new(&value)
-      .file_name()
-      .map(|name| name.to_string_lossy().to_string())
-  }) else {
-    return "sh".to_string();
-  };
-  let normalized = shell.to_lowercase();
-  match normalized.as_str() {
-    "zsh" | "bash" | "sh" | "fish" | "nushell" | "nu" => normalized,
-    _ => shell,
-  }
 }
 
 fn format_zsh_item(word: &str, desc: Option<&str>) -> String {

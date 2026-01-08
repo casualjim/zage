@@ -9,7 +9,7 @@ use crate::repo::find_repo_root;
 use crate::rerank;
 use crate::tokenize::normalized_tokens;
 
-mod aliases;
+pub mod aliases;
 mod candidates;
 mod phase_support;
 pub(crate) mod ranking;
@@ -144,6 +144,17 @@ pub(crate) fn candidate_for_test(command: &str) -> Candidate {
   new_candidate(command)
 }
 
+fn expanded_command_for(
+  invocation: &crate::shell_history::Invocation,
+  aliases: &HashMap<String, String>,
+) -> String {
+  if !invocation.expanded_command.is_empty() {
+    invocation.expanded_command.clone()
+  } else {
+    expand_alias(&invocation.command, aliases).unwrap_or_else(|| invocation.command.clone())
+  }
+}
+
 pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Suggestion>> {
   let prefix = config.prefix.clone().unwrap_or_default();
   let prefix_norm = normalized_tokens(&prefix);
@@ -159,10 +170,14 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
     return Ok(Vec::new());
   }
 
-  let recent_commands: Vec<String> = recent.iter().map(|inv| inv.command.clone()).collect();
+  let recent_commands: Vec<String> = recent
+    .iter()
+    .map(|inv| expanded_command_for(inv, &aliases))
+    .collect();
   let recent_heads: Vec<String> = recent
     .iter()
-    .filter_map(|inv| command_head_for_phase(&inv.shellname, &inv.command))
+    .map(|inv| (inv, expanded_command_for(inv, &aliases)))
+    .filter_map(|(inv, command)| command_head_for_phase(&inv.shellname, &command))
     .collect();
   let session_tokens = recent_commands
     .iter()
@@ -444,6 +459,37 @@ async fn completion_candidates(
     .map(|root| root.trim_end_matches('/').to_string());
   let project_like = project_root.as_ref().map(|root| format!("{}/%", root));
 
+  let repo_root = config
+    .cwd
+    .as_deref()
+    .and_then(find_repo_root)
+    .unwrap_or_default();
+  let token_priors = token_sequence_predictions(conn, prefix_norm).await?;
+
+  if let Some(mut env_suggestions) =
+    env_template_candidates(conn, prefix, &repo_root, &token_priors).await?
+  {
+    env_suggestions.sort_by(|a, b| {
+      b.score
+        .partial_cmp(&a.score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    env_suggestions.truncate(config.max_results);
+    return Ok(env_suggestions);
+  }
+
+  if let Some(mut arg_suggestions) =
+    arg_template_candidates(conn, prefix, &repo_root, &token_priors).await?
+  {
+    arg_suggestions.sort_by(|a, b| {
+      b.score
+        .partial_cmp(&a.score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    arg_suggestions.truncate(config.max_results);
+    return Ok(arg_suggestions);
+  }
+
   let (env_prefix, match_prefix) = split_env_prefix(prefix);
   let match_prefixes = build_prefix_variants(&match_prefix, aliases);
   if match_prefixes.is_empty() {
@@ -578,41 +624,6 @@ async fn completion_candidates(
     });
   }
 
-  let repo_root = config
-    .cwd
-    .as_deref()
-    .and_then(find_repo_root)
-    .unwrap_or_default();
-  let token_priors = token_sequence_predictions(conn, prefix_norm).await?;
-  if let Some(mut env_suggestions) =
-    env_template_candidates(conn, prefix, &repo_root, &token_priors).await?
-  {
-    let mut merged: HashMap<String, Suggestion> = HashMap::new();
-    for suggestion in scored.into_iter().chain(env_suggestions.drain(..)) {
-      match merged.get(&suggestion.command) {
-        Some(existing) if existing.score >= suggestion.score => {}
-        _ => {
-          merged.insert(suggestion.command.clone(), suggestion);
-        }
-      }
-    }
-    scored = merged.into_values().collect();
-  }
-  if let Some(mut arg_suggestions) =
-    arg_template_candidates(conn, prefix, &repo_root, &token_priors).await?
-  {
-    let mut merged: HashMap<String, Suggestion> = HashMap::new();
-    for suggestion in scored.into_iter().chain(arg_suggestions.drain(..)) {
-      match merged.get(&suggestion.command) {
-        Some(existing) if existing.score >= suggestion.score => {}
-        _ => {
-          merged.insert(suggestion.command.clone(), suggestion);
-        }
-      }
-    }
-    scored = merged.into_values().collect();
-  }
-
   scored.sort_by(|a, b| {
     b.score
       .partial_cmp(&a.score)
@@ -626,6 +637,10 @@ async fn completion_candidates(
 mod tests {
   use super::*;
   use crate::db::{init, open_db};
+  use crate::db::{insert_invocation, update_stats_for_invocation};
+  use crate::shell_history::Invocation;
+  use crate::tokenize::{Token, TokenKind, extract_command_parts, tokenize};
+  use serde::Deserialize;
 
   use super::aliases::{add_alias_candidates, alias_for_command};
   use super::candidates::{add_head_candidates, add_phase_candidates};
@@ -777,5 +792,329 @@ mod tests {
       .unwrap();
 
     assert!(candidates.contains_key("git status"));
+  }
+
+  #[derive(Debug, Deserialize)]
+  struct CaseContext {
+    cwd: Option<String>,
+    hostname: Option<String>,
+    username: Option<String>,
+    session_id: Option<i64>,
+  }
+
+  #[derive(Debug, Deserialize)]
+  struct HistoryEntry {
+    cmd: String,
+    exit: Option<i64>,
+    ts: Option<i64>,
+    cwd: Option<String>,
+    hostname: Option<String>,
+    username: Option<String>,
+    session_id: Option<i64>,
+  }
+
+  #[derive(Debug, Deserialize)]
+  struct PredictCase {
+    name: String,
+    mode: String,
+    #[allow(dead_code)]
+    position: Option<String>,
+    #[allow(dead_code)]
+    prefix_kind: Option<String>,
+    prefix: Option<String>,
+    k: Option<usize>,
+    context: Option<CaseContext>,
+    history: Vec<HistoryEntry>,
+    expected_top: Option<Vec<String>>,
+    expected_contains: Option<Vec<String>>,
+    expected_absent: Option<Vec<String>>,
+  }
+
+  #[derive(Debug, Deserialize)]
+  struct PredictCases {
+    case: Vec<PredictCase>,
+  }
+
+  fn load_predict_cases() -> PredictCases {
+    let raw = include_str!("testdata/completion_cases.toml");
+    toml::from_str(raw).expect("valid completion_cases.toml")
+  }
+
+  async fn seed_history_entries(conn: &libsql::Connection, entries: &[HistoryEntry]) {
+    for (idx, entry) in entries.iter().enumerate() {
+      let ts = entry.ts.unwrap_or(1 + idx as i64);
+      let invocation = Invocation {
+        command: entry.cmd.clone(),
+        expanded_command: entry.cmd.clone(),
+        shellname: "zsh".to_string(),
+        working_directory: entry.cwd.clone().or_else(|| Some("/tmp".to_string())),
+        hostname: entry.hostname.clone().or_else(|| Some("host".to_string())),
+        username: entry.username.clone().or_else(|| Some("user".to_string())),
+        exit_status: entry.exit,
+        start_unix_timestamp: Some(ts),
+        end_unix_timestamp: Some(ts + 1),
+        session_id: entry.session_id.unwrap_or(1),
+      };
+      let inserted = insert_invocation(conn, &invocation).await.unwrap();
+      assert!(inserted);
+      update_stats_for_invocation(conn, &invocation)
+        .await
+        .unwrap();
+    }
+  }
+
+  fn apply_context(config: &mut SuggestConfig, context: Option<&CaseContext>) {
+    if let Some(ctx) = context {
+      if let Some(ref cwd) = ctx.cwd {
+        config.cwd = Some(cwd.clone());
+      }
+      if let Some(ref hostname) = ctx.hostname {
+        config.hostname = Some(hostname.clone());
+      }
+      if let Some(ref username) = ctx.username {
+        config.username = Some(username.clone());
+      }
+      if let Some(session_id) = ctx.session_id {
+        config.session_id = Some(session_id);
+      }
+    }
+  }
+
+  fn ends_with_space(value: &str) -> bool {
+    value
+      .chars()
+      .last()
+      .map(|c| c.is_whitespace())
+      .unwrap_or(false)
+  }
+
+  fn classify_prefix_kind(prefix: &str) -> &'static str {
+    if ends_with_space(prefix) {
+      "trailing_space"
+    } else {
+      "partial"
+    }
+  }
+
+  fn classify_env_position(prefix: &str, tokens: &[Token]) -> Option<&'static str> {
+    if tokens.is_empty() {
+      return None;
+    }
+    let env_count = leading_env_count(tokens);
+    let ends_with_space = ends_with_space(prefix);
+    let last_idx = tokens.len().saturating_sub(1);
+
+    if ends_with_space {
+      if env_count == 0 {
+        return None;
+      }
+      return Some("env_key");
+    }
+    if env_count == tokens.len() {
+      let last = tokens.last()?;
+      if let Some(eq_idx) = last.raw.find('=') {
+        if looks_like_env_lhs(&last.raw[..eq_idx]) {
+          return Some("env_value");
+        }
+        return None;
+      }
+      if looks_like_env_lhs(&last.raw) {
+        return Some("env_key");
+      }
+      return None;
+    }
+    if env_count == last_idx {
+      let last = tokens.last()?;
+      if looks_like_env_lhs(&last.raw) {
+        return Some("env_key");
+      }
+    }
+    None
+  }
+
+  fn classify_position(prefix: &str) -> String {
+    let tokens = tokenize(prefix);
+    if tokens.is_empty() {
+      return "head".to_string();
+    }
+    if let Some(env_position) = classify_env_position(prefix, &tokens) {
+      return env_position.to_string();
+    }
+
+    let parts = match extract_command_parts(prefix, &tokens) {
+      Some(parts) => parts,
+      None => return "head".to_string(),
+    };
+    let ends_with_space = ends_with_space(prefix);
+    let partial = if !ends_with_space {
+      tokens.last().and_then(|last| {
+        if matches!(
+          last.kind,
+          TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment
+        ) {
+          Some(last.raw.clone())
+        } else {
+          None
+        }
+      })
+    } else {
+      None
+    };
+
+    if let Some(ref partial) = partial {
+      if partial.starts_with('-') {
+        return "flag".to_string();
+      }
+    }
+
+    if partial.as_deref() == Some(parts.head.as_str())
+      && parts.args.is_empty()
+      && parts.flags.is_empty()
+    {
+      return "head".to_string();
+    }
+
+    let mut arg_index = parts.args.len();
+    if let Some(ref partial) = partial {
+      if !partial.starts_with('-') && arg_index > 0 {
+        arg_index -= 1;
+      }
+    }
+    format!("arg{}", arg_index + 1)
+  }
+
+  fn leading_env_count(tokens: &[Token]) -> usize {
+    let mut idx = 0usize;
+    while idx < tokens.len() {
+      let token = &tokens[idx];
+      if matches!(token.kind, TokenKind::Assignment) {
+        idx += 1;
+        continue;
+      }
+      if looks_like_env_lhs(&token.raw)
+        && let Some(next) = tokens.get(idx + 1)
+      {
+        if next.raw == "=" {
+          idx += if tokens.get(idx + 2).is_some() { 3 } else { 2 };
+          continue;
+        }
+        if next.raw.starts_with('=') {
+          idx += 2;
+          continue;
+        }
+      }
+      break;
+    }
+    idx
+  }
+
+  fn looks_like_env_lhs(raw: &str) -> bool {
+    if raw.is_empty() || raw.starts_with('-') {
+      return false;
+    }
+    let mut chars = raw.chars();
+    let first = match chars.next() {
+      Some(c) => c,
+      None => return false,
+    };
+    if !(first.is_ascii_alphabetic() || first == '_') {
+      return false;
+    }
+    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
+  }
+
+  #[tokio::test]
+  async fn predict_cases_from_toml() {
+    let cases = load_predict_cases();
+    assert!(!cases.case.is_empty(), "no predict cases loaded");
+
+    for case in cases.case {
+      let tmp = tempfile::NamedTempFile::new().unwrap();
+      let db = open_db(tmp.path()).await.unwrap();
+      init(&db.conn).await.unwrap();
+      seed_history_entries(&db.conn, &case.history).await;
+
+      let mut config = SuggestConfig {
+        max_results: case.k.unwrap_or(10),
+        recent_limit: 50,
+        prefix: case.prefix.clone(),
+        cwd: Some("/tmp".to_string()),
+        hostname: Some("host".to_string()),
+        username: Some("user".to_string()),
+        session_id: Some(1),
+        use_sequences: false,
+      };
+      apply_context(&mut config, case.context.as_ref());
+
+      if let Some(prefix) = case.prefix.as_ref() {
+        if let Some(prefix_kind) = case.prefix_kind.as_deref() {
+          let actual = classify_prefix_kind(prefix);
+          assert_eq!(
+            actual, prefix_kind,
+            "case {}: expected prefix_kind {}, got {}",
+            case.name, prefix_kind, actual
+          );
+        }
+        if let Some(position) = case.position.as_deref() {
+          let actual = classify_position(prefix);
+          assert_eq!(
+            actual, position,
+            "case {}: expected position {}, got {}",
+            case.name, position, actual
+          );
+        }
+      }
+
+      let suggestions = if case.mode == "next_command" {
+        suggest(&db.conn, config).await.unwrap()
+      } else {
+        let prefix = case.prefix.clone().unwrap_or_default();
+        let prefix_norm = normalized_tokens(&prefix);
+        let aliases = load_aliases();
+        completion_candidates(&db.conn, &config, &prefix, &prefix_norm, &aliases, None)
+          .await
+          .unwrap()
+      };
+      let items = suggestions
+        .into_iter()
+        .map(|s| s.command)
+        .collect::<Vec<_>>();
+
+      if let Some(expected_top) = case.expected_top.as_ref() {
+        let expected_len = expected_top.len();
+        let got = items.iter().take(expected_len).cloned().collect::<Vec<_>>();
+        assert_eq!(
+          got, *expected_top,
+          "case {}: expected top {:?}, got {:?}",
+          case.name, expected_top, got
+        );
+      }
+
+      if let Some(expected_contains) = case.expected_contains.as_ref() {
+        for expected in expected_contains {
+          assert!(
+            items.iter().any(|s| s == expected),
+            "case {}: expected suggestion {:?} in top-k, got {:?}",
+            case.name,
+            expected,
+            items
+          );
+        }
+      }
+
+      if let Some(expected_absent) = case.expected_absent.as_ref() {
+        for expected in expected_absent {
+          assert!(
+            !items
+              .iter()
+              .any(|s| s == expected || s.starts_with(expected)),
+            "case {}: unexpected suggestion {:?} in top-k, got {:?}",
+            case.name,
+            expected,
+            items
+          );
+        }
+      }
+    }
   }
 }

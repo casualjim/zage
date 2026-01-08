@@ -1,5 +1,6 @@
 /target
 /.venv
+data/pretrain/
 # Added by goreleaser init:
 dist/
 .intentionally-empty-file.o

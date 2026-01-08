@@ -11,3 +11,5 @@ margin = 0.02
 min_prob = 0.30
 # Minimum margin between top-1 and top-2 for reranker to accept.
 min_margin = 0.02
+# Soft timeout for reranker inference; 0 disables the guard.
+timeout_ms = 50

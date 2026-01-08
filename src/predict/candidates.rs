@@ -19,7 +19,7 @@ pub(crate) async fn add_transition_candidates(
   if !repo_root.is_empty() {
     let found = fetch_transition_candidates(
       conn,
-      "repo_transition_stats_v2",
+      "repo_transition_stats",
       Some(repo_root),
       last_command,
       last_exit_status,
@@ -30,7 +30,7 @@ pub(crate) async fn add_transition_candidates(
     if !found {
       let _ = fetch_transition_candidates(
         conn,
-        "repo_transition_stats_v2",
+        "repo_transition_stats",
         Some(repo_root),
         last_command,
         None,
@@ -43,7 +43,7 @@ pub(crate) async fn add_transition_candidates(
 
   let found = fetch_transition_candidates(
     conn,
-    "transition_stats_v2",
+    "transition_stats",
     None,
     last_command,
     last_exit_status,
@@ -54,7 +54,7 @@ pub(crate) async fn add_transition_candidates(
   if !found {
     let _ = fetch_transition_candidates(
       conn,
-      "transition_stats_v2",
+      "transition_stats",
       None,
       last_command,
       None,
@@ -154,10 +154,10 @@ pub(crate) async fn add_session_candidates(
 ) -> Result<()> {
   let mut rows = query_prepared(
     conn,
-    "SELECT command, COUNT(*) as freq, MAX(COALESCE(start_unix_timestamp, 0)) as last_seen
+    "SELECT expanded_command, COUNT(*) as freq, MAX(COALESCE(start_unix_timestamp, 0)) as last_seen
      FROM shell_history
      WHERE session_id = ?
-     GROUP BY command
+     GROUP BY expanded_command
      ORDER BY last_seen DESC
      LIMIT 200",
     libsql::params![session_id],
@@ -325,9 +325,9 @@ pub(crate) async fn add_recent_candidates(
 ) -> Result<()> {
   let mut rows = query_prepared(
     conn,
-    "SELECT command, COUNT(*) as freq, MAX(COALESCE(start_unix_timestamp, 0)) as last_seen
+    "SELECT expanded_command, COUNT(*) as freq, MAX(COALESCE(start_unix_timestamp, 0)) as last_seen
      FROM shell_history
-     GROUP BY command
+     GROUP BY expanded_command
      ORDER BY last_seen DESC
      LIMIT ?",
     libsql::params![limit as i64],

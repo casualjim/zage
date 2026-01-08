@@ -1,5 +1,6 @@
 use serde::{Deserialize, Serialize};
 use std::cell::RefCell;
+use tracing::warn;
 use tree_sitter::{Node, Parser};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -552,25 +553,32 @@ fn is_ip(raw: &str) -> bool {
 }
 
 thread_local! {
-  static ZSH_PARSER: RefCell<Parser> = {
+  static ZSH_PARSER: RefCell<Option<Parser>> = {
     let mut parser = Parser::new();
-    parser
-      .set_language(&tree_sitter_zsh::LANGUAGE.into())
-      .expect("zsh grammar");
-    RefCell::new(parser)
+    match parser.set_language(&tree_sitter_zsh::LANGUAGE.into()) {
+      Ok(()) => RefCell::new(Some(parser)),
+      Err(err) => {
+        warn!("failed to load zsh grammar: {}", err);
+        RefCell::new(None)
+      }
+    }
   };
-  static BASH_PARSER: RefCell<Parser> = {
+  static BASH_PARSER: RefCell<Option<Parser>> = {
     let mut parser = Parser::new();
-    parser
-      .set_language(&tree_sitter_bash::LANGUAGE.into())
-      .expect("bash grammar");
-    RefCell::new(parser)
+    match parser.set_language(&tree_sitter_bash::LANGUAGE.into()) {
+      Ok(()) => RefCell::new(Some(parser)),
+      Err(err) => {
+        warn!("failed to load bash grammar: {}", err);
+        RefCell::new(None)
+      }
+    }
   };
 }
 
 fn tokenize_tree_zsh(input: &str) -> Option<Vec<Token>> {
   ZSH_PARSER.with(|parser| {
     let mut parser = parser.borrow_mut();
+    let parser = parser.as_mut()?;
     let tree = parser.parse(input, None)?;
     if tree.root_node().has_error() {
       return None;
@@ -583,6 +591,7 @@ fn tokenize_tree_zsh(input: &str) -> Option<Vec<Token>> {
 fn tokenize_tree_bash(input: &str) -> Option<Vec<Token>> {
   BASH_PARSER.with(|parser| {
     let mut parser = parser.borrow_mut();
+    let parser = parser.as_mut()?;
     let tree = parser.parse(input, None)?;
     if tree.root_node().has_error() {
       return None;

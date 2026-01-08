@@ -8,6 +8,7 @@ bstr = { version = "1.9.0", features = ["serde"] }
 clap = { version = "4.5.37", features = ["derive", "env", "string", "unicode"] }
 clap-config-file = "0.5.0"
 color-eyre = "0.6"
+deadpool-libsql = "0.1.0"
 dirs = "6.0.0"
 foldhash = "0.2.0"
 gbrt-rs = "0.2.0"
@@ -15,7 +16,7 @@ hostname = "0.4.1"
 human-panic = "2.0"
 itertools = "0.14.0"
 jiff = "0.2.13"
-libsql = { version = "0.6.0", features = ["remote", "core", "replication"] }
+libsql = { version = "0.9.29", features = ["remote", "core", "replication"] }
 miette = { version = "7", features = ["fancy"] }
 ndarray = "0.17.0"
 rand = "0.9.1"

@@ -2,10 +2,7 @@ use std::collections::HashMap;
 
 use super::Candidate;
 
-pub(crate) fn build_prefix_variants(
-  prefix: &str,
-  aliases: &HashMap<String, String>,
-) -> Vec<String> {
+pub fn build_prefix_variants(prefix: &str, aliases: &HashMap<String, String>) -> Vec<String> {
   let mut variants = Vec::new();
   let trimmed = prefix.trim_start();
   if !trimmed.is_empty() {
@@ -21,7 +18,7 @@ pub(crate) fn build_prefix_variants(
   variants
 }
 
-pub(crate) fn load_aliases() -> HashMap<String, String> {
+pub fn load_aliases() -> HashMap<String, String> {
   let mut map = HashMap::new();
   if let Ok(value) = std::env::var("ZAGE_ALIASES") {
     parse_aliases_into(&value, &mut map);
@@ -35,7 +32,7 @@ pub(crate) fn load_aliases() -> HashMap<String, String> {
 }
 
 fn parse_aliases_into(input: &str, map: &mut HashMap<String, String>) {
-  for raw in input.split(['\n', ';']) {
+  for raw in input.lines() {
     if let Some((name, value)) = parse_alias_line(raw) {
       map.insert(name, value);
     }
@@ -50,11 +47,8 @@ fn parse_alias_line(raw: &str) -> Option<(String, String)> {
   if let Some(rest) = line.strip_prefix("alias ") {
     line = rest.trim();
   }
-  if line.starts_with('-') {
-    return None;
-  }
   let (name, value) = line.split_once('=')?;
-  let name = name.trim();
+  let name = name.split_whitespace().last().unwrap_or("").trim();
   if name.is_empty() {
     return None;
   }
@@ -117,7 +111,7 @@ pub(crate) fn alias_for_command(alias: &str, expansion: &str, command: &str) -> 
   None
 }
 
-pub(crate) fn expand_alias(command: &str, aliases: &HashMap<String, String>) -> Option<String> {
+pub fn expand_alias(command: &str, aliases: &HashMap<String, String>) -> Option<String> {
   let mut parts = command.splitn(2, ' ');
   let head = parts.next()?.trim();
   let rest = parts.next().unwrap_or("");
@@ -126,4 +120,27 @@ pub(crate) fn expand_alias(command: &str, aliases: &HashMap<String, String>) -> 
     return Some(expansion.to_string());
   }
   Some(format!("{expansion} {rest}"))
+}
+
+#[cfg(test)]
+mod tests {
+  use super::parse_alias_line;
+
+  #[test]
+  fn parse_alias_line_simple() {
+    let parsed = parse_alias_line("alias ll='ls -l'");
+    assert_eq!(parsed, Some(("ll".to_string(), "ls -l".to_string())));
+  }
+
+  #[test]
+  fn parse_alias_line_global() {
+    let parsed = parse_alias_line("alias -g G='| grep'");
+    assert_eq!(parsed, Some(("G".to_string(), "| grep".to_string())));
+  }
+
+  #[test]
+  fn parse_alias_line_suffix() {
+    let parsed = parse_alias_line("alias -s txt='vim'");
+    assert_eq!(parsed, Some(("txt".to_string(), "vim".to_string())));
+  }
 }
