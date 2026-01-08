@@ -19,8 +19,9 @@ The goal is a fast, on-device predictor that is accurate for personal histories 
 - Keep the system fully local, fast, and deterministic.
 
 ### Non-Goals
-- No GPU dependency.
+- No embedding-first retrieval or vector search.
 - No external inference services.
+- No requirement for GPU (optional only).
 
 ---
 
@@ -84,6 +85,14 @@ The goal is a fast, on-device predictor that is accurate for personal histories 
   - `tokens_json TEXT NOT NULL`        -- raw tokens
   - `normalized_json TEXT NOT NULL`    -- normalized tokens
 
+- `phase_stats`:
+  - `command_head TEXT`
+  - `phase TEXT`
+  - `confidence REAL NOT NULL`
+  - `freq INTEGER NOT NULL`
+  - `last_seen INTEGER NOT NULL`
+  - PRIMARY KEY (`command_head`, `phase`)
+
 ---
 
 ## 4. Core Modules (New / Updated)
@@ -94,6 +103,12 @@ The goal is a fast, on-device predictor that is accurate for personal histories 
   - Preserves `|`, `&&`, `||`, `>`, `<`, `2>`, `;`, `()`
   - Recognizes quoted strings and env vars
   - Normalization rules: PATH, NUM, IP, HASH, USER, HOST
+
+- `src/phase.rs`
+  - Phase config loader (TOML)
+  - Term-limited glob pattern matching (tokenized)
+  - Local lightweight classifier to generalize phase labels
+  - Writes `phase_stats` during indexing
 
 - `src/indexer/mod.rs`
   - Builds stats tables from `shell_history`
@@ -116,6 +131,7 @@ The goal is a fast, on-device predictor that is accurate for personal histories 
 
 - `src/ranking/mod.rs`
   - Weighted scoring and final top-K selection
+  - Optional Tier-2 reranking (GBDT/linear) once candidates are generated
 
 - `src/predict/mod.rs`
   - Orchestrates tokenize -> candidate -> rank
@@ -166,6 +182,10 @@ For a given recent history window, build candidate set by:
 4. **History prefix candidates**
    - Commands starting with the current input prefix.
 
+5. **Phase-aware candidates**
+   - Boost candidates whose command heads match the current session phase.
+   - Phase is learned from user history and seeded by config patterns.
+
 Candidates are deduped and tagged with their source.
 
 ---
@@ -189,8 +209,14 @@ score =
 - **Context match**: exact match on cwd/host/user or partial match.
 - **Token similarity**: Dice/Jaccard on normalized tokens.
 - **Sequence strength**: combination of confidence + lift.
+- **Phase boost**: categorical match for session phase derived from `phase_stats`.
 
 Weights will be configurable via config file and tuned with offline replay.
+
+### Phase Configuration (TOML)
+Phase patterns are tokenized (term-limited) and support glob terms (`*`, `?`).
+Flags are matched order-independently; args are matched as a prefix in order.
+Patterns live in `config/phases.toml` or `~/.config/zage/phases.toml`.
 
 ---
 

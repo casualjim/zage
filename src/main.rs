@@ -223,8 +223,12 @@ async fn main() -> Result<()> {
     }) => {
       let report = rebuild_stats(&db.conn, *max_commands).await?;
       println!(
-        "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}",
-        report.commands, report.transitions, report.contexts, report.token_cache
+        "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}, phase_stats={}",
+        report.commands,
+        report.transitions,
+        report.contexts,
+        report.token_cache,
+        report.phase_stats
       );
 
       if *with_sequences {

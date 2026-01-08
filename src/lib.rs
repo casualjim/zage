@@ -9,6 +9,10 @@ pub mod sequence;
 pub mod tokenize;
 pub mod shell_history;
 pub mod repo;
+pub mod phase;
+
+#[cfg(test)]
+mod corpus_tests;
 
 #[cfg(test)]
 mod tests {

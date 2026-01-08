@@ -20,6 +20,34 @@ lightweight reranker** (GBDT/linear). No embedding-first retrieval. The statisti
 
 ## Architecture Overview
 ```
+┌─────────────────┐         UDS          ┌──────────────────────────────────┐
+│  Shell hooks    │─────────────────────▶│         zage server              │
+│  (record cmd)   │    (fire & forget)   │                                  │
+└─────────────────┘                      │  ┌─────────────────────────────┐ │
+                                         │  │ Ingestion Queue             │ │
+┌─────────────────┐         UDS          │  │ (batch writes to SQLite)    │ │
+│  zage suggest   │◀────────────────────▶│  └─────────────────────────────┘ │
+│  (sync request) │                      │                                  │
+└─────────────────┘                      │  ┌─────────────────────────────┐ │
+                                         │  │ Session State               │ │
+                                         │  │ (last K cmds per session)   │ │
+                                         │  └─────────────────────────────┘ │
+                                         │                                  │
+                                         │  ┌─────────────────────────────┐ │
+                                         │  │ Reranker (model loaded)     │ │
+                                         │  └─────────────────────────────┘ │
+                                         │                                  │
+                                         │  ┌─────────────────────────────┐ │
+                                         │  │ Background Trainer          │ │
+                                         │  └─────────────────────────────┘ │
+                                         └──────────────────────────────────┘
+                                                        │
+                                                        ▼
+                                                    SQLite DB
+```
+
+### Inference Pipeline (within zage server)
+```
 shell_history -> indexer.rs -> SQLite stats (Tier 1 retrieval)
                                    |
                                    v
@@ -72,13 +100,18 @@ Similarity features:
 - Token overlap or normalized token similarity between **session window** and candidate.
 
 ## Session Phase Detection
-Detect workflow phase from recent command patterns (last 3–5 commands):
-- **build**: `cargo build`, `make`, `npm run build`, `go build`
-- **test**: `cargo test`, `pytest`, `npm test`, `go test`
-- **deploy**: `git push`, `kubectl apply`, `docker push`
-- **edit**: editor commands like `vim`, `code`, `nano`
-- **default**: no clear pattern\n
-Phase is inferred from simple keyword rules and used as a categorical feature.
+Phases are seeded from a human-friendly TOML file (`config/phases.toml`) and learned from local
+history at ingestion time.
+
+Patterns are parsed with the **existing shell tokenizer** so they are **term-limited** and support:
+- **Glob terms**: `*` and `?` allowed inside terms (e.g., `git *`, `kubectl ?pply`).
+- **Multiple terms**: patterns can contain multiple terms; quoted terms remain a single unit.
+- **Order-independent flags**: `git commit -m -S` matches `git commit -S -m "msg"`.
+- **Order-dependent args**: args are matched in order (prefix of argument list).
+
+At ingestion, config patterns provide weak labels; a small local model learns additional phase
+associations and writes `phase_stats` into the DB. At inference, phase is derived from recent heads
+plus `phase_stats`, and used as a categorical boost.
 
 ## Model Options
 ### Option A: GBDT / Linear Reranker (preferred)
@@ -189,6 +222,182 @@ Config/env:
 ### Context Feature Latency
 - Git branch/name should be **cached** (e.g., collected in shell hooks or repo watcher), not computed synchronously.
 - Feature collection must not add latency to prompt rendering.
+
+## Daemon Architecture (zage server)
+
+### Overview
+A persistent daemon (`zage server`) handles ingestion, inference, and background training. Shell hooks
+and CLI communicate via Unix domain socket using rkyv-serialized messages. The daemon keeps the
+reranker model loaded and maintains session state in memory.
+
+### Socket Activation
+- **Linux**: systemd socket activation (`zage.socket` + `zage.service` user units)
+- **macOS**: launchd socket activation (`Sockets` key in LaunchAgent plist)
+
+Socket path:
+- Linux: `$XDG_RUNTIME_DIR/zage.sock` (e.g., `/run/user/1000/zage.sock`)
+- macOS: `$TMPDIR/zage.sock` or `/tmp/zage-$UID.sock`
+
+### Protocol
+- **Transport**: Unix domain socket (stream)
+- **Serialization**: rkyv (zero-copy deserialization)
+- **Framing**: 4-byte little-endian length prefix + rkyv payload
+
+### Message Types
+```rust
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+enum Request {
+    /// Record a command execution (fire-and-forget from shell hook)
+    Record {
+        command: String,
+        working_directory: String,
+        exit_status: i32,
+        start_timestamp: i64,
+        end_timestamp: i64,
+        session_id: u64,
+    },
+    /// Request suggestions for current input
+    Suggest {
+        current_line: String,
+        working_directory: String,
+        session_id: u64,
+        limit: u32,
+    },
+    /// Health check
+    Ping,
+    /// Trigger background training
+    Train,
+    /// Request model/daemon status
+    Status,
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+enum Response {
+    /// Acknowledgment for Record
+    Ack,
+    /// Suggestion results
+    Suggestions { items: Vec<Suggestion> },
+    /// Health check response
+    Pong,
+    /// Status information
+    Status { model_loaded: bool, history_count: u64, last_train: Option<i64> },
+    /// Error
+    Error { message: String },
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+struct Suggestion {
+    command: String,
+    score: f32,
+    source: SuggestionSource,
+}
+
+#[derive(rkyv::Archive, rkyv::Serialize, rkyv::Deserialize)]
+enum SuggestionSource {
+    Recency,
+    Frequency,
+    Transition,
+    Sequence,
+    Template,
+    Reranker,
+}
+```
+
+### Daemon Responsibilities
+1. **Ingestion queue**: Accept `Record` messages, buffer in memory, batch-write to SQLite
+2. **Session state**: Track last K commands per session in memory for fast context lookup
+3. **Model hosting**: Keep reranker model loaded, warm inference path
+4. **Background training**: Retrain on idle (triggered by timer or explicit `Train` request)
+5. **Context caching**: Git branch, repo root cached per working directory
+
+### Lifecycle
+- Started by systemd/launchd on first socket connection (socket activation)
+- Stays alive while active; optional idle timeout for resource savings
+- Graceful shutdown on SIGTERM: flush pending writes, save state
+- Crash recovery: pending ingestion lost (acceptable—shell hook will re-record on next command)
+
+### Fallback Mode
+If daemon is unavailable (not running, socket missing, timeout):
+- CLI falls back to **direct SQLite access** (read-only)
+- No reranking (Tier 1 only)
+- No recording (deferred until daemon available, or dropped)
+- User sees degraded but functional suggestions
+
+### CLI Integration
+```bash
+# Daemon management
+zage server start    # Start daemon (usually handled by systemd/launchd)
+zage server stop     # Graceful shutdown
+zage server status   # Check daemon status
+
+# These commands communicate with daemon if available, fallback otherwise
+zage suggest --current-line "git " --count 5
+zage record --command "git status" --exit-status 0
+```
+
+### systemd Unit Files (Linux)
+
+**~/.config/systemd/user/zage.socket**
+```ini
+[Unit]
+Description=Zage suggestion daemon socket
+
+[Socket]
+ListenStream=%t/zage.sock
+SocketMode=0600
+
+[Install]
+WantedBy=sockets.target
+```
+
+**~/.config/systemd/user/zage.service**
+```ini
+[Unit]
+Description=Zage suggestion daemon
+Requires=zage.socket
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/zage server
+Environment=ZAGE_LOG=info
+Restart=on-failure
+RestartSec=5
+
+[Install]
+WantedBy=default.target
+```
+
+### launchd Plist (macOS)
+
+**~/Library/LaunchAgents/com.zage.daemon.plist**
+```xml
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN"
+  "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.zage.daemon</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>/usr/local/bin/zage</string>
+        <string>server</string>
+    </array>
+    <key>Sockets</key>
+    <dict>
+        <key>Listeners</key>
+        <dict>
+            <key>SockPathName</key>
+            <string>/tmp/zage.sock</string>
+            <key>SockPathMode</key>
+            <integer>384</integer>
+        </dict>
+    </dict>
+    <key>RunAtLoad</key>
+    <false/>
+</dict>
+</plist>
+```
 
 ## Privacy
 - Training uses only local shell history.

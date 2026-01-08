@@ -8,7 +8,13 @@ use crate::Result;
 use crate::db::get_recent_invocations;
 use crate::repo::find_repo_root;
 use crate::sequence::candidates_from_sequences;
-use crate::tokenize::{extract_command_parts, normalized_tokens, token_strings, tokenize, Token, TokenKind};
+use crate::tokenize::{extract_command_parts, normalized_tokens, token_strings, tokenize, tokenize_index, Token, TokenKind};
+
+#[derive(Clone, Debug)]
+struct PhaseSignal {
+  phase: String,
+  confidence: f64,
+}
 
 #[derive(Debug, Clone)]
 pub struct SuggestConfig {
@@ -125,6 +131,10 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
   }
 
   let recent_commands: Vec<String> = recent.iter().map(|inv| inv.command.clone()).collect();
+  let recent_heads: Vec<String> = recent
+    .iter()
+    .filter_map(|inv| command_head_for_phase(&inv.shellname, &inv.command))
+    .collect();
   let last_command = recent_commands.last().cloned();
   let last_exit_status = recent.last().and_then(|inv| inv.exit_status);
   let repo_root = config
@@ -149,8 +159,13 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
     add_sequence_candidates(conn, &recent_commands, &mut candidates).await?;
   }
 
+  if !candidates.is_empty() {
+    add_template_candidates(conn, &repo_root, &mut candidates).await?;
+  }
+
   if candidates.is_empty() {
     add_global_candidates(conn, &mut candidates).await?;
+    add_template_candidates(conn, &repo_root, &mut candidates).await?;
   }
 
   let now = SystemTime::now()
@@ -175,6 +190,17 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
       entry.last_seen = entry.last_seen.max(last_seen);
     }
   }
+
+  let mut candidate_heads: HashMap<String, String> = HashMap::new();
+  let mut phase_heads: HashSet<String> = recent_heads.iter().cloned().collect();
+  for candidate in candidates.values() {
+    if let Some(head) = command_head_for_phase("sh", &candidate.command) {
+      phase_heads.insert(head.clone());
+      candidate_heads.insert(candidate.command.clone(), head);
+    }
+  }
+  let phase_for_head = load_phase_for_heads(conn, &phase_heads).await?;
+  let session_phase = detect_session_phase(&recent_heads, &phase_for_head);
   let mut scored: Vec<Suggestion> = Vec::new();
 
   for candidate in candidates.values() {
@@ -183,8 +209,12 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
       + 0.5 * (candidate.repo_freq as f64).ln_1p();
     let transition = (candidate.transition_freq as f64).ln_1p()
       + 0.7 * (candidate.repo_transition_freq as f64).ln_1p();
-    let context = (candidate.context_freq as f64).ln_1p()
+    let mut context = (candidate.context_freq as f64).ln_1p()
       + 0.8 * (candidate.session_freq as f64).ln_1p();
+    let candidate_phase = candidate_heads
+      .get(&candidate.command)
+      .and_then(|head| phase_for_head.get(head));
+    context += phase_match_boost(session_phase.as_ref(), candidate_phase);
     let sequence = if candidate.sequence_confidence > 0.0 {
       let order_weight = if candidate.sequence_prefix_len >= 2 { 1.0 } else { 0.7 };
       candidate.sequence_confidence * candidate.sequence_lift.max(1.0) * order_weight
@@ -665,6 +695,232 @@ async fn add_sequence_candidates(
   Ok(())
 }
 
+#[derive(Debug)]
+struct TemplateStat {
+  value: String,
+  freq: i64,
+  last_seen: i64,
+}
+
+async fn add_template_candidates(
+  conn: &Connection,
+  repo_root: &str,
+  candidates: &mut HashMap<String, Candidate>,
+) -> Result<()> {
+  let mut heads: HashSet<String> = HashSet::new();
+  for cmd in candidates.keys() {
+    if let Some(head) = command_head_for_phase("sh", cmd) {
+      heads.insert(head);
+    }
+  }
+  if heads.is_empty() {
+    return Ok(());
+  }
+
+  let mut added = 0usize;
+  for head in heads {
+    let (flags, flags_repo) = fetch_template_flags(conn, repo_root, &head, 3).await?;
+    let (args0, args0_repo) = fetch_template_args(conn, repo_root, &head, 0, 3).await?;
+    let (args1, args1_repo) = fetch_template_args(conn, repo_root, &head, 1, 2).await?;
+
+    let mut base = head.clone();
+    let mut flags_freq = 0i64;
+    let mut flags_last_seen = 0i64;
+    if !flags.is_empty() {
+      base.push(' ');
+      base.push_str(
+        &flags
+          .iter()
+          .map(|stat| stat.value.clone())
+          .collect::<Vec<_>>()
+          .join(" "),
+      );
+      for stat in &flags {
+        flags_freq += stat.freq;
+        flags_last_seen = flags_last_seen.max(stat.last_seen);
+      }
+      add_template_candidate(
+        candidates,
+        &base,
+        flags_freq,
+        flags_last_seen,
+        flags_repo,
+      );
+    }
+
+    for arg0 in &args0 {
+      let mut cmd = base.clone();
+      if !cmd.is_empty() {
+        cmd.push(' ');
+      }
+      cmd.push_str(&arg0.value);
+      let freq = flags_freq + arg0.freq;
+      let last_seen = flags_last_seen.max(arg0.last_seen);
+      add_template_candidate(
+        candidates,
+        &cmd,
+        freq,
+        last_seen,
+        flags_repo || args0_repo,
+      );
+
+      for arg1 in &args1 {
+        let mut cmd = cmd.clone();
+        cmd.push(' ');
+        cmd.push_str(&arg1.value);
+        let freq = freq + arg1.freq;
+        let last_seen = last_seen.max(arg1.last_seen);
+        add_template_candidate(
+          candidates,
+          &cmd,
+          freq,
+          last_seen,
+          flags_repo || args0_repo || args1_repo,
+        );
+        added += 1;
+        if added > 50 {
+          return Ok(());
+        }
+      }
+    }
+  }
+
+  Ok(())
+}
+
+fn add_template_candidate(
+  candidates: &mut HashMap<String, Candidate>,
+  command: &str,
+  freq: i64,
+  last_seen: i64,
+  is_repo: bool,
+) {
+  if candidates.contains_key(command) {
+    return;
+  }
+  let mut entry = new_candidate(command);
+  if is_repo {
+    entry.repo_freq = freq;
+  } else {
+    entry.freq = freq;
+  }
+  entry.last_seen = last_seen;
+  candidates.insert(command.to_string(), entry);
+}
+
+async fn fetch_template_flags(
+  conn: &Connection,
+  repo_root: &str,
+  head: &str,
+  limit: usize,
+) -> Result<(Vec<TemplateStat>, bool)> {
+  let repo_flags = fetch_flag_stats(conn, repo_root, head, limit).await?;
+  if !repo_flags.is_empty() {
+    return Ok((repo_flags, true));
+  }
+  let global_flags = fetch_flag_stats(conn, "", head, limit).await?;
+  Ok((global_flags, false))
+}
+
+async fn fetch_flag_stats(
+  conn: &Connection,
+  repo_root: &str,
+  head: &str,
+  limit: usize,
+) -> Result<Vec<TemplateStat>> {
+  let mut rows = conn
+    .query(
+      "SELECT flag_raw, freq, last_seen FROM flag_stats
+       WHERE repo_root = ? AND command_head = ?
+       ORDER BY freq DESC LIMIT ?",
+      libsql::params![repo_root.to_string(), head.to_string(), limit as i64],
+    )
+    .await?;
+  let mut stats = Vec::new();
+  while let Some(row) = rows.next().await? {
+    stats.push(TemplateStat {
+      value: row.get::<String>(0)?,
+      freq: row.get::<i64>(1)?,
+      last_seen: row.get::<i64>(2)?,
+    });
+  }
+  Ok(stats)
+}
+
+async fn fetch_template_args(
+  conn: &Connection,
+  repo_root: &str,
+  head: &str,
+  index: i64,
+  limit: usize,
+) -> Result<(Vec<TemplateStat>, bool)> {
+  let repo_args = fetch_arg_stats(conn, repo_root, head, index, limit).await?;
+  if !repo_args.is_empty() {
+    return Ok((repo_args, true));
+  }
+  let global_args = fetch_arg_stats(conn, "", head, index, limit).await?;
+  if !global_args.is_empty() {
+    return Ok((global_args, false));
+  }
+  let repo_any = fetch_arg_stats_any(conn, repo_root, head, limit).await?;
+  if !repo_any.is_empty() {
+    return Ok((repo_any, true));
+  }
+  let global_any = fetch_arg_stats_any(conn, "", head, limit).await?;
+  Ok((global_any, false))
+}
+
+async fn fetch_arg_stats(
+  conn: &Connection,
+  repo_root: &str,
+  head: &str,
+  index: i64,
+  limit: usize,
+) -> Result<Vec<TemplateStat>> {
+  let mut rows = conn
+    .query(
+      "SELECT arg_raw, freq, last_seen FROM arg_stats
+       WHERE repo_root = ? AND command_head = ? AND arg_index = ?
+       ORDER BY freq DESC LIMIT ?",
+      libsql::params![repo_root.to_string(), head.to_string(), index, limit as i64],
+    )
+    .await?;
+  let mut stats = Vec::new();
+  while let Some(row) = rows.next().await? {
+    stats.push(TemplateStat {
+      value: row.get::<String>(0)?,
+      freq: row.get::<i64>(1)?,
+      last_seen: row.get::<i64>(2)?,
+    });
+  }
+  Ok(stats)
+}
+
+async fn fetch_arg_stats_any(
+  conn: &Connection,
+  repo_root: &str,
+  head: &str,
+  limit: usize,
+) -> Result<Vec<TemplateStat>> {
+  let mut rows = conn
+    .query(
+      "SELECT arg_raw, freq, last_seen FROM arg_stats_any
+       WHERE repo_root = ? AND command_head = ?
+       ORDER BY freq DESC LIMIT ?",
+      libsql::params![repo_root.to_string(), head.to_string(), limit as i64],
+    )
+    .await?;
+  let mut stats = Vec::new();
+  while let Some(row) = rows.next().await? {
+    stats.push(TemplateStat {
+      value: row.get::<String>(0)?,
+      freq: row.get::<i64>(1)?,
+      last_seen: row.get::<i64>(2)?,
+    });
+  }
+  Ok(stats)
+}
+
 fn push_opt_string(params: &mut Vec<Value>, value: &Option<String>) {
   if let Some(val) = value {
     params.push(Value::from(val.clone()));
@@ -742,6 +998,158 @@ fn parse_alias_line(raw: &str) -> Option<(String, String)> {
     return None;
   }
   Some((name.to_string(), value))
+}
+
+fn command_head_for_phase(shellname: &str, command: &str) -> Option<String> {
+  let tokens = tokenize_index(shellname, command);
+  if let Some(parts) = extract_command_parts(command, &tokens) {
+    return Some(parts.head);
+  }
+  tokens.first().map(|token| token.raw.clone())
+}
+
+async fn load_phase_for_heads(
+  conn: &Connection,
+  heads: &HashSet<String>,
+) -> Result<HashMap<String, PhaseSignal>> {
+  if heads.is_empty() {
+    return Ok(HashMap::new());
+  }
+
+  let mut placeholders = String::new();
+  for idx in 0..heads.len() {
+    if idx > 0 {
+      placeholders.push(',');
+    }
+    placeholders.push('?');
+  }
+  let mut params: Vec<Value> = Vec::with_capacity(heads.len());
+  for head in heads {
+    params.push(Value::from(head.clone()));
+  }
+
+  let sql = format!(
+    "SELECT command_head, phase, confidence, freq
+     FROM phase_stats
+     WHERE command_head IN ({})",
+    placeholders
+  );
+  let mut rows = conn.query(&sql, params).await?;
+  let mut best: HashMap<String, (f64, PhaseSignal)> = HashMap::new();
+
+  while let Some(row) = rows.next().await? {
+    let head = row.get::<String>(0)?;
+    let phase = row.get::<String>(1)?;
+    let confidence = row.get::<f64>(2)?;
+    let freq = row.get::<i64>(3)?;
+    let score = confidence * (freq as f64).ln_1p();
+    let entry = best.entry(head.clone()).or_insert_with(|| {
+      (
+        score,
+        PhaseSignal {
+          phase: phase.clone(),
+          confidence,
+        },
+      )
+    });
+    if score > entry.0 {
+      *entry = (
+        score,
+        PhaseSignal {
+          phase: phase.clone(),
+          confidence,
+        },
+      );
+    }
+  }
+
+  Ok(
+    best
+      .into_iter()
+      .map(|(head, (_score, signal))| (head, signal))
+      .collect(),
+  )
+}
+
+fn detect_session_phase(
+  recent_heads: &[String],
+  phase_for_head: &HashMap<String, PhaseSignal>,
+) -> Option<PhaseSignal> {
+  let mut scores: HashMap<String, f64> = HashMap::new();
+  let mut total = 0.0;
+  for (idx, head) in recent_heads.iter().rev().take(6).enumerate() {
+    if let Some(phase) = phase_for_head.get(head) {
+      let weight = 1.0 / (idx as f64 + 1.0);
+      let score = phase.confidence * weight;
+      *scores.entry(phase.phase.clone()).or_insert(0.0) += score;
+      total += score;
+    }
+  }
+
+  let (phase, score) = scores
+    .into_iter()
+    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+  let confidence = if total > 0.0 { score / total } else { 0.0 };
+  Some(PhaseSignal { phase, confidence })
+}
+
+fn phase_match_boost(
+  session_phase: Option<&PhaseSignal>,
+  candidate_phase: Option<&PhaseSignal>,
+) -> f64 {
+  let (Some(session), Some(candidate)) = (session_phase, candidate_phase) else {
+    return 0.0;
+  };
+  if session.phase != candidate.phase {
+    return 0.0;
+  }
+  0.35 * session.confidence * candidate.confidence
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn detects_session_phase_from_phase_stats() {
+    let recent = vec!["cargo build".to_string(), "pytest".to_string()];
+    let mut map = HashMap::new();
+    map.insert(
+      "cargo build".to_string(),
+      PhaseSignal {
+        phase: "build".to_string(),
+        confidence: 0.9,
+      },
+    );
+    map.insert(
+      "pytest".to_string(),
+      PhaseSignal {
+        phase: "test".to_string(),
+        confidence: 0.8,
+      },
+    );
+    let phase = detect_session_phase(&recent, &map).unwrap();
+    assert_eq!(phase.phase, "test");
+  }
+
+  #[test]
+  fn phase_boost_requires_match() {
+    let session = PhaseSignal {
+      phase: "test".to_string(),
+      confidence: 0.9,
+    };
+    let candidate = PhaseSignal {
+      phase: "test".to_string(),
+      confidence: 0.8,
+    };
+    let boost = phase_match_boost(Some(&session), Some(&candidate));
+    assert!(boost > 0.0);
+    let other = PhaseSignal {
+      phase: "build".to_string(),
+      confidence: 0.9,
+    };
+    assert_eq!(phase_match_boost(Some(&session), Some(&other)), 0.0);
+  }
 }
 
 struct PrefixContext {

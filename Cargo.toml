@@ -28,6 +28,12 @@ uzers = "0.12"
 hostname = "0.4.1"
 itertools = "0.14.0"
 jiff = "0.2.13"
+burn = { version = "0.19.1", default-features = false, features = ["ndarray", "autodiff", "webgpu"] }
+burn-core = { version = "0.19.1", default-features = false, features = ["std"] }
+burn-ndarray = { version = "0.19.1", default-features = false, features = ["std"] }
+burn-autodiff = { version = "0.19.1", default-features = false, features = ["std"] }
+burn-wgpu = { version = "0.19.1", default-features = false, features = ["std"] }
+toml = "0.9"
 
 # Force OpenSSL to use vendored version for Linux targets to avoid cross-compilation issues
 [target.'cfg(target_os = "linux")'.dependencies]

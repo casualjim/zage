@@ -6,8 +6,9 @@ use serde_json;
 use tracing::info;
 
 use crate::Result;
+use crate::phase::{PhaseConfig, PhaseSample, features_from_tokens, train_phase_predictor};
 use crate::repo::find_repo_root;
-use crate::tokenize::{extract_command_parts, normalize_token, token_strings_index, tokenize_index};
+use crate::tokenize::{extract_command_parts, normalize_token, tokenize_index};
 
 #[derive(Debug, Default)]
 pub struct IndexReport {
@@ -15,12 +16,20 @@ pub struct IndexReport {
   pub transitions: usize,
   pub contexts: usize,
   pub token_cache: usize,
+  pub phase_stats: usize,
 }
 
 #[derive(Debug, Default)]
 struct Stat {
   freq: i64,
   last_seen: i64,
+}
+
+#[derive(Debug, Default)]
+struct PhaseStat {
+  freq: i64,
+  last_seen: i64,
+  confidence_sum: f64,
 }
 
 pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Result<IndexReport> {
@@ -37,12 +46,18 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
   let mut flag_stats: HashMap<(String, String, String, String), Stat> = HashMap::new();
   let mut env_stats: HashMap<(String, String, String, String, String), Stat> = HashMap::new();
   let mut token_cache: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
+  let mut phase_stats: HashMap<(String, String), PhaseStat> = HashMap::new();
+  let mut command_shell: HashMap<String, String> = HashMap::new();
+  let phase_config = PhaseConfig::load()?;
+  let mut phase_samples: Vec<PhaseSample> = Vec::new();
+  let mut phase_unlabeled: Vec<Vec<f32>> = Vec::new();
 
   let mut prev_command: Option<String> = None;
   let mut prev_exit_status: Option<i64> = None;
   let mut prev_repo_root: String = String::new();
   let mut processed: usize = 0;
   let progress_interval = 50_000usize;
+  let max_unlabeled = 10_000usize;
 
   let mut sql = String::from(
     "SELECT command, shellname, working_directory, hostname, username, exit_status, start_unix_timestamp
@@ -117,11 +132,23 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
       );
     }
 
-    if !token_cache.contains_key(&command) {
-      token_cache.insert(command.clone(), token_strings_index(&shellname, &command));
-    }
+    command_shell.insert(command.clone(), shellname.clone());
 
     let tokens = tokenize_index(&shellname, &command);
+    if !token_cache.contains_key(&command) {
+      let raw = tokens.iter().map(|t| t.raw.clone()).collect();
+      let normalized = tokens.iter().map(|t| t.normalized.clone()).collect();
+      token_cache.insert(command.clone(), (raw, normalized));
+    }
+
+    if phase_config.labels().len() > 1 {
+      let features = features_from_tokens(&tokens, phase_config.hash_size());
+      if let Some(label) = phase_config.match_label(&command) {
+        phase_samples.push(PhaseSample { features, label });
+      } else if phase_unlabeled.len() < max_unlabeled {
+        phase_unlabeled.push(features);
+      }
+    }
     if let Some(parts) = extract_command_parts(&command, &tokens) {
       let mut flags = parts.flags;
       flags.sort();
@@ -193,6 +220,49 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
     return Ok(IndexReport::default());
   }
 
+  let phase_predictor = train_phase_predictor(&phase_config, phase_samples, phase_unlabeled);
+  let phase_labels: Vec<String> = phase_predictor
+    .as_ref()
+    .map(|predictor| predictor.labels().to_vec())
+    .unwrap_or_else(|| phase_config.labels().to_vec());
+
+  if phase_labels.len() > 1 {
+    for (command, stat) in &command_stats {
+      let shellname = command_shell
+        .get(command)
+        .map(|s| s.as_str())
+        .unwrap_or("sh");
+      let tokens = tokenize_index(shellname, command);
+      let parts = extract_command_parts(command, &tokens);
+      let Some(parts) = parts else {
+        continue;
+      };
+      let features = features_from_tokens(&tokens, phase_config.hash_size());
+      let probs = if let Some(predictor) = &phase_predictor {
+        predictor.predict(&features)
+      } else {
+        phase_config.pattern_distribution(command)
+      };
+      if probs.len() != phase_labels.len() {
+        continue;
+      }
+      for (idx, phase) in phase_labels.iter().enumerate() {
+        let prob = probs[idx] as f64;
+        if prob <= 0.0 {
+          continue;
+        }
+        let entry = phase_stats
+          .entry((parts.head.clone(), phase.clone()))
+          .or_default();
+        entry.freq += stat.freq;
+        if stat.last_seen > entry.last_seen {
+          entry.last_seen = stat.last_seen;
+        }
+        entry.confidence_sum += prob * stat.freq as f64;
+      }
+    }
+  }
+
   let now = SystemTime::now()
     .duration_since(UNIX_EPOCH)
     .unwrap_or_default()
@@ -211,6 +281,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
     conn.execute("DELETE FROM flag_stats", ()).await?;
     conn.execute("DELETE FROM env_stats", ()).await?;
     conn.execute("DELETE FROM token_cache", ()).await?;
+    conn.execute("DELETE FROM phase_stats", ()).await?;
 
     for (command, stat) in &command_stats {
       conn
@@ -368,6 +439,27 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
         .await?;
     }
 
+    for ((command_head, phase), stat) in &phase_stats {
+      let confidence = if stat.freq > 0 {
+        stat.confidence_sum / stat.freq as f64
+      } else {
+        0.0
+      };
+      conn
+        .execute(
+          "INSERT INTO phase_stats (command_head, phase, confidence, freq, last_seen)
+           VALUES (?, ?, ?, ?, ?)",
+          (
+            command_head.clone(),
+            phase.clone(),
+            confidence,
+            stat.freq,
+            stat.last_seen,
+          ),
+        )
+        .await?;
+    }
+
     Ok(())
   }
   .await;
@@ -383,6 +475,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
     transitions: transition_stats.len(),
     contexts: context_stats.len(),
     token_cache: token_cache.len(),
+    phase_stats: phase_stats.len(),
   })
 }
 

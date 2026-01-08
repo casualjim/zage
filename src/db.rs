@@ -364,6 +364,81 @@ pub async fn update_stats_for_invocation(
   Ok(())
 }
 
+#[cfg(test)]
+mod import_tests {
+  use super::*;
+  use crate::shell_history;
+  use std::io::Write;
+  use tempfile::{NamedTempFile, tempdir};
+
+  #[tokio::test]
+  async fn test_import_history_basic() -> Result<()> {
+    let tmp_db = NamedTempFile::new()?;
+    let db = open_db(tmp_db.path()).await?;
+    init(&db.conn).await?;
+
+    let mut tmp = NamedTempFile::new()?;
+    let content = ":1610000000:2;echo hello
+:1610000002:3;ls -la
+:1610000005:1;echo hello
+";
+    tmp.write_all(content.as_bytes())?;
+    tmp.flush()?;
+
+    let invocations = shell_history::parse_zsh_history(tmp.path(), None, None)?;
+    import_history(&db.conn, invocations).await?;
+
+    let mut rows = db.conn.query("SELECT COUNT(*) FROM shell_history", ()).await?;
+    let row = rows.next().await?.expect("expected row");
+    let count: i64 = row.get(0)?;
+    assert_eq!(count, 3);
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_history_import() -> Result<()> {
+    let temp_dir = tempdir()?;
+    let db_path = temp_dir.path().join("test.db");
+
+    let db = open_db(&db_path).await?;
+    init(&db.conn).await?;
+
+    let bash_history_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+      .join("tests")
+      .join("data")
+      .join("bash.history");
+    let bash_invocations = shell_history::parse_bash_history(&bash_history_path, None, None)?;
+
+    let zsh_history_path = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+      .join("tests")
+      .join("data")
+      .join("zsh.history");
+    let zsh_invocations = shell_history::parse_zsh_history(&zsh_history_path, None, None)?;
+
+    for invocation in bash_invocations {
+      let inserted = insert_invocation(&db.conn, &invocation).await?;
+      assert!(inserted);
+    }
+
+    for invocation in zsh_invocations {
+      let inserted = insert_invocation(&db.conn, &invocation).await?;
+      assert!(inserted);
+    }
+
+    let count = count_history_entries(&db.conn).await?;
+    assert!(count > 0, "No history entries were imported");
+
+    Ok(())
+  }
+
+  async fn count_history_entries(conn: &Connection) -> Result<usize> {
+    let mut rows = conn.query("SELECT COUNT(*) FROM shell_history", ()).await?;
+    let row = rows.next().await?.expect("expected row");
+    let count: i64 = row.get(0)?;
+    Ok(count as usize)
+  }
+}
+
 struct PrevInvocation {
   command: String,
   exit_status: Option<i64>,

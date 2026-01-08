@@ -170,3 +170,15 @@ CREATE TABLE IF NOT EXISTS token_sequence_stats (
 );
 
 CREATE INDEX IF NOT EXISTS idx_token_sequence_lift ON token_sequence_stats(lift);
+
+CREATE TABLE IF NOT EXISTS phase_stats (
+  command_head TEXT NOT NULL,
+  phase TEXT NOT NULL,
+  confidence REAL NOT NULL,
+  freq INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  PRIMARY KEY (command_head, phase)
+);
+
+CREATE INDEX IF NOT EXISTS idx_phase_stats_head ON phase_stats(command_head);
+CREATE INDEX IF NOT EXISTS idx_phase_stats_phase ON phase_stats(phase);
