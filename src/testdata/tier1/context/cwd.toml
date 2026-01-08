@@ -1,0 +1,54 @@
+[meta]
+description = "Verify CWD context affects ranking"
+tags = ["context", "cwd"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 1.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[fs]
+"project_a/.git/" = "dir"
+"project_b/.git/" = "dir"
+
+[[history]]
+cmd = "make test"
+at = "-1h"
+cwd = "project_a"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "npm test"
+at = "-1h"
+cwd = "project_b"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "cwd_context_project_a"
+mode = "next_command"
+
+[scenario.context]
+cwd = "project_a"
+session = "s1"
+
+[scenario.expect]
+top = ["make test"]
+
+[[scenario]]
+name = "cwd_context_project_b"
+mode = "next_command"
+
+[scenario.context]
+cwd = "project_b"
+session = "s1"
+
+[scenario.expect]
+top = ["npm test"]

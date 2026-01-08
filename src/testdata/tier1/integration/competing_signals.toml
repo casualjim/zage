@@ -1,0 +1,34 @@
+[meta]
+description = "Verify recency can beat moderate frequency under default weights"
+tags = ["integration", "tradeoff"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "frequent_old_cmd"
+at = "-7d"
+cwd = "/tmp/other"
+exit = 0
+session = "s2"
+count = 5
+
+[[history]]
+cmd = "recent_cmd"
+at = "-1h"
+cwd = "/tmp/project"
+exit = 0
+session = "s1"
+count = 1
+
+[[scenario]]
+name = "competing_signals_recency_wins"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp/project"
+session = "s1"
+
+[scenario.expect]
+top = ["recent_cmd"]
+contains = ["frequent_old_cmd"]

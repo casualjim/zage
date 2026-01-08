@@ -1,0 +1,43 @@
+[meta]
+description = "Verify session-specific context boost"
+tags = ["context", "session"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 1.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "current_session_cmd"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "current_term"
+count = 2
+
+[[history]]
+cmd = "other_session_cmd"
+at = "-30m"
+cwd = "/tmp"
+exit = 0
+session = "other_term"
+count = 5
+
+[[scenario]]
+name = "session_boost"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "current_term"
+
+[scenario.expect]
+top = ["current_session_cmd"]
+
+[[scenario.expect.candidate]]
+cmd = "current_session_cmd"
+min_context = 0.5

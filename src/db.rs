@@ -1,5 +1,4 @@
 use libsql::{Builder, Connection, Database};
-use std::env;
 use std::path::Path;
 
 use crate::repo::find_repo_root;
@@ -14,27 +13,8 @@ pub struct Db {
 }
 
 pub async fn open_db<P: AsRef<Path>>(db_path: P) -> Result<Db> {
-  let url = env::var("TURSO_DATABASE_URL")
-    .ok()
-    .or_else(|| env::var("LIBSQL_URL").ok());
-  let token = env::var("TURSO_AUTH_TOKEN")
-    .ok()
-    .or_else(|| env::var("LIBSQL_AUTH_TOKEN").ok());
-  let replica_path = env::var("TURSO_LOCAL_REPLICA_PATH").ok();
-
-  let db = if let Some(url) = url {
-    let token = token.unwrap_or_default();
-    if let Some(replica_path) = replica_path {
-      Builder::new_remote_replica(replica_path, url, token)
-        .build()
-        .await?
-    } else {
-      Builder::new_remote(url, token).build().await?
-    }
-  } else {
-    let path = db_path.as_ref().to_string_lossy().to_string();
-    Builder::new_local(path).build().await?
-  };
+  let path = db_path.as_ref().to_string_lossy().to_string();
+  let db = Builder::new_local(path).build().await?;
 
   let conn = db.connect()?;
   Ok(Db { db, conn })

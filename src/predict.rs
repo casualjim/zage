@@ -5,30 +5,38 @@ use libsql::{Connection, Value};
 
 use crate::Result;
 use crate::db::get_recent_invocations;
+use crate::phase::PhaseConfig;
 use crate::repo::find_repo_root;
 use crate::rerank;
-use crate::tokenize::normalized_tokens;
+use crate::tokenize::{TokenKind, extract_command_parts, normalized_tokens, tokenize_index};
 
 pub mod aliases;
 mod candidates;
 mod phase_support;
 pub(crate) mod ranking;
+#[cfg(any(test, feature = "tier1-tests"))]
+pub mod verifier;
 mod sql;
 mod templates;
 
 use crate::rerank_config::RerankConfig;
-use aliases::{add_alias_candidates, build_prefix_variants, expand_alias, load_aliases};
+use aliases::{
+  add_alias_candidates, alias_for_command, build_prefix_variants, expand_alias, load_aliases,
+};
 use candidates::{
   add_context_candidates, add_global_candidates, add_head_candidates, add_phase_candidates,
   add_recent_candidates, add_repo_candidates, add_sequence_candidates, add_session_candidates,
-  add_template_candidates, add_transition_candidates, load_session_stats, push_opt_i64,
-  push_opt_string,
+  add_template_candidates, add_transition_candidates, hydrate_candidate_stats, load_session_stats,
+  push_opt_i64, push_opt_string,
 };
 use phase_support::{
-  PhaseSignal, command_head_for_phase, detect_session_phase, load_phase_for_heads,
-  phase_match_boost,
+  PhaseSignal, command_head_for_phase, detect_session_phase,
+  detect_session_phase_from_commands, load_phase_for_heads, phase_match_boost,
 };
-use ranking::{load_normalized_tokens, low_confidence, recency_score, token_similarity};
+use ranking::{
+  load_normalized_tokens, low_confidence, recency_score, token_similarity,
+  DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+};
 use sql::query_prepared;
 use templates::{
   arg_template_candidates, env_template_candidates, split_env_prefix, token_sequence_predictions,
@@ -39,6 +47,46 @@ const GLOBAL_CANDIDATE_LIMIT_FALLBACK: usize = 200;
 const RECENT_CANDIDATE_LIMIT: usize = 200;
 const RECENT_CANDIDATE_LIMIT_FALLBACK: usize = 500;
 
+pub trait TimeProvider: Send + Sync {
+  fn now(&self) -> i64;
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct SystemTimeProvider;
+
+impl TimeProvider for SystemTimeProvider {
+  fn now(&self) -> i64 {
+    SystemTime::now()
+      .duration_since(UNIX_EPOCH)
+      .unwrap_or_default()
+      .as_secs() as i64
+  }
+}
+
+#[derive(Debug, Clone)]
+pub struct FixedTimeProvider {
+  now: i64,
+}
+
+impl FixedTimeProvider {
+  pub fn new(now: i64) -> Self {
+    Self { now }
+  }
+}
+
+impl TimeProvider for FixedTimeProvider {
+  fn now(&self) -> i64 {
+    self.now
+  }
+}
+
+#[derive(Debug, Clone)]
+pub(crate) struct SuggestRuntime {
+  aliases: HashMap<String, String>,
+  weights: RankingWeights,
+  recency_half_life: f64,
+  now: i64,
+}
 #[derive(Debug, Clone)]
 pub struct SuggestConfig {
   pub max_results: usize,
@@ -100,13 +148,13 @@ pub(crate) struct Candidate {
 }
 
 #[derive(Debug, Clone)]
-struct RankingWeights {
-  recency: f64,
-  frequency: f64,
-  transition: f64,
-  context: f64,
-  sequence: f64,
-  similarity: f64,
+pub struct RankingWeights {
+  pub recency: f64,
+  pub frequency: f64,
+  pub transition: f64,
+  pub context: f64,
+  pub sequence: f64,
+  pub similarity: f64,
 }
 
 impl Default for RankingWeights {
@@ -156,15 +204,31 @@ fn expanded_command_for(
 }
 
 pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Suggestion>> {
+  let time_provider = SystemTimeProvider;
+  let runtime = SuggestRuntime {
+    aliases: load_aliases(),
+    weights: RankingWeights::default(),
+    recency_half_life: DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+    now: time_provider.now(),
+  };
+  suggest_with_runtime(conn, config, &runtime, None).await
+}
+
+pub(crate) async fn suggest_with_runtime(
+  conn: &Connection,
+  config: SuggestConfig,
+  runtime: &SuggestRuntime,
+  override_prev: Option<(String, Option<i64>)>,
+) -> Result<Vec<Suggestion>> {
   let prefix = config.prefix.clone().unwrap_or_default();
   let prefix_norm = normalized_tokens(&prefix);
   let has_prefix = !prefix.is_empty();
 
   if has_prefix {
-    return suggest_completions(conn, &config, &prefix, &prefix_norm).await;
+    return suggest_completions(conn, &config, runtime, &prefix, &prefix_norm).await;
   }
 
-  let aliases = load_aliases();
+  let aliases = &runtime.aliases;
   let recent = get_recent_invocations(conn, config.recent_limit).await?;
   if recent.is_empty() {
     return Ok(Vec::new());
@@ -172,19 +236,33 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
 
   let recent_commands: Vec<String> = recent
     .iter()
-    .map(|inv| expanded_command_for(inv, &aliases))
+    .map(|inv| expanded_command_for(inv, aliases))
     .collect();
+  let mut sequence_commands = recent_commands.clone();
+  if let Some((cmd, _)) = override_prev.as_ref() {
+    if let Some(last) = sequence_commands.last_mut() {
+      *last = cmd.clone();
+    } else {
+      sequence_commands.push(cmd.clone());
+    }
+  }
   let recent_heads: Vec<String> = recent
     .iter()
-    .map(|inv| (inv, expanded_command_for(inv, &aliases)))
+    .map(|inv| (inv, expanded_command_for(inv, aliases)))
     .filter_map(|(inv, command)| command_head_for_phase(&inv.shellname, &command))
     .collect();
   let session_tokens = recent_commands
     .iter()
     .flat_map(|cmd| normalized_tokens(cmd))
     .collect::<Vec<_>>();
-  let last_command = recent_commands.last().cloned();
-  let last_exit_status = recent.last().and_then(|inv| inv.exit_status);
+  let last_command = override_prev
+    .as_ref()
+    .map(|(cmd, _)| cmd.clone())
+    .or_else(|| recent_commands.last().cloned());
+  let last_exit_status = override_prev
+    .as_ref()
+    .map(|(_, exit)| *exit)
+    .unwrap_or_else(|| recent.last().and_then(|inv| inv.exit_status));
   let repo_root = config
     .cwd
     .as_deref()
@@ -203,7 +281,16 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
 
   let recent_head_set: HashSet<String> = recent_heads.iter().cloned().collect();
   let phase_for_recent = load_phase_for_heads(conn, &recent_head_set).await?;
-  let session_phase = detect_session_phase(&recent_heads, &phase_for_recent);
+  let phase_config = PhaseConfig::load()?;
+  let phase_config = if phase_config.labels().len() > 1 {
+    Some(phase_config)
+  } else {
+    None
+  };
+  let session_phase = phase_config
+    .as_ref()
+    .and_then(|config| detect_session_phase_from_commands(&recent_commands, config))
+    .or_else(|| detect_session_phase(&recent_heads, &phase_for_recent));
   add_phase_candidates(conn, session_phase.as_ref(), &repo_root, &mut candidates).await?;
 
   add_context_candidates(conn, &config, &mut candidates).await?;
@@ -217,7 +304,7 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
   }
 
   if config.use_sequences {
-    add_sequence_candidates(conn, &recent_commands, &mut candidates).await?;
+    add_sequence_candidates(conn, &sequence_commands, &mut candidates).await?;
   }
 
   if !candidates.is_empty() {
@@ -233,10 +320,6 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
     add_recent_candidates(conn, &mut candidates, RECENT_CANDIDATE_LIMIT).await?;
     add_global_candidates(conn, &mut candidates, GLOBAL_CANDIDATE_LIMIT).await?;
     add_template_candidates(conn, &repo_root, &mut candidates).await?;
-  }
-
-  if !aliases.is_empty() {
-    add_alias_candidates(&aliases, &mut candidates);
   }
 
   let session_stats = if let Some(session_id) = config.session_id {
@@ -256,20 +339,24 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
     }
   }
 
-  let now = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs() as i64;
+  if !candidates.is_empty() {
+    hydrate_candidate_stats(conn, &repo_root, &mut candidates).await?;
+  }
 
-  let weights = RankingWeights::default();
+  if !aliases.is_empty() {
+    add_alias_candidates(aliases, &mut candidates);
+  }
+
   let mut scored = score_candidates(
     conn,
     &candidates,
     &prefix_norm,
     session_phase.as_ref(),
     &recent_heads,
-    &weights,
-    now,
+    &runtime.weights,
+    runtime.now,
+    runtime.recency_half_life,
+    phase_config.as_ref(),
   )
   .await?;
 
@@ -292,8 +379,10 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
         &prefix_norm,
         session_phase.as_ref(),
         &recent_heads,
-        &weights,
-        now,
+        &runtime.weights,
+        runtime.now,
+        runtime.recency_half_life,
+        phase_config.as_ref(),
       )
       .await?;
     }
@@ -307,6 +396,19 @@ pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Sug
   );
   let _ = rerank::rerank_suggestions(&mut scored, &candidates, &context, &rerank_config);
 
+  let transition_only = runtime.weights.transition > 0.0
+    && runtime.weights.recency.abs() <= f64::EPSILON
+    && runtime.weights.frequency.abs() <= f64::EPSILON
+    && runtime.weights.context.abs() <= f64::EPSILON
+    && runtime.weights.sequence.abs() <= f64::EPSILON
+    && runtime.weights.similarity.abs() <= f64::EPSILON;
+  if transition_only && last_command.is_some() {
+    let has_transition = scored.iter().any(|s| s.breakdown.transition > 0.0);
+    if has_transition {
+      scored.retain(|s| s.breakdown.transition > 0.0);
+    }
+  }
+
   scored.truncate(config.max_results);
   Ok(scored)
 }
@@ -319,6 +421,8 @@ async fn score_candidates(
   recent_heads: &[String],
   weights: &RankingWeights,
   now: i64,
+  recency_half_life: f64,
+  phase_config: Option<&PhaseConfig>,
 ) -> Result<Vec<Suggestion>> {
   let mut candidate_heads: HashMap<String, String> = HashMap::new();
   let mut phase_heads: HashSet<String> = recent_heads.iter().cloned().collect();
@@ -332,15 +436,26 @@ async fn score_candidates(
 
   let mut scored: Vec<Suggestion> = Vec::new();
   for candidate in candidates.values() {
-    let recency = recency_score(now, candidate.last_seen);
+    let recency = recency_score(now, candidate.last_seen, recency_half_life);
     let frequency = (candidate.freq as f64).ln_1p() + 0.5 * (candidate.repo_freq as f64).ln_1p();
     let transition = (candidate.transition_freq as f64).ln_1p()
       + 0.7 * (candidate.repo_transition_freq as f64).ln_1p();
     let mut context =
       (candidate.context_freq as f64).ln_1p() + 0.8 * (candidate.session_freq as f64).ln_1p();
-    let candidate_phase = candidate_heads
-      .get(&candidate.command)
-      .and_then(|head| phase_for_head.get(head));
+    let pattern_phase = phase_config.and_then(|config| {
+      config
+        .match_label(&candidate.command)
+        .and_then(|idx| config.labels().get(idx).cloned())
+        .map(|phase| PhaseSignal {
+          phase,
+          confidence: 1.0,
+        })
+    });
+    let candidate_phase = pattern_phase.as_ref().or_else(|| {
+      candidate_heads
+        .get(&candidate.command)
+        .and_then(|head| phase_for_head.get(head))
+    });
     context += phase_match_boost(session_phase, candidate_phase);
     let sequence = if candidate.sequence_confidence > 0.0 {
       let order_weight = if candidate.sequence_prefix_len >= 2 {
@@ -361,7 +476,7 @@ async fn score_candidates(
       )
     };
     let session_recency = if candidate.session_last_seen > 0 {
-      recency_score(now, candidate.session_last_seen)
+      recency_score(now, candidate.session_last_seen, recency_half_life)
     } else {
       0.0
     };
@@ -373,6 +488,10 @@ async fn score_candidates(
       + weights.sequence * sequence
       + 0.1 * session_recency
       + weights.similarity * similarity;
+
+    if score <= 0.0 {
+      continue;
+    }
 
     scored.push(Suggestion {
       command: candidate.command.clone(),
@@ -389,6 +508,18 @@ async fn score_candidates(
   }
 
   scored.sort_by(|a, b| {
+    let diff = (b.score - a.score).abs();
+    if diff < 1e-4 {
+      let recency_cmp = a
+        .breakdown
+        .recency
+        .partial_cmp(&b.breakdown.recency)
+        .unwrap_or(std::cmp::Ordering::Equal);
+      if recency_cmp != std::cmp::Ordering::Equal {
+        return recency_cmp;
+      }
+      return a.command.cmp(&b.command);
+    }
     b.score
       .partial_cmp(&a.score)
       .unwrap_or(std::cmp::Ordering::Equal)
@@ -422,17 +553,19 @@ async fn expand_low_confidence_candidates(
 async fn suggest_completions(
   conn: &Connection,
   config: &SuggestConfig,
+  runtime: &SuggestRuntime,
   prefix: &str,
   prefix_norm: &[String],
 ) -> Result<Vec<Suggestion>> {
-  let aliases = load_aliases();
+  let aliases = &runtime.aliases;
   if let Some(session_id) = config.session_id {
     let session_scored = completion_candidates(
       conn,
       config,
+      runtime,
       prefix,
       prefix_norm,
-      &aliases,
+      aliases,
       Some(session_id),
     )
     .await?;
@@ -441,12 +574,13 @@ async fn suggest_completions(
     }
   }
 
-  completion_candidates(conn, config, prefix, prefix_norm, &aliases, None).await
+  completion_candidates(conn, config, runtime, prefix, prefix_norm, aliases, None).await
 }
 
 async fn completion_candidates(
   conn: &Connection,
   config: &SuggestConfig,
+  runtime: &SuggestRuntime,
   prefix: &str,
   prefix_norm: &[String],
   aliases: &HashMap<String, String>,
@@ -465,35 +599,147 @@ async fn completion_candidates(
     .and_then(find_repo_root)
     .unwrap_or_default();
   let token_priors = token_sequence_predictions(conn, prefix_norm).await?;
+  let (prefix_flags, prefix_args) = {
+    let tokens = tokenize_index("sh", prefix);
+    let ends_with_space = prefix
+      .chars()
+      .last()
+      .map(|c| c.is_whitespace())
+      .unwrap_or(false);
+    extract_command_parts(prefix, &tokens)
+      .map(|parts| {
+        let mut flags = parts.flags;
+        let mut args = parts
+          .args
+          .iter()
+          .map(|arg| arg.normalized.clone())
+          .collect::<Vec<_>>();
+        if !ends_with_space {
+          if let Some(last) = tokens.last()
+            && matches!(
+              last.kind,
+              TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment
+            )
+          {
+            let partial_norm = last.normalized.clone();
+            if last.raw.starts_with('-') {
+              if last.raw.len() == 1 {
+                if let Some(pos) = flags.iter().position(|flag| flag == &last.raw) {
+                  flags.remove(pos);
+                } else if let Some(pos) = args.iter().position(|arg| arg == &partial_norm) {
+                  args.remove(pos);
+                }
+              }
+            } else if let Some(pos) = args.iter().position(|arg| arg == &partial_norm) {
+              args.remove(pos);
+            }
+          }
+        }
+        (flags, args)
+      })
+      .unwrap_or_default()
+  };
 
-  if let Some(mut env_suggestions) =
-    env_template_candidates(conn, prefix, &repo_root, &token_priors).await?
+  let mut env_suggestions = None;
+  if let Some(mut suggestions) = env_template_candidates(
+    conn,
+    prefix,
+    &repo_root,
+    &token_priors,
+    runtime.now,
+    runtime.recency_half_life,
+  )
+  .await?
   {
-    env_suggestions.sort_by(|a, b| {
+    suggestions.sort_by(|a, b| {
       b.score
         .partial_cmp(&a.score)
         .unwrap_or(std::cmp::Ordering::Equal)
     });
-    env_suggestions.truncate(config.max_results);
-    return Ok(env_suggestions);
+    suggestions.truncate(config.max_results);
+    env_suggestions = Some(suggestions);
   }
 
-  if let Some(mut arg_suggestions) =
-    arg_template_candidates(conn, prefix, &repo_root, &token_priors).await?
+  let mut arg_suggestions_for_merge = None;
+  if let Some(mut arg_suggestions) = arg_template_candidates(
+    conn,
+    prefix,
+    &repo_root,
+    &token_priors,
+    runtime.now,
+    runtime.recency_half_life,
+  )
+  .await?
   {
-    arg_suggestions.sort_by(|a, b| {
-      b.score
-        .partial_cmp(&a.score)
-        .unwrap_or(std::cmp::Ordering::Equal)
+    let has_prefix_match = arg_suggestions
+      .iter()
+      .any(|suggestion| suggestion.command.starts_with(prefix));
+    if !has_prefix_match {
+      // fall through to normal completion candidates
+    } else {
+    let trimmed_prefix = prefix.trim_end();
+    arg_suggestions.retain(|suggestion| {
+      if suggestion.command.trim_end() == trimmed_prefix {
+        return false;
+      }
+      if prefix_flags.is_empty() && prefix_args.is_empty() {
+        return true;
+      }
+      let tokens = tokenize_index("sh", &suggestion.command);
+      let Some(parts) = extract_command_parts(&suggestion.command, &tokens) else {
+        return false;
+      };
+      if !prefix_flags
+        .iter()
+        .all(|flag| parts.flags.iter().any(|cand| cand == flag))
+      {
+        return false;
+      }
+      if !prefix_args.is_empty() {
+        let candidate_args = parts
+          .args
+          .iter()
+          .map(|arg| arg.normalized.clone())
+          .collect::<Vec<_>>();
+        if !prefix_args
+          .iter()
+          .all(|arg| candidate_args.iter().any(|cand| cand == arg))
+        {
+          return false;
+        }
+      }
+      true
     });
-    arg_suggestions.truncate(config.max_results);
-    return Ok(arg_suggestions);
+    if arg_suggestions.is_empty() {
+      // fall through to normal completion candidates
+    } else {
+      arg_suggestions.sort_by(|a, b| {
+        b.score
+          .partial_cmp(&a.score)
+          .unwrap_or(std::cmp::Ordering::Equal)
+      });
+      arg_suggestions.truncate(config.max_results);
+      let last_char = prefix.chars().last();
+      let ends_with_space = last_char.map(|c| c.is_whitespace()).unwrap_or(false);
+      let ends_with_quote = matches!(last_char, Some('"') | Some('\''));
+      if (ends_with_space && !prefix_flags.is_empty()) || ends_with_quote {
+        arg_suggestions_for_merge = Some(arg_suggestions);
+      } else {
+        return Ok(arg_suggestions);
+      }
+    }
+    }
   }
 
-  let (env_prefix, match_prefix) = split_env_prefix(prefix);
+  let (env_prefix, mut match_prefix) = split_env_prefix(prefix);
+  let mut apply_env_prefix = env_prefix.clone();
+  if !env_prefix.is_empty() && match_prefix.trim().is_empty() {
+    match_prefix = prefix.to_string();
+    apply_env_prefix.clear();
+  }
   let match_prefixes = build_prefix_variants(&match_prefix, aliases);
   if match_prefixes.is_empty() {
-    return Ok(Vec::new());
+    return Ok(env_suggestions.unwrap_or_default());
   }
 
   let mut sql = String::from(
@@ -539,16 +785,11 @@ async fn completion_candidates(
   sql.push_str(&where_parts.join(" AND "));
   sql.push_str(" GROUP BY command ORDER BY last_seen DESC LIMIT 200");
 
-  for prefix_value in match_prefixes {
+  for prefix_value in &match_prefixes {
     params.push(Value::from(format!("{prefix_value}%")));
   }
 
   let mut rows = query_prepared(conn, &sql, libsql::params_from_iter(params)).await?;
-
-  let now = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs() as i64;
 
   let mut scored: Vec<Suggestion> = Vec::new();
 
@@ -564,6 +805,12 @@ async fn completion_candidates(
 
     let expanded = expand_alias(&command, aliases);
     let expanded_for_score = expanded.as_deref().unwrap_or(&command);
+    let matches_prefix = match_prefixes.iter().any(|variant| {
+      command.starts_with(variant) || expanded_for_score.starts_with(variant)
+    });
+    if !matches_prefix {
+      continue;
+    }
     let norm_tokens = normalized_tokens(expanded_for_score);
     let similarity = token_similarity(prefix_norm, &norm_tokens);
     let prefix_score = if command.starts_with(prefix) {
@@ -574,7 +821,7 @@ async fn completion_candidates(
       0.0
     };
 
-    let recency = recency_score(now, last_seen);
+    let recency = recency_score(runtime.now, last_seen, runtime.recency_half_life);
     let frequency = (freq as f64).ln_1p();
     let mut context = 0.0;
     if session_hits > 0 {
@@ -595,17 +842,25 @@ async fn completion_candidates(
     let score =
       0.45 * recency + 0.3 * context + 0.15 * frequency + 0.07 * prefix_score + 0.03 * similarity;
 
-    let mut suggestion_command = command;
-    if !env_prefix.is_empty() {
-      let prefix = if env_prefix
+    let mut suggestion_command = command.clone();
+    for (alias, expansion) in aliases {
+      if let Some(alias_command) = alias_for_command(alias, expansion, &command)
+        && alias_command.starts_with(&match_prefix)
+      {
+        suggestion_command = alias_command;
+        break;
+      }
+    }
+    if !apply_env_prefix.is_empty() {
+      let prefix = if apply_env_prefix
         .chars()
         .last()
         .map(|c| c.is_whitespace())
         .unwrap_or(false)
       {
-        env_prefix.clone()
+        apply_env_prefix.clone()
       } else {
-        format!("{env_prefix} ")
+        format!("{apply_env_prefix} ")
       };
       suggestion_command = format!("{}{}", prefix, suggestion_command);
     }
@@ -624,6 +879,135 @@ async fn completion_candidates(
     });
   }
 
+  if scored.is_empty() {
+    if prefix_flags.is_empty() && prefix_args.is_empty() {
+      let mut merged = env_suggestions.unwrap_or_default();
+      if let Some(mut arg_suggestions) = arg_suggestions_for_merge.take() {
+        merged.append(&mut arg_suggestions);
+      }
+      return Ok(merged);
+    }
+    let mut rows = query_prepared(
+      conn,
+      "SELECT command, freq, last_seen FROM command_stats ORDER BY last_seen DESC LIMIT 200",
+      (),
+    )
+    .await?;
+    while let Some(row) = rows.next().await? {
+      let command = row.get::<String>(0)?;
+      let freq = row.get::<i64>(1)?;
+      let last_seen = row.get::<i64>(2)?;
+      if !prefix_flags.is_empty() {
+        let tokens = tokenize_index("sh", &command);
+        let Some(parts) = extract_command_parts(&command, &tokens) else {
+          continue;
+        };
+        if !prefix_flags
+          .iter()
+          .all(|flag| parts.flags.iter().any(|cand| cand == flag))
+        {
+          continue;
+        }
+        if !prefix_args.is_empty() {
+          let candidate_args = parts
+            .args
+            .iter()
+            .map(|arg| arg.normalized.clone())
+            .collect::<Vec<_>>();
+          if !prefix_args
+            .iter()
+            .all(|arg| candidate_args.iter().any(|cand| cand == arg))
+          {
+            continue;
+          }
+        }
+      } else if !prefix_args.is_empty() {
+        let tokens = tokenize_index("sh", &command);
+        let Some(parts) = extract_command_parts(&command, &tokens) else {
+          continue;
+        };
+        let candidate_args = parts
+          .args
+          .iter()
+          .map(|arg| arg.normalized.clone())
+          .collect::<Vec<_>>();
+        if !prefix_args
+          .iter()
+          .all(|arg| candidate_args.iter().any(|cand| cand == arg))
+        {
+          continue;
+        }
+      }
+      let expanded = expand_alias(&command, aliases);
+      let expanded_for_score = expanded.as_deref().unwrap_or(&command);
+      let norm_tokens = normalized_tokens(expanded_for_score);
+      let similarity = token_similarity(prefix_norm, &norm_tokens);
+      if similarity <= 0.0 {
+        continue;
+      }
+      let recency = recency_score(runtime.now, last_seen, runtime.recency_half_life);
+      let frequency = (freq as f64).ln_1p();
+      let score = 0.7 * similarity + 0.2 * recency + 0.1 * frequency;
+
+      let mut suggestion_command = command.clone();
+      for (alias, expansion) in aliases {
+        if let Some(alias_command) = alias_for_command(alias, expansion, &command)
+          && alias_command.starts_with(&match_prefix)
+        {
+          suggestion_command = alias_command;
+          break;
+        }
+      }
+      if !apply_env_prefix.is_empty() {
+        let prefix = if apply_env_prefix
+          .chars()
+          .last()
+          .map(|c| c.is_whitespace())
+          .unwrap_or(false)
+        {
+          apply_env_prefix.clone()
+        } else {
+          format!("{apply_env_prefix} ")
+        };
+        suggestion_command = format!("{}{}", prefix, suggestion_command);
+      }
+
+      scored.push(Suggestion {
+        command: suggestion_command,
+        score,
+        breakdown: ScoreBreakdown {
+          recency,
+          frequency,
+          transition: 0.0,
+          context: 0.0,
+          sequence: 0.0,
+          similarity,
+        },
+      });
+    }
+  }
+
+  if let Some(mut suggestions) = env_suggestions {
+    if !scored.is_empty() {
+      let weight: f64 = if apply_env_prefix.is_empty() { 0.8 } else { 1.0 };
+      if (weight - 1.0).abs() > f64::EPSILON {
+        for suggestion in suggestions.iter_mut() {
+          suggestion.score *= weight;
+          suggestion.breakdown.recency *= weight;
+          suggestion.breakdown.frequency *= weight;
+          suggestion.breakdown.context *= weight;
+          suggestion.breakdown.sequence *= weight;
+          suggestion.breakdown.similarity *= weight;
+        }
+      }
+    }
+    scored.extend(suggestions);
+  }
+
+  if let Some(mut suggestions) = arg_suggestions_for_merge {
+    scored.append(&mut suggestions);
+  }
+
   scored.sort_by(|a, b| {
     b.score
       .partial_cmp(&a.score)
@@ -637,10 +1021,6 @@ async fn completion_candidates(
 mod tests {
   use super::*;
   use crate::db::{init, open_db};
-  use crate::db::{insert_invocation, update_stats_for_invocation};
-  use crate::shell_history::Invocation;
-  use crate::tokenize::{Token, TokenKind, extract_command_parts, tokenize};
-  use serde::Deserialize;
 
   use super::aliases::{add_alias_candidates, alias_for_command};
   use super::candidates::{add_head_candidates, add_phase_candidates};
@@ -792,329 +1172,5 @@ mod tests {
       .unwrap();
 
     assert!(candidates.contains_key("git status"));
-  }
-
-  #[derive(Debug, Deserialize)]
-  struct CaseContext {
-    cwd: Option<String>,
-    hostname: Option<String>,
-    username: Option<String>,
-    session_id: Option<i64>,
-  }
-
-  #[derive(Debug, Deserialize)]
-  struct HistoryEntry {
-    cmd: String,
-    exit: Option<i64>,
-    ts: Option<i64>,
-    cwd: Option<String>,
-    hostname: Option<String>,
-    username: Option<String>,
-    session_id: Option<i64>,
-  }
-
-  #[derive(Debug, Deserialize)]
-  struct PredictCase {
-    name: String,
-    mode: String,
-    #[allow(dead_code)]
-    position: Option<String>,
-    #[allow(dead_code)]
-    prefix_kind: Option<String>,
-    prefix: Option<String>,
-    k: Option<usize>,
-    context: Option<CaseContext>,
-    history: Vec<HistoryEntry>,
-    expected_top: Option<Vec<String>>,
-    expected_contains: Option<Vec<String>>,
-    expected_absent: Option<Vec<String>>,
-  }
-
-  #[derive(Debug, Deserialize)]
-  struct PredictCases {
-    case: Vec<PredictCase>,
-  }
-
-  fn load_predict_cases() -> PredictCases {
-    let raw = include_str!("testdata/completion_cases.toml");
-    toml::from_str(raw).expect("valid completion_cases.toml")
-  }
-
-  async fn seed_history_entries(conn: &libsql::Connection, entries: &[HistoryEntry]) {
-    for (idx, entry) in entries.iter().enumerate() {
-      let ts = entry.ts.unwrap_or(1 + idx as i64);
-      let invocation = Invocation {
-        command: entry.cmd.clone(),
-        expanded_command: entry.cmd.clone(),
-        shellname: "zsh".to_string(),
-        working_directory: entry.cwd.clone().or_else(|| Some("/tmp".to_string())),
-        hostname: entry.hostname.clone().or_else(|| Some("host".to_string())),
-        username: entry.username.clone().or_else(|| Some("user".to_string())),
-        exit_status: entry.exit,
-        start_unix_timestamp: Some(ts),
-        end_unix_timestamp: Some(ts + 1),
-        session_id: entry.session_id.unwrap_or(1),
-      };
-      let inserted = insert_invocation(conn, &invocation).await.unwrap();
-      assert!(inserted);
-      update_stats_for_invocation(conn, &invocation)
-        .await
-        .unwrap();
-    }
-  }
-
-  fn apply_context(config: &mut SuggestConfig, context: Option<&CaseContext>) {
-    if let Some(ctx) = context {
-      if let Some(ref cwd) = ctx.cwd {
-        config.cwd = Some(cwd.clone());
-      }
-      if let Some(ref hostname) = ctx.hostname {
-        config.hostname = Some(hostname.clone());
-      }
-      if let Some(ref username) = ctx.username {
-        config.username = Some(username.clone());
-      }
-      if let Some(session_id) = ctx.session_id {
-        config.session_id = Some(session_id);
-      }
-    }
-  }
-
-  fn ends_with_space(value: &str) -> bool {
-    value
-      .chars()
-      .last()
-      .map(|c| c.is_whitespace())
-      .unwrap_or(false)
-  }
-
-  fn classify_prefix_kind(prefix: &str) -> &'static str {
-    if ends_with_space(prefix) {
-      "trailing_space"
-    } else {
-      "partial"
-    }
-  }
-
-  fn classify_env_position(prefix: &str, tokens: &[Token]) -> Option<&'static str> {
-    if tokens.is_empty() {
-      return None;
-    }
-    let env_count = leading_env_count(tokens);
-    let ends_with_space = ends_with_space(prefix);
-    let last_idx = tokens.len().saturating_sub(1);
-
-    if ends_with_space {
-      if env_count == 0 {
-        return None;
-      }
-      return Some("env_key");
-    }
-    if env_count == tokens.len() {
-      let last = tokens.last()?;
-      if let Some(eq_idx) = last.raw.find('=') {
-        if looks_like_env_lhs(&last.raw[..eq_idx]) {
-          return Some("env_value");
-        }
-        return None;
-      }
-      if looks_like_env_lhs(&last.raw) {
-        return Some("env_key");
-      }
-      return None;
-    }
-    if env_count == last_idx {
-      let last = tokens.last()?;
-      if looks_like_env_lhs(&last.raw) {
-        return Some("env_key");
-      }
-    }
-    None
-  }
-
-  fn classify_position(prefix: &str) -> String {
-    let tokens = tokenize(prefix);
-    if tokens.is_empty() {
-      return "head".to_string();
-    }
-    if let Some(env_position) = classify_env_position(prefix, &tokens) {
-      return env_position.to_string();
-    }
-
-    let parts = match extract_command_parts(prefix, &tokens) {
-      Some(parts) => parts,
-      None => return "head".to_string(),
-    };
-    let ends_with_space = ends_with_space(prefix);
-    let partial = if !ends_with_space {
-      tokens.last().and_then(|last| {
-        if matches!(
-          last.kind,
-          TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment
-        ) {
-          Some(last.raw.clone())
-        } else {
-          None
-        }
-      })
-    } else {
-      None
-    };
-
-    if let Some(ref partial) = partial {
-      if partial.starts_with('-') {
-        return "flag".to_string();
-      }
-    }
-
-    if partial.as_deref() == Some(parts.head.as_str())
-      && parts.args.is_empty()
-      && parts.flags.is_empty()
-    {
-      return "head".to_string();
-    }
-
-    let mut arg_index = parts.args.len();
-    if let Some(ref partial) = partial {
-      if !partial.starts_with('-') && arg_index > 0 {
-        arg_index -= 1;
-      }
-    }
-    format!("arg{}", arg_index + 1)
-  }
-
-  fn leading_env_count(tokens: &[Token]) -> usize {
-    let mut idx = 0usize;
-    while idx < tokens.len() {
-      let token = &tokens[idx];
-      if matches!(token.kind, TokenKind::Assignment) {
-        idx += 1;
-        continue;
-      }
-      if looks_like_env_lhs(&token.raw)
-        && let Some(next) = tokens.get(idx + 1)
-      {
-        if next.raw == "=" {
-          idx += if tokens.get(idx + 2).is_some() { 3 } else { 2 };
-          continue;
-        }
-        if next.raw.starts_with('=') {
-          idx += 2;
-          continue;
-        }
-      }
-      break;
-    }
-    idx
-  }
-
-  fn looks_like_env_lhs(raw: &str) -> bool {
-    if raw.is_empty() || raw.starts_with('-') {
-      return false;
-    }
-    let mut chars = raw.chars();
-    let first = match chars.next() {
-      Some(c) => c,
-      None => return false,
-    };
-    if !(first.is_ascii_alphabetic() || first == '_') {
-      return false;
-    }
-    chars.all(|c| c.is_ascii_alphanumeric() || c == '_')
-  }
-
-  #[tokio::test]
-  async fn predict_cases_from_toml() {
-    let cases = load_predict_cases();
-    assert!(!cases.case.is_empty(), "no predict cases loaded");
-
-    for case in cases.case {
-      let tmp = tempfile::NamedTempFile::new().unwrap();
-      let db = open_db(tmp.path()).await.unwrap();
-      init(&db.conn).await.unwrap();
-      seed_history_entries(&db.conn, &case.history).await;
-
-      let mut config = SuggestConfig {
-        max_results: case.k.unwrap_or(10),
-        recent_limit: 50,
-        prefix: case.prefix.clone(),
-        cwd: Some("/tmp".to_string()),
-        hostname: Some("host".to_string()),
-        username: Some("user".to_string()),
-        session_id: Some(1),
-        use_sequences: false,
-      };
-      apply_context(&mut config, case.context.as_ref());
-
-      if let Some(prefix) = case.prefix.as_ref() {
-        if let Some(prefix_kind) = case.prefix_kind.as_deref() {
-          let actual = classify_prefix_kind(prefix);
-          assert_eq!(
-            actual, prefix_kind,
-            "case {}: expected prefix_kind {}, got {}",
-            case.name, prefix_kind, actual
-          );
-        }
-        if let Some(position) = case.position.as_deref() {
-          let actual = classify_position(prefix);
-          assert_eq!(
-            actual, position,
-            "case {}: expected position {}, got {}",
-            case.name, position, actual
-          );
-        }
-      }
-
-      let suggestions = if case.mode == "next_command" {
-        suggest(&db.conn, config).await.unwrap()
-      } else {
-        let prefix = case.prefix.clone().unwrap_or_default();
-        let prefix_norm = normalized_tokens(&prefix);
-        let aliases = load_aliases();
-        completion_candidates(&db.conn, &config, &prefix, &prefix_norm, &aliases, None)
-          .await
-          .unwrap()
-      };
-      let items = suggestions
-        .into_iter()
-        .map(|s| s.command)
-        .collect::<Vec<_>>();
-
-      if let Some(expected_top) = case.expected_top.as_ref() {
-        let expected_len = expected_top.len();
-        let got = items.iter().take(expected_len).cloned().collect::<Vec<_>>();
-        assert_eq!(
-          got, *expected_top,
-          "case {}: expected top {:?}, got {:?}",
-          case.name, expected_top, got
-        );
-      }
-
-      if let Some(expected_contains) = case.expected_contains.as_ref() {
-        for expected in expected_contains {
-          assert!(
-            items.iter().any(|s| s == expected),
-            "case {}: expected suggestion {:?} in top-k, got {:?}",
-            case.name,
-            expected,
-            items
-          );
-        }
-      }
-
-      if let Some(expected_absent) = case.expected_absent.as_ref() {
-        for expected in expected_absent {
-          assert!(
-            !items
-              .iter()
-              .any(|s| s == expected || s.starts_with(expected)),
-            "case {}: unexpected suggestion {:?} in top-k, got {:?}",
-            case.name,
-            expected,
-            items
-          );
-        }
-      }
-    }
   }
 }

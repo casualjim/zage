@@ -1,0 +1,54 @@
+[meta]
+description = "Verify glob pattern handling"
+tags = ["structure", "edge", "glob"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "ls *.txt"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "rm -f temp?.log"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "find . -name '*.rs'"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 8
+
+[[scenario]]
+name = "star_glob"
+mode = "completion"
+input = "ls *"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["ls *.txt"]
+
+[[scenario]]
+name = "question_glob"
+mode = "completion"
+input = "rm -f temp?"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["rm -f temp?.log"]

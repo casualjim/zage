@@ -1,0 +1,38 @@
+[meta]
+description = "Verify no ghost candidates are suggested"
+tags = ["anti-hallucination", "ghost"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "git commit -m 'fix'"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[scenario]]
+name = "contradictory_flag"
+mode = "completion"
+input = "git commit -a"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+absent = ["git commit -m"]
+
+[[scenario]]
+name = "partial_contradictory"
+mode = "completion"
+input = "git commit --am"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+empty = true

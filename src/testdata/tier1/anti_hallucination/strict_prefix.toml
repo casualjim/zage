@@ -1,0 +1,47 @@
+[meta]
+description = "Verify strict prefix matching"
+tags = ["anti-hallucination", "prefix"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "cargo build"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "cargo test"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[scenario]]
+name = "prefix_match"
+mode = "completion"
+input = "cargo b"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["cargo build"]
+absent = ["cargo test"]
+
+[[scenario]]
+name = "prefix_no_match"
+mode = "completion"
+input = "cargo x"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+empty = true

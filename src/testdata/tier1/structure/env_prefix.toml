@@ -1,0 +1,48 @@
+[meta]
+description = "Verify environment variable prefix handling"
+tags = ["structure", "env"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "RUST_LOG=debug cargo test"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "cargo test"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[scenario]]
+name = "env_prefix_completion"
+mode = "completion"
+input = "RUST_LOG=debug "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+top = ["RUST_LOG=debug cargo test"]
+absent = ["cargo test"]
+
+[[scenario]]
+name = "no_env_prefix"
+mode = "completion"
+input = "cargo "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["cargo test"]
+absent = ["RUST_LOG="]

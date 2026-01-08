@@ -1,0 +1,45 @@
+[meta]
+description = "Verify argument template suggestions"
+tags = ["templates", "args"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[fs]
+"myrepo/.git/" = "dir"
+
+[[history]]
+cmd = "git checkout main"
+at = "-1h"
+cwd = "myrepo"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "git checkout develop"
+at = "-1h"
+cwd = "myrepo"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "git checkout feature-x"
+at = "-30m"
+cwd = "myrepo"
+exit = 0
+session = "s1"
+count = 3
+
+[[scenario]]
+name = "branch_template"
+mode = "completion"
+input = "git checkout "
+
+[scenario.context]
+cwd = "myrepo"
+session = "s1"
+
+[scenario.expect]
+contains = ["git checkout main", "git checkout develop", "git checkout feature-x"]

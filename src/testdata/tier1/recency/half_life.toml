@@ -1,0 +1,33 @@
+[meta]
+description = "Verify half-life produces expected decay"
+tags = ["recency", "physics"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 1.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+recency_half_life_seconds = 86400
+
+[[history]]
+cmd = "at_half_life"
+at = "-1d"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "half_life_check"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[[scenario.expect.candidate]]
+cmd = "at_half_life"
+min_recency = 0.36
+max_recency = 0.38

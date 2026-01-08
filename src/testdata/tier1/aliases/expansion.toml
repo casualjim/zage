@@ -1,0 +1,51 @@
+[meta]
+description = "Verify alias expansion and matching"
+tags = ["aliases"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[aliases]
+gst = "git status"
+gd = "git diff"
+gco = "git checkout"
+
+[[history]]
+cmd = "git status"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "git diff"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "alias_completion"
+mode = "completion"
+input = "gst"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["gst"]
+
+[[scenario]]
+name = "alias_prefix"
+mode = "completion"
+input = "gs"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["gst"]

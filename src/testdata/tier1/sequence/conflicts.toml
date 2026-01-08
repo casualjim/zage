@@ -1,0 +1,104 @@
+[meta]
+description = "Verify conflicting sequence resolution"
+tags = ["sequence", "edge", "conflict"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 1.0
+w_similarity = 0.0
+
+[options]
+use_sequences = true
+run_sequence_analysis = true
+min_sequence_support = 2
+
+# Pattern 1: git add → git commit (3 times)
+[[history]]
+cmd = "git add"
+at = "-30m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git commit"
+at = "-29m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git add"
+at = "-28m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git commit"
+at = "-27m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git add"
+at = "-26m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git commit"
+at = "-25m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+# Pattern 2: git add → git status (2 times)
+[[history]]
+cmd = "git add"
+at = "-20m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git status"
+at = "-19m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git add"
+at = "-18m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git status"
+at = "-17m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "conflicting_sequences"
+mode = "next_command"
+prev_command = "git add"
+prev_exit = 0
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# git commit should win with higher support
+top = ["git commit"]
+contains = ["git status"]

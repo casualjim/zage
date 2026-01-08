@@ -15,7 +15,9 @@ use serde_json;
 use tracing::warn;
 
 use crate::hash_util::stable_hash;
-use crate::predict::ranking::{recency_score, token_similarity};
+use crate::predict::ranking::{
+  recency_score, token_similarity, DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+};
 use crate::predict::{Candidate, Suggestion};
 use crate::repo::{find_repo_root, read_git_branch};
 use crate::rerank_config::RerankConfig;
@@ -239,8 +241,10 @@ pub async fn train_model(conn: &Connection, config: TrainConfig) -> Result<Train
   let mut labels: Vec<f64> = Vec::new();
   let mut pairs = 0usize;
 
+  let history_window = config.min_history.max(1);
+
   for invocation in train_set {
-    if recent.len() < 6 {
+    if recent.len() < history_window {
       update_training_stats(&mut stats, invocation, None, None);
       recent.push_back(invocation.clone());
       continue;
@@ -551,7 +555,11 @@ fn build_feature_vector(
     .map(|s| s.freq)
     .unwrap_or(0);
 
-  let recency = recency_score(context.now, last_seen);
+  let recency = recency_score(
+    context.now,
+    last_seen,
+    DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+  );
   let frequency = (freq as f64).ln_1p() + 0.5 * (repo_freq as f64).ln_1p();
   let transition = (transition_freq as f64).ln_1p();
   let context_score = (context_freq as f64).ln_1p() + 0.8 * (session_freq as f64).ln_1p();
@@ -699,7 +707,13 @@ fn tier1_score_from_stats(command: &str, context: &ContextWindow, stats: &Traini
   let recency = stats
     .command_stats
     .get(command)
-    .map(|stat| recency_score(context.now, stat.last_seen))
+    .map(|stat| {
+      recency_score(
+        context.now,
+        stat.last_seen,
+        DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+      )
+    })
     .unwrap_or(0.0);
   let frequency = stats
     .command_stats

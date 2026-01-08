@@ -1,0 +1,58 @@
+[meta]
+description = "Verify recency decay follows exponential curve"
+tags = ["recency", "physics"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 1.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "recent_cmd"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "day_old_cmd"
+at = "-1d"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "week_old_cmd"
+at = "-1w"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "recency_ordering"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+top = ["recent_cmd", "day_old_cmd", "week_old_cmd"]
+
+[[scenario.expect.candidate]]
+cmd = "recent_cmd"
+min_recency = 0.99
+
+[[scenario.expect.candidate]]
+cmd = "day_old_cmd"
+min_recency = 0.86
+max_recency = 0.88
+
+[[scenario.expect.candidate]]
+cmd = "week_old_cmd"
+min_recency = 0.36
+max_recency = 0.38

@@ -1,0 +1,45 @@
+[meta]
+description = "Verify non-git directories don't get repo context"
+tags = ["context", "repo", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 1.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[fs]
+"project_with_git/.git/" = "dir"
+"project_no_git/" = "dir"  # No .git
+
+[[history]]
+cmd = "git_project_cmd"
+at = "-1h"
+cwd = "project_with_git"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "no_git_cmd"
+at = "-1h"
+cwd = "project_no_git"
+exit = 0
+session = "s1"
+count = 10
+
+[[scenario]]
+name = "no_git_marker"
+mode = "next_command"
+
+[scenario.context]
+cwd = "project_no_git"
+session = "s1"
+
+[scenario.expect]
+# Both should appear since frequency is isolated
+# but git_project_cmd shouldn't get repo_freq boost
+contains = ["no_git_cmd", "git_project_cmd"]

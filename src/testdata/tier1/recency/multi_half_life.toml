@@ -1,0 +1,44 @@
+[meta]
+description = "Verify decay over multiple half-lives"
+tags = ["recency", "physics", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 1.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "two_half_lives"
+at = "-14d"  # 2 weeks = 2 half-lives
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "three_half_lives"
+at = "-21d"  # 3 weeks = 3 half-lives
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "multi_half_life_decay"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[[scenario.expect.candidate]]
+cmd = "two_half_lives"
+min_recency = 0.13  # exp(-2) ≈ 0.135
+max_recency = 0.14
+
+[[scenario.expect.candidate]]
+cmd = "three_half_lives"
+min_recency = 0.04  # exp(-3) ≈ 0.050
+max_recency = 0.06

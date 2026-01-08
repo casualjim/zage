@@ -1,5 +1,4 @@
 use std::collections::{HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use libsql::{Connection, Value};
 use serde_json;
@@ -44,6 +43,8 @@ pub(crate) async fn arg_template_candidates(
   prefix: &str,
   repo_root: &str,
   token_priors: &HashMap<String, f64>,
+  now: i64,
+  recency_half_life: f64,
 ) -> Result<Option<Vec<Suggestion>>> {
   let ctx = match analyze_prefix(prefix, repo_root) {
     Some(ctx) => ctx,
@@ -51,7 +52,7 @@ pub(crate) async fn arg_template_candidates(
   };
 
   if ctx.partial_is_flag {
-    return flag_candidates(conn, &ctx, token_priors).await;
+    return flag_candidates(conn, &ctx, token_priors, now, recency_half_life).await;
   }
 
   let like = ctx
@@ -68,9 +69,10 @@ pub(crate) async fn arg_template_candidates(
     token_priors,
   };
 
-  let repo_positional = fetch_arg_candidates(conn, &repo_query, ctx.arg_index, &like).await?;
+  let repo_positional =
+    fetch_arg_candidates(conn, &repo_query, ctx.arg_index, &like, now, recency_half_life).await?;
 
-  let repo_any = fetch_arg_candidates_any(conn, &repo_query, &like).await?;
+  let repo_any = fetch_arg_candidates_any(conn, &repo_query, &like, now, recency_half_life).await?;
 
   let mut global_positional = Vec::new();
   let mut global_any = Vec::new();
@@ -83,9 +85,12 @@ pub(crate) async fn arg_template_candidates(
       token_priors,
     };
 
-    global_positional = fetch_arg_candidates(conn, &global_query, ctx.arg_index, &like).await?;
+    global_positional =
+      fetch_arg_candidates(conn, &global_query, ctx.arg_index, &like, now, recency_half_life)
+        .await?;
 
-    global_any = fetch_arg_candidates_any(conn, &global_query, &like).await?;
+    global_any =
+      fetch_arg_candidates_any(conn, &global_query, &like, now, recency_half_life).await?;
   }
 
   let has_positional = !(repo_positional.is_empty() && global_positional.is_empty());
@@ -125,6 +130,8 @@ pub(crate) async fn env_template_candidates(
   prefix: &str,
   repo_root: &str,
   token_priors: &HashMap<String, f64>,
+  now: i64,
+  recency_half_life: f64,
 ) -> Result<Option<Vec<Suggestion>>> {
   let ctx = match analyze_env_prefix(prefix, repo_root) {
     Some(ctx) => ctx,
@@ -138,17 +145,26 @@ pub(crate) async fn env_template_candidates(
     .unwrap_or_else(|| "%".to_string());
 
   let repo_env = if ctx.match_on_key {
-    fetch_env_key_candidates(conn, &ctx.repo_root, &like, &ctx.base).await?
+    fetch_env_key_candidates(conn, &ctx.repo_root, &like, &ctx.base, now, recency_half_life).await?
   } else {
-    fetch_env_candidates(conn, &ctx.repo_root, &like, &ctx.base, token_priors).await?
+    fetch_env_candidates(
+      conn,
+      &ctx.repo_root,
+      &like,
+      &ctx.base,
+      token_priors,
+      now,
+      recency_half_life,
+    )
+    .await?
   };
 
   let mut global_env = Vec::new();
   if !ctx.repo_root.is_empty() {
     global_env = if ctx.match_on_key {
-      fetch_env_key_candidates(conn, "", &like, &ctx.base).await?
+      fetch_env_key_candidates(conn, "", &like, &ctx.base, now, recency_half_life).await?
     } else {
-      fetch_env_candidates(conn, "", &like, &ctx.base, token_priors).await?
+      fetch_env_candidates(conn, "", &like, &ctx.base, token_priors, now, recency_half_life).await?
     };
   }
 
@@ -173,6 +189,8 @@ async fn flag_candidates(
   conn: &Connection,
   ctx: &PrefixContext,
   token_priors: &HashMap<String, f64>,
+  now: i64,
+  recency_half_life: f64,
 ) -> Result<Option<Vec<Suggestion>>> {
   let like = ctx
     .partial
@@ -182,7 +200,7 @@ async fn flag_candidates(
 
   let exclude: HashSet<String> = ctx.flags.iter().cloned().collect();
 
-  let repo_flags = fetch_flag_candidates(
+  let mut repo_flags = fetch_flag_candidates(
     conn,
     &ctx.repo_root,
     &ctx.head,
@@ -190,6 +208,8 @@ async fn flag_candidates(
     &ctx.base,
     token_priors,
     &exclude,
+    now,
+    recency_half_life,
   )
   .await?;
 
@@ -203,8 +223,22 @@ async fn flag_candidates(
       &ctx.base,
       token_priors,
       &exclude,
+      now,
+      recency_half_life,
     )
     .await?;
+  }
+
+  if matches!(ctx.partial.as_deref(), Some("-")) {
+    let is_long_flag = |command: &str| {
+      command
+        .split_whitespace()
+        .last()
+        .map(|flag| flag.starts_with("--"))
+        .unwrap_or(false)
+    };
+    repo_flags.retain(|suggestion| !is_long_flag(&suggestion.command));
+    global_flags.retain(|suggestion| !is_long_flag(&suggestion.command));
   }
 
   if repo_flags.is_empty() && global_flags.is_empty() {
@@ -229,6 +263,8 @@ async fn fetch_arg_candidates(
   query: &ArgCandidateQuery<'_>,
   arg_index: i64,
   like: &str,
+  now: i64,
+  recency_half_life: f64,
 ) -> Result<Vec<Suggestion>> {
   let mut rows = query_prepared(
     conn,
@@ -241,11 +277,6 @@ async fn fetch_arg_candidates(
   )
   .await?;
 
-  let now = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs() as i64;
-
   let mut results = Vec::new();
   while let Some(row) = rows.next().await? {
     let arg_raw = row.get::<String>(0)?;
@@ -253,7 +284,7 @@ async fn fetch_arg_candidates(
     let freq = row.get::<i64>(2)?;
     let last_seen = row.get::<i64>(3)?;
 
-    let recency = recency_score(now, last_seen);
+    let recency = recency_score(now, last_seen, recency_half_life);
     let frequency = (freq as f64).ln_1p();
     let token_prior = query.token_priors.get(&arg_norm).copied().unwrap_or(0.0);
     let context = if query.repo_root.is_empty() { 0.0 } else { 1.0 };
@@ -292,6 +323,8 @@ async fn fetch_arg_candidates_any(
   conn: &Connection,
   query: &ArgCandidateQuery<'_>,
   like: &str,
+  now: i64,
+  recency_half_life: f64,
 ) -> Result<Vec<Suggestion>> {
   let mut rows = query_prepared(
     conn,
@@ -304,11 +337,6 @@ async fn fetch_arg_candidates_any(
   )
   .await?;
 
-  let now = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs() as i64;
-
   let mut results = Vec::new();
   while let Some(row) = rows.next().await? {
     let arg_raw = row.get::<String>(0)?;
@@ -316,7 +344,7 @@ async fn fetch_arg_candidates_any(
     let freq = row.get::<i64>(2)?;
     let last_seen = row.get::<i64>(3)?;
 
-    let recency = recency_score(now, last_seen);
+    let recency = recency_score(now, last_seen, recency_half_life);
     let frequency = (freq as f64).ln_1p();
     let token_prior = query.token_priors.get(&arg_norm).copied().unwrap_or(0.0);
     let context = if query.repo_root.is_empty() { 0.0 } else { 1.0 };
@@ -357,6 +385,8 @@ async fn fetch_env_candidates(
   like: &str,
   base_prefix: &str,
   token_priors: &HashMap<String, f64>,
+  now: i64,
+  recency_half_life: f64,
 ) -> Result<Vec<Suggestion>> {
   let (sql, params): (&str, Vec<Value>) = if repo_root.is_empty() {
     (
@@ -382,10 +412,6 @@ async fn fetch_env_candidates(
   };
 
   let mut rows = query_prepared(conn, sql, libsql::params_from_iter(params)).await?;
-  let now = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs() as i64;
 
   let mut results = Vec::new();
   while let Some(row) = rows.next().await? {
@@ -394,7 +420,7 @@ async fn fetch_env_candidates(
     let freq = row.get::<i64>(2)?;
     let last_seen = row.get::<i64>(3)?;
 
-    let recency = recency_score(now, last_seen);
+    let recency = recency_score(now, last_seen, recency_half_life);
     let frequency = (freq as f64).ln_1p();
     let token_prior = token_priors.get(&env_norm).copied().unwrap_or(0.0);
     let context = if repo_root.is_empty() { 0.0 } else { 1.0 };
@@ -434,6 +460,8 @@ async fn fetch_env_key_candidates(
   repo_root: &str,
   like: &str,
   base_prefix: &str,
+  now: i64,
+  recency_half_life: f64,
 ) -> Result<Vec<Suggestion>> {
   let (sql, params): (&str, Vec<Value>) = if repo_root.is_empty() {
     (
@@ -461,10 +489,6 @@ async fn fetch_env_key_candidates(
   };
 
   let mut rows = query_prepared(conn, sql, libsql::params_from_iter(params)).await?;
-  let now = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs() as i64;
 
   let mut results = Vec::new();
   while let Some(row) = rows.next().await? {
@@ -472,7 +496,7 @@ async fn fetch_env_key_candidates(
     let freq = row.get::<i64>(1)?;
     let last_seen = row.get::<i64>(2)?;
 
-    let recency = recency_score(now, last_seen);
+    let recency = recency_score(now, last_seen, recency_half_life);
     let frequency = (freq as f64).ln_1p();
     let context = if repo_root.is_empty() { 0.0 } else { 1.0 };
     let score = 0.55 * recency + 0.35 * frequency + 0.1 * context;
@@ -514,6 +538,8 @@ async fn fetch_flag_candidates(
   base_prefix: &str,
   token_priors: &HashMap<String, f64>,
   exclude: &HashSet<String>,
+  now: i64,
+  recency_half_life: f64,
 ) -> Result<Vec<Suggestion>> {
   let mut rows = query_prepared(
     conn,
@@ -526,11 +552,6 @@ async fn fetch_flag_candidates(
   )
   .await?;
 
-  let now = SystemTime::now()
-    .duration_since(UNIX_EPOCH)
-    .unwrap_or_default()
-    .as_secs() as i64;
-
   let mut results = Vec::new();
   while let Some(row) = rows.next().await? {
     let flag_raw = row.get::<String>(0)?;
@@ -541,7 +562,7 @@ async fn fetch_flag_candidates(
     let freq = row.get::<i64>(2)?;
     let last_seen = row.get::<i64>(3)?;
 
-    let recency = recency_score(now, last_seen);
+    let recency = recency_score(now, last_seen, recency_half_life);
     let frequency = (freq as f64).ln_1p();
     let token_prior = token_priors.get(&flag_norm).copied().unwrap_or(0.0);
     let context = if repo_root.is_empty() { 0.0 } else { 1.0 };
@@ -628,6 +649,7 @@ fn analyze_prefix(prefix: &str, repo_root: &str) -> Option<PrefixContext> {
     prefix.to_string()
   };
 
+  base = base.trim_end().to_string();
   if !base.is_empty()
     && !base
       .chars()
@@ -884,7 +906,14 @@ mod tests {
       .unwrap();
 
     let token_priors = HashMap::new();
-    let suggestions = arg_template_candidates(&db.conn, "git ", "", &token_priors)
+    let suggestions = arg_template_candidates(
+      &db.conn,
+      "git ",
+      "",
+      &token_priors,
+      1_000,
+      crate::predict::ranking::DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+    )
       .await
       .unwrap()
       .unwrap();
@@ -910,7 +939,14 @@ mod tests {
       .unwrap();
 
     let token_priors = HashMap::new();
-    let suggestions = arg_template_candidates(&db.conn, "git ", "", &token_priors)
+    let suggestions = arg_template_candidates(
+      &db.conn,
+      "git ",
+      "",
+      &token_priors,
+      1_000,
+      crate::predict::ranking::DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+    )
       .await
       .unwrap()
       .unwrap();

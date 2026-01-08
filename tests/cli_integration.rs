@@ -37,12 +37,14 @@ fn test_import() -> Result<()> {
   fs::create_dir_all(&db_dir).unwrap();
   let db_file = db_dir.join("zage.db");
   let hist_file = temp_dir.path().join(".zsh_history");
+  let socket_path = temp_dir.path().join("zage.sock");
   write_zsh_history(&hist_file);
 
   // Import history
   let mut import_cmd = Command::new(assert_cmd::cargo::cargo_bin!("zage"));
   import_cmd
     .env("RUST_LOG", "info")
+    .env("ZAGE_SOCKET_PATH", &socket_path)
     .arg("--db-path")
     .arg(db_file.to_str().unwrap())
     .arg("import")
@@ -59,7 +61,8 @@ fn test_import() -> Result<()> {
 
 #[test]
 fn test_record_command() -> Result<()> {
-  let (_temp_dir, db_path, _) = setup_test_environment()?;
+  let (temp_dir, db_path, _) = setup_test_environment()?;
+  let socket_path = temp_dir.path().join("zage.sock");
   let mut cmd = Command::new(assert_cmd::cargo::cargo_bin!("zage"));
 
   let cmd_str = "echo 'hello zage'";
@@ -72,6 +75,7 @@ fn test_record_command() -> Result<()> {
   // Run the record command
   let output = cmd
     .env("RUST_LOG", "info")
+    .env("ZAGE_SOCKET_PATH", &socket_path)
     .arg("--db-path")
     .arg(&db_path)
     .arg("record")

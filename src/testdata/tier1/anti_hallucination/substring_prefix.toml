@@ -1,0 +1,35 @@
+[meta]
+description = "Verify only prefix matching, not substring"
+tags = ["anti-hallucination", "edge", "substring"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "git status"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "fugitive git"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "prefix_not_substring"
+mode = "completion"
+input = "git"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["git status"]
+absent = ["fugitive git"]  # "git" is substring, not prefix

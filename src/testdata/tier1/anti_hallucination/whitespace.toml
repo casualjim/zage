@@ -1,0 +1,39 @@
+[meta]
+description = "Verify whitespace handling in prefix"
+tags = ["anti-hallucination", "edge", "whitespace"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "git status"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[scenario]]
+name = "leading_space"
+mode = "completion"
+input = " git"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# Leading space means no command starts with " git"
+empty = true
+
+[[scenario]]
+name = "trailing_spaces"
+mode = "completion"
+input = "git   "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["git status"]

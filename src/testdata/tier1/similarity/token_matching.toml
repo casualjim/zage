@@ -1,0 +1,46 @@
+[meta]
+description = "Verify token similarity scoring"
+tags = ["similarity", "tokens"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 1.0
+
+[[history]]
+cmd = "cargo build --release"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "cargo test --release"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "npm run build"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "similarity_cargo_release"
+mode = "completion"
+input = "cargo --release"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["cargo build --release", "cargo test --release"]
+absent = ["npm run build"]

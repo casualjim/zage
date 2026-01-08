@@ -1,0 +1,109 @@
+[meta]
+description = "Verify long transition chains"
+tags = ["transition", "edge", "chain"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 1.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+# Establish a chain: make → test → deploy → notify
+[[history]]
+cmd = "make"
+at = "-10m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "test"
+at = "-9m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "deploy"
+at = "-8m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "notify"
+at = "-7m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+# Repeat the chain
+[[history]]
+cmd = "make"
+at = "-6m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "test"
+at = "-5m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "deploy"
+at = "-4m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "notify"
+at = "-3m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "chain_step_1"
+mode = "next_command"
+prev_command = "make"
+prev_exit = 0
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+top = ["test"]
+
+[[scenario]]
+name = "chain_step_2"
+mode = "next_command"
+prev_command = "test"
+prev_exit = 0
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+top = ["deploy"]
+
+[[scenario]]
+name = "chain_step_3"
+mode = "next_command"
+prev_command = "deploy"
+prev_exit = 0
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+top = ["notify"]

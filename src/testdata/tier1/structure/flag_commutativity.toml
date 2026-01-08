@@ -1,0 +1,38 @@
+[meta]
+description = "Verify flags are order-independent"
+tags = ["structure", "flags"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "ls -a -l -h"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "flag_order_la"
+mode = "completion"
+input = "ls -l -a"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["ls -a -l -h"]
+
+[[scenario]]
+name = "flag_order_al"
+mode = "completion"
+input = "ls -a -l"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["ls -a -l -h"]

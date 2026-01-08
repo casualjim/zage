@@ -1,0 +1,37 @@
+[meta]
+description = "Verify alias with suffix arguments"
+tags = ["aliases"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[aliases]
+gco = "git checkout"
+
+[[history]]
+cmd = "git checkout main"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "git checkout feature-branch"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "alias_with_arg"
+mode = "completion"
+input = "gco "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["gco main", "gco feature-branch"]

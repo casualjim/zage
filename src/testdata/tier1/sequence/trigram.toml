@@ -1,0 +1,72 @@
+[meta]
+description = "Verify trigram sequence mining"
+tags = ["sequence", "trigram"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 1.0
+w_similarity = 0.0
+
+[options]
+use_sequences = true
+run_sequence_analysis = true
+min_sequence_support = 2
+
+[[history]]
+cmd = "git add ."
+at = "-30m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git commit -m 'a'"
+at = "-29m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git push"
+at = "-28m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git add ."
+at = "-20m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git commit -m 'b'"
+at = "-19m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git push"
+at = "-18m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "trigram_predicts_push"
+mode = "next_command"
+prev_command = "git commit -m 'c'"
+prev_exit = 0
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+top = ["git push"]

@@ -1,0 +1,53 @@
+[meta]
+description = "Verify phase detection from command history"
+tags = ["phase"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 1.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[options]
+run_phase_indexing = true
+
+[phases]
+build = ["cargo build", "make", "npm run build"]
+test = ["cargo test", "pytest", "npm test"]
+deploy = ["kubectl apply", "docker push"]
+
+[[history]]
+cmd = "cargo build"
+at = "-10m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "cargo build --release"
+at = "-9m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "cargo test"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 20
+
+[[scenario]]
+name = "build_phase_boost"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+top = ["cargo build", "cargo build --release"]

@@ -1,0 +1,46 @@
+[meta]
+description = "Verify pipe and multi-command handling"
+tags = ["structure", "pipes"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "ls -la | grep foo"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "cat file.txt | wc -l"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 3
+
+[[scenario]]
+name = "pipe_completion"
+mode = "completion"
+input = "ls -la | "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["ls -la | grep foo"]
+
+[[scenario]]
+name = "pipe_grep"
+mode = "completion"
+input = "ls -la | grep "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["ls -la | grep foo"]

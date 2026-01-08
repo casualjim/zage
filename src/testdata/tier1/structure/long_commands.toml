@@ -1,0 +1,26 @@
+[meta]
+description = "Verify handling of very long commands"
+tags = ["structure", "edge", "long"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "kubectl exec -it pod-name-very-long-identifier-12345 --namespace production-environment -- /bin/bash -c 'cat /var/log/application.log | grep ERROR | tail -n 100'"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "long_command_completion"
+mode = "completion"
+input = "kubectl exec -it pod"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+min_results = 1

@@ -1,0 +1,38 @@
+[meta]
+description = "Verify default weights produce balanced ranking"
+tags = ["integration", "weights"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[fs]
+"project/.git/" = "dir"
+
+[[history]]
+cmd = "balanced_winner"
+at = "-30m"
+cwd = "project"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "recency_only"
+at = "-5m"
+cwd = "/other"
+exit = 0
+session = "s2"
+count = 1
+
+[[scenario]]
+name = "default_weights_balance"
+mode = "next_command"
+
+[scenario.context]
+cwd = "project"
+session = "s1"
+
+[scenario.expect]
+# Balanced winner has better context + frequency, should beat pure recency
+top = ["balanced_winner"]
+contains = ["recency_only"]

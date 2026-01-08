@@ -9,13 +9,14 @@ use crate::tokenize::token_strings;
 use super::sql::query_prepared;
 use crate::rerank_config::RerankConfig;
 
-pub(crate) fn recency_score(now: i64, last_seen: i64) -> f64 {
+pub(crate) const DEFAULT_RECENCY_HALF_LIFE_SECONDS: f64 = 60.0 * 60.0 * 24.0 * 7.0;
+
+pub(crate) fn recency_score(now: i64, last_seen: i64, half_life_seconds: f64) -> f64 {
   if last_seen <= 0 || now <= last_seen {
     return 0.0;
   }
-  let half_life = 60.0 * 60.0 * 24.0 * 7.0;
   let age = (now - last_seen) as f64;
-  (-age / half_life).exp()
+  (-age / half_life_seconds).exp()
 }
 
 pub(crate) fn token_similarity(a: &[String], b: &[String]) -> f64 {

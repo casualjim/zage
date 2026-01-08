@@ -1,0 +1,46 @@
+[meta]
+description = "Verify command substitution tokenization"
+tags = ["structure", "edge", "substitution"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "echo $(date +%Y-%m-%d)"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "echo `hostname`"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 3
+
+[[scenario]]
+name = "dollar_paren_substitution"
+mode = "completion"
+input = "echo $("
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["echo $(date +%Y-%m-%d)"]
+
+[[scenario]]
+name = "backtick_substitution"
+mode = "completion"
+input = "echo `"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["echo `hostname`"]

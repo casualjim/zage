@@ -1,0 +1,44 @@
+[meta]
+description = "Verify repo-specific frequency boost"
+tags = ["frequency", "repo"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 1.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[fs]
+"repo_a/.git/" = "dir"
+"repo_b/.git/" = "dir"
+
+[[history]]
+cmd = "make build"
+at = "-1h"
+cwd = "repo_a"
+exit = 0
+session = "s1"
+count = 20
+
+[[history]]
+cmd = "mvn build"
+at = "-1h"
+cwd = "repo_b"
+exit = 0
+session = "s1"
+count = 20
+
+[[scenario]]
+name = "repo_frequency_isolation"
+mode = "next_command"
+
+[scenario.context]
+cwd = "repo_a"
+session = "s1"
+
+[scenario.expect]
+top = ["make build"]
+absent = ["mvn build"]

@@ -1,0 +1,27 @@
+[meta]
+description = "Verify completion with empty prefix"
+tags = ["integration", "edge", "empty"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "git status"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[scenario]]
+name = "empty_prefix_completion"
+mode = "completion"
+input = ""
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# Empty prefix should behave like next_command mode
+min_results = 1

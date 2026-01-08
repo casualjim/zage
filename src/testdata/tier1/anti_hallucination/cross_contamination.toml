@@ -1,0 +1,56 @@
+[meta]
+description = "Verify context isolation prevents cross-contamination"
+tags = ["anti-hallucination", "context"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 1.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[fs]
+"work/.git/" = "dir"
+"personal/.git/" = "dir"
+
+[[history]]
+cmd = "kubectl apply -f deployment.yaml"
+at = "-1h"
+cwd = "work"
+exit = 0
+session = "work_session"
+count = 20
+
+[[history]]
+cmd = "brew install neovim"
+at = "-1h"
+cwd = "personal"
+exit = 0
+session = "personal_session"
+count = 20
+
+[[scenario]]
+name = "work_context_no_personal"
+mode = "next_command"
+
+[scenario.context]
+cwd = "work"
+session = "work_session"
+
+[scenario.expect]
+contains = ["kubectl apply -f deployment.yaml"]
+absent = ["brew install neovim"]
+
+[[scenario]]
+name = "personal_context_no_work"
+mode = "next_command"
+
+[scenario.context]
+cwd = "personal"
+session = "personal_session"
+
+[scenario.expect]
+contains = ["brew install neovim"]
+absent = ["kubectl apply -f deployment.yaml"]

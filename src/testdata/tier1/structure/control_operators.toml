@@ -1,0 +1,74 @@
+[meta]
+description = "Verify control operator handling"
+tags = ["structure", "edge", "operators"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "sleep 100 &"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 3
+
+[[history]]
+cmd = "make build && make test"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "make build || echo 'build failed'"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "cd /tmp; ls -la"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 4
+
+[[scenario]]
+name = "and_chain"
+mode = "completion"
+input = "make build &&"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["make build && make test"]
+
+[[scenario]]
+name = "or_chain"
+mode = "completion"
+input = "make build ||"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["make build || echo 'build failed'"]
+
+[[scenario]]
+name = "semicolon_chain"
+mode = "completion"
+input = "cd /tmp;"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["cd /tmp; ls -la"]

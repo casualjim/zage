@@ -1,0 +1,46 @@
+[meta]
+description = "Verify quoted arguments are handled correctly"
+tags = ["structure", "quotes", "tokens"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "git commit -m \"fix: resolve bug\""
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "git commit -m 'add feature'"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 3
+
+[[scenario]]
+name = "quoted_double"
+mode = "completion"
+input = "git commit -m \""
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["git commit -m \"fix: resolve bug\""]
+
+[[scenario]]
+name = "quoted_single"
+mode = "completion"
+input = "git commit -m '"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["git commit -m 'add feature'"]

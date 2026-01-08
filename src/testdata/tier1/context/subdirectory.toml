@@ -1,0 +1,40 @@
+[meta]
+description = "Verify subdirectory inherits repo context"
+tags = ["context", "cwd", "repo"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 1.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[fs]
+"myproject/.git/" = "dir"
+"myproject/src/" = "dir"
+"myproject/src/lib/" = "dir"
+
+[[history]]
+cmd = "cargo build"
+at = "-1h"
+cwd = "myproject"
+exit = 0
+session = "s1"
+count = 10
+
+[[scenario]]
+name = "subdir_inherits_repo_context"
+mode = "next_command"
+
+[scenario.context]
+cwd = "myproject/src/lib"
+session = "s1"
+
+[scenario.expect]
+contains = ["cargo build"]
+
+[[scenario.expect.candidate]]
+cmd = "cargo build"
+min_context = 0.5

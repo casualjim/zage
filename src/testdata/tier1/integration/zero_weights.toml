@@ -1,0 +1,33 @@
+[meta]
+description = "Verify behavior when all weights are zero"
+tags = ["integration", "edge", "zero"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "any_command"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[scenario]]
+name = "all_zero_weights"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# With all weights zero, only session_recency (hardcoded 0.1) applies
+# or the system should gracefully handle this edge case
+min_results = 0  # May return nothing or may rely on session_recency

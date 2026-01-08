@@ -1,0 +1,74 @@
+[meta]
+description = "Verify full stack integration with all features"
+tags = ["integration", "full"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[fs]
+"myproject/.git/" = "dir"
+"myproject/src/" = "dir"
+
+[aliases]
+gst = "git status"
+
+[options]
+use_sequences = true
+run_sequence_analysis = true
+min_sequence_support = 2
+
+[[history]]
+cmd = "git status"
+at = "-10m"
+cwd = "myproject"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git add ."
+at = "-9m"
+cwd = "myproject"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git commit -m 'fix'"
+at = "-8m"
+cwd = "myproject"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git status"
+at = "-7m"
+cwd = "myproject"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git add ."
+at = "-6m"
+cwd = "myproject"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git commit -m 'update'"
+at = "-5m"
+cwd = "myproject"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "full_stack_after_add"
+mode = "next_command"
+prev_command = "git add ."
+prev_exit = 0
+
+[scenario.context]
+cwd = "myproject/src"
+session = "s1"
+
+[scenario.expect]
+# git commit should be top due to transition + sequence + context
+contains = ["git commit -m 'fix'", "git commit -m 'update'"]

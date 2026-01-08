@@ -1,0 +1,59 @@
+[meta]
+description = "Verify sequences are ignored when disabled"
+tags = ["sequence", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 1.0
+w_similarity = 0.0
+
+[options]
+use_sequences = false
+run_sequence_analysis = true
+min_sequence_support = 2
+min_sequence_confidence = 0.5
+min_sequence_lift = 1.0
+
+[[history]]
+cmd = "git pull"
+at = "-20m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "cargo build"
+at = "-19m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git pull"
+at = "-18m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "cargo build"
+at = "-17m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "sequences_disabled"
+mode = "next_command"
+prev_command = "git pull"
+prev_exit = 0
+
+[scenario.context]
+cwd = "/tmp"
+
+[scenario.expect]
+empty = true

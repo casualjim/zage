@@ -1,0 +1,38 @@
+[meta]
+description = "Verify alias shadowing behavior"
+tags = ["aliases", "edge", "shadow"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[aliases]
+ls = "exa --icons"  # Shadows the real 'ls' command
+
+[[history]]
+cmd = "exa --icons -la"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "ls -la"
+at = "-2h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "alias_shadows_command"
+mode = "completion"
+input = "ls "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# Both alias expansion and direct command should work
+min_results = 1

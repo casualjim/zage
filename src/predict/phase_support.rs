@@ -3,6 +3,7 @@ use std::collections::{HashMap, HashSet};
 use libsql::{Connection, Value};
 
 use crate::Result;
+use crate::phase::PhaseConfig;
 use crate::tokenize::{extract_command_parts, tokenize_index};
 
 use super::sql::query_prepared;
@@ -78,17 +79,41 @@ pub(crate) fn detect_session_phase(
 ) -> Option<PhaseSignal> {
   let mut scores: HashMap<String, f64> = HashMap::new();
   let mut total = 0.0f64;
-  for head in recent_heads.iter().rev().take(6) {
+  for (idx, head) in recent_heads.iter().rev().take(6).enumerate() {
     if let Some(phase) = phase_for_head.get(head) {
-      let weight = if head == recent_heads.last().unwrap_or(head) {
-        1.0
-      } else {
-        0.6
-      };
-      let score = phase.confidence * weight;
+      let weight = 0.5_f64.powi(idx as i32);
+      let confidence = phase.confidence.min(1.0);
+      let score = confidence * weight;
       *scores.entry(phase.phase.clone()).or_insert(0.0) += score;
       total += score;
     }
+  }
+  let (phase, score) = scores
+    .into_iter()
+    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
+  let confidence = if total > 0.0 { score / total } else { 0.0 };
+  Some(PhaseSignal { phase, confidence })
+}
+
+pub(crate) fn detect_session_phase_from_commands(
+  recent_commands: &[String],
+  phase_config: &PhaseConfig,
+) -> Option<PhaseSignal> {
+  if phase_config.labels().len() <= 1 {
+    return None;
+  }
+  let mut scores: HashMap<String, f64> = HashMap::new();
+  let mut total = 0.0f64;
+  for (idx, command) in recent_commands.iter().rev().take(6).enumerate() {
+    let weight = 0.5_f64.powi(idx as i32);
+    let label_idx = phase_config
+      .match_label(command)
+      .unwrap_or_else(|| phase_config.default_idx());
+    let Some(phase) = phase_config.labels().get(label_idx).cloned() else {
+      continue;
+    };
+    *scores.entry(phase).or_insert(0.0) += weight;
+    total += weight;
   }
   let (phase, score) = scores
     .into_iter()
@@ -108,5 +133,7 @@ pub(crate) fn phase_match_boost(
   if session.phase != candidate.phase {
     return 0.0;
   }
-  0.35 * session.confidence * candidate.confidence
+  let session_confidence = session.confidence.min(1.0);
+  let candidate_confidence = candidate.confidence.min(1.0);
+  6.0 * session_confidence * candidate_confidence
 }

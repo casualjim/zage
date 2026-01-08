@@ -1,0 +1,50 @@
+[meta]
+description = "Verify alias with embedded arguments"
+tags = ["aliases", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[aliases]
+ll = "ls -la"
+glog = "git log --oneline --graph"
+
+[[history]]
+cmd = "ls -la /tmp"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "git log --oneline --graph --all"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "alias_with_extra_args"
+mode = "completion"
+input = "ll "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["ll /tmp"]
+
+[[scenario]]
+name = "alias_extends_history"
+mode = "completion"
+input = "glog "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["glog --all"]

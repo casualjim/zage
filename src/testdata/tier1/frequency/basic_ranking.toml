@@ -1,0 +1,61 @@
+[meta]
+description = "Verify frequency affects ranking"
+tags = ["frequency"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 1.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "rare_cmd"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 1
+
+[[history]]
+cmd = "common_cmd"
+at = "-2h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "very_common_cmd"
+at = "-3h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 50
+
+[[scenario]]
+name = "frequency_ordering"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+top = ["very_common_cmd", "common_cmd", "rare_cmd"]
+
+[[scenario.expect.candidate]]
+cmd = "very_common_cmd"
+min_frequency = 3.9
+
+[[scenario.expect.candidate]]
+cmd = "common_cmd"
+min_frequency = 2.3
+max_frequency = 2.5
+
+[[scenario.expect.candidate]]
+cmd = "rare_cmd"
+min_frequency = 0.6
+max_frequency = 0.8

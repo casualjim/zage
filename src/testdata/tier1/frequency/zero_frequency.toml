@@ -1,0 +1,50 @@
+[meta]
+description = "Verify zero-frequency commands are absent"
+tags = ["frequency", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 1.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "once_cmd"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 1
+
+[[history]]
+cmd = "twice_cmd"
+at = "-2h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 2
+
+[[scenario]]
+name = "zero_frequency_absent"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+top = ["twice_cmd", "once_cmd"]
+absent = ["never_cmd"]
+
+[[scenario.expect.candidate]]
+cmd = "once_cmd"
+min_frequency = 0.6
+max_frequency = 0.8
+
+[[scenario.expect.candidate]]
+cmd = "twice_cmd"
+min_frequency = 1.0
+max_frequency = 1.2

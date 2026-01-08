@@ -1,0 +1,81 @@
+[meta]
+description = "Verify exit status affects transition scoring"
+tags = ["transition", "exit_status"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 1.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "cargo test"
+at = "-10m"
+cwd = "/tmp"
+exit = 1
+session = "s1"
+
+[[history]]
+cmd = "cargo test"
+at = "-9m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "cargo test"
+at = "-8m"
+cwd = "/tmp"
+exit = 1
+session = "s1"
+
+[[history]]
+cmd = "git diff"
+at = "-7m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "cargo test"
+at = "-6m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git commit -m 'fix'"
+at = "-5m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "after_failed_test"
+mode = "next_command"
+prev_command = "cargo test"
+prev_exit = 1
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["cargo test", "git diff"]
+absent = ["git commit -m 'fix'"]
+
+[[scenario]]
+name = "after_successful_test"
+mode = "next_command"
+prev_command = "cargo test"
+prev_exit = 0
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["git commit -m 'fix'"]

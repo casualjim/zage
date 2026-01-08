@@ -1,0 +1,37 @@
+[meta]
+description = "Verify hardcoded session_recency weight affects ordering"
+tags = ["context", "session", "recency"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "old_session_cmd"
+at = "-2h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "recent_session_cmd"
+at = "-5m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "session_recency_orders"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+top = ["recent_session_cmd", "old_session_cmd"]

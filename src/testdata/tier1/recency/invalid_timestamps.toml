@@ -1,0 +1,53 @@
+[meta]
+description = "Verify recency handles invalid timestamps"
+tags = ["recency", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "cmd_zero_ts"
+at = 0
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "cmd_equal_now"
+at = "2024-06-15T12:00:00Z"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "cmd_recent"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "invalid_timestamp_recency"
+mode = "completion"
+input = "cmd"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["cmd_zero_ts", "cmd_equal_now", "cmd_recent"]
+
+[[scenario.expect.candidate]]
+cmd = "cmd_zero_ts"
+min_recency = 0.0
+max_recency = 0.0
+
+[[scenario.expect.candidate]]
+cmd = "cmd_equal_now"
+min_recency = 0.0
+max_recency = 0.0
+
+[[scenario.expect.candidate]]
+cmd = "cmd_recent"
+min_recency = 0.99

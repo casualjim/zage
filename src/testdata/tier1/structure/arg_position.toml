@@ -1,0 +1,38 @@
+[meta]
+description = "Verify argument positions are strict"
+tags = ["structure", "args"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "cp source.txt dest.txt"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "correct_arg_position"
+mode = "completion"
+input = "cp source.txt "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["cp source.txt dest.txt"]
+
+[[scenario]]
+name = "wrong_arg_position"
+mode = "completion"
+input = "cp dest.txt "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+absent = ["cp dest.txt source.txt"]

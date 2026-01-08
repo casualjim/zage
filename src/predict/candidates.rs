@@ -110,31 +110,35 @@ async fn fetch_transition_candidates(
   Ok(found)
 }
 
-pub(crate) async fn add_context_candidates(
+async fn fetch_context_candidates(
   conn: &Connection,
-  config: &super::SuggestConfig,
+  cwd: Option<&str>,
+  hostname: Option<&str>,
+  username: Option<&str>,
   candidates: &mut HashMap<String, Candidate>,
-) -> Result<()> {
+) -> Result<bool> {
   let mut sql = String::from("SELECT command, freq, last_seen FROM context_stats WHERE 1=1");
   let mut params: Vec<Value> = Vec::new();
 
-  if let Some(ref cwd) = config.cwd {
+  if let Some(cwd) = cwd {
     sql.push_str(" AND working_directory = ?");
-    params.push(Value::from(cwd.clone()));
+    params.push(Value::from(cwd.to_string()));
   }
-  if let Some(ref hostname) = config.hostname {
+  if let Some(hostname) = hostname {
     sql.push_str(" AND hostname = ?");
-    params.push(Value::from(hostname.clone()));
+    params.push(Value::from(hostname.to_string()));
   }
-  if let Some(ref username) = config.username {
+  if let Some(username) = username {
     sql.push_str(" AND username = ?");
-    params.push(Value::from(username.clone()));
+    params.push(Value::from(username.to_string()));
   }
   // context_stats is keyed by (command, cwd, hostname, username); session_id is tracked elsewhere
   sql.push_str(" ORDER BY freq DESC LIMIT 50");
 
   let mut rows = query_prepared(conn, &sql, libsql::params_from_iter(params)).await?;
+  let mut found = false;
   while let Some(row) = rows.next().await? {
+    found = true;
     let cmd = row.get::<String>(0)?;
     let freq = row.get::<i64>(1)?;
     let last_seen = row.get::<i64>(2)?;
@@ -144,6 +148,36 @@ pub(crate) async fn add_context_candidates(
     entry.context_freq = entry.context_freq.max(freq);
     entry.last_seen = entry.last_seen.max(last_seen);
   }
+  Ok(found)
+}
+
+pub(crate) async fn add_context_candidates(
+  conn: &Connection,
+  config: &super::SuggestConfig,
+  candidates: &mut HashMap<String, Candidate>,
+) -> Result<()> {
+  let cwd = config.cwd.as_deref();
+  let hostname = config.hostname.as_deref();
+  let username = config.username.as_deref();
+
+  if fetch_context_candidates(conn, cwd, hostname, username, candidates).await? {
+    return Ok(());
+  }
+
+  if hostname.is_some() || username.is_some() {
+    if hostname.is_some()
+      && fetch_context_candidates(conn, cwd, hostname, None, candidates).await?
+    {
+      return Ok(());
+    }
+    if username.is_some()
+      && fetch_context_candidates(conn, cwd, None, username, candidates).await?
+    {
+      return Ok(());
+    }
+    let _ = fetch_context_candidates(conn, cwd, None, None, candidates).await?;
+  }
+
   Ok(())
 }
 
@@ -343,6 +377,83 @@ pub(crate) async fn add_recent_candidates(
     entry.freq = entry.freq.max(freq);
     entry.last_seen = entry.last_seen.max(last_seen);
   }
+  Ok(())
+}
+
+pub(crate) async fn hydrate_candidate_stats(
+  conn: &Connection,
+  repo_root: &str,
+  candidates: &mut HashMap<String, Candidate>,
+) -> Result<()> {
+  if candidates.is_empty() {
+    return Ok(());
+  }
+
+  let commands: Vec<String> = candidates.keys().cloned().collect();
+  let chunk_size = 200usize;
+
+  for chunk in commands.chunks(chunk_size) {
+    let mut placeholders = String::new();
+    for idx in 0..chunk.len() {
+      if idx > 0 {
+        placeholders.push(',');
+      }
+      placeholders.push('?');
+    }
+    let sql = format!(
+      "SELECT command, freq, last_seen FROM command_stats WHERE command IN ({})",
+      placeholders
+    );
+    let params = chunk
+      .iter()
+      .map(|cmd| Value::from(cmd.clone()))
+      .collect::<Vec<_>>();
+    let mut rows = query_prepared(conn, &sql, libsql::params_from_iter(params)).await?;
+    while let Some(row) = rows.next().await? {
+      let cmd = row.get::<String>(0)?;
+      let freq = row.get::<i64>(1)?;
+      let last_seen = row.get::<i64>(2)?;
+      let entry = candidates
+        .entry(cmd.clone())
+        .or_insert_with(|| super::new_candidate(&cmd));
+      entry.freq = entry.freq.max(freq);
+      entry.last_seen = entry.last_seen.max(last_seen);
+    }
+  }
+
+  if !repo_root.is_empty() {
+    for chunk in commands.chunks(chunk_size) {
+      let mut placeholders = String::new();
+      for idx in 0..chunk.len() {
+        if idx > 0 {
+          placeholders.push(',');
+        }
+        placeholders.push('?');
+      }
+      let sql = format!(
+        "SELECT command, freq, last_seen FROM repo_command_stats
+         WHERE repo_root = ? AND command IN ({})",
+        placeholders
+      );
+      let mut params: Vec<Value> = Vec::with_capacity(chunk.len() + 1);
+      params.push(Value::from(repo_root.to_string()));
+      for cmd in chunk {
+        params.push(Value::from(cmd.clone()));
+      }
+      let mut rows = query_prepared(conn, &sql, libsql::params_from_iter(params)).await?;
+      while let Some(row) = rows.next().await? {
+        let cmd = row.get::<String>(0)?;
+        let freq = row.get::<i64>(1)?;
+        let last_seen = row.get::<i64>(2)?;
+        let entry = candidates
+          .entry(cmd.clone())
+          .or_insert_with(|| super::new_candidate(&cmd));
+        entry.repo_freq = entry.repo_freq.max(freq);
+        entry.last_seen = entry.last_seen.max(last_seen);
+      }
+    }
+  }
+
   Ok(())
 }
 

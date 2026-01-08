@@ -1,0 +1,39 @@
+[meta]
+description = "Verify context inheritance at deep nesting levels"
+tags = ["context", "cwd", "edge", "deep"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 1.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[fs]
+"project/.git/" = "dir"
+"project/src/lib/util/helpers/" = "dir"
+
+[[history]]
+cmd = "root_cmd"
+at = "-1h"
+cwd = "project"
+exit = 0
+session = "s1"
+count = 10
+
+[[scenario]]
+name = "deep_nesting_context"
+mode = "next_command"
+
+[scenario.context]
+cwd = "project/src/lib/util/helpers"
+session = "s1"
+
+[scenario.expect]
+contains = ["root_cmd"]
+
+[[scenario.expect.candidate]]
+cmd = "root_cmd"
+min_context = 0.1  # Should still get context from repo root

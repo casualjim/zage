@@ -1,0 +1,36 @@
+[meta]
+description = "Verify performance with large history"
+tags = ["integration", "edge", "performance"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+# Simulate large history with count
+[[history]]
+cmd = "common_cmd"
+at = "-1d"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 1000
+
+[[history]]
+cmd = "rare_cmd"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 1
+
+[[scenario]]
+name = "large_history_query"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# Should still return results in reasonable time
+min_results = 1
+max_results = 10

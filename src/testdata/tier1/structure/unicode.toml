@@ -1,0 +1,54 @@
+[meta]
+description = "Verify Unicode character handling"
+tags = ["structure", "edge", "unicode"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "echo 'Héllo Wörld'"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "cat 日本語ファイル.txt"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 3
+
+[[history]]
+cmd = "echo '🚀 Deployment started'"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 4
+
+[[scenario]]
+name = "unicode_accents"
+mode = "completion"
+input = "echo 'Héllo"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["echo 'Héllo Wörld'"]
+
+[[scenario]]
+name = "unicode_emoji"
+mode = "completion"
+input = "echo '🚀"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["echo '🚀 Deployment started'"]

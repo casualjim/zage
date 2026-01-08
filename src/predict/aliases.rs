@@ -4,13 +4,16 @@ use super::Candidate;
 
 pub fn build_prefix_variants(prefix: &str, aliases: &HashMap<String, String>) -> Vec<String> {
   let mut variants = Vec::new();
-  let trimmed = prefix.trim_start();
+  let trimmed = prefix.trim_end();
   if !trimmed.is_empty() {
     variants.push(trimmed.to_string());
   }
   for (alias, expansion) in aliases {
     if expansion.starts_with(trimmed) {
       variants.push(alias.clone());
+    }
+    if !trimmed.is_empty() && alias.starts_with(trimmed) {
+      variants.push(expansion.clone());
     }
   }
   variants.sort();

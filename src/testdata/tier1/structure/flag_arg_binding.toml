@@ -1,0 +1,38 @@
+[meta]
+description = "Verify flag-argument binding"
+tags = ["structure", "flags", "args"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "gcc -o myprogram main.c"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "flag_arg_binding"
+mode = "completion"
+input = "gcc -o "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["gcc -o myprogram main.c"]
+
+[[scenario]]
+name = "positional_after_flag_arg"
+mode = "completion"
+input = "gcc -o myprogram "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["gcc -o myprogram main.c"]

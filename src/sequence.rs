@@ -5,7 +5,7 @@ use serde_json;
 use tracing::info;
 
 use crate::Result;
-use crate::tokenize::tokenize_index;
+use crate::tokenize::{extract_command_parts, tokenize_index};
 
 #[derive(Debug, Clone)]
 pub struct SequenceConfig {
@@ -19,8 +19,8 @@ impl Default for SequenceConfig {
   fn default() -> Self {
     Self {
       min_support: 2,
-      min_confidence: 0.5,
-      min_lift: 1.2,
+      min_confidence: 0.0,
+      min_lift: 1.0,
       max_len: 3,
     }
   }
@@ -49,6 +49,27 @@ pub struct SequenceCandidate {
   pub prefix_len: usize,
 }
 
+fn command_signature(command: &str) -> Option<String> {
+  let tokens = tokenize_index("sh", command);
+  let parts = extract_command_parts(command, &tokens)?;
+  let mut signature = parts.head;
+  if let Some(first_arg) = parts.args.first() {
+    signature.push(' ');
+    signature.push_str(first_arg.raw.as_str());
+  }
+  if !parts.flags.is_empty() {
+    let mut flags = parts.flags;
+    flags.sort();
+    signature.push(' ');
+    signature.push_str(&flags.join(" "));
+  }
+  Some(signature)
+}
+
+fn normalize_sequence_command(command: &str) -> String {
+  command_signature(command).unwrap_or_else(|| command.to_string())
+}
+
 pub async fn analyze_sequences(
   conn: &Connection,
   config: SequenceConfig,
@@ -69,7 +90,8 @@ pub async fn analyze_sequences(
   let progress_interval = 50_000usize;
 
   while let Some(row) = rows.next().await? {
-    let cmd = row.get::<String>(0)?;
+    let raw_cmd = row.get::<String>(0)?;
+    let cmd = normalize_sequence_command(&raw_cmd);
     total += 1;
     *unigram_counts.entry(cmd.clone()).or_insert(0) += 1;
 
@@ -359,7 +381,15 @@ pub async fn candidates_from_sequences(
     .await?;
 
   let mut candidates = Vec::new();
-  let recent_len = recent_commands.len();
+  let normalized_recent_commands = recent_commands
+    .iter()
+    .map(|cmd| normalize_sequence_command(cmd))
+    .collect::<Vec<_>>();
+  let recent_len = normalized_recent_commands.len();
+  let recent_signatures = normalized_recent_commands
+    .iter()
+    .map(|cmd| command_signature(cmd))
+    .collect::<Vec<_>>();
   while let Some(row) = rows.next().await? {
     let sequence_json = row.get::<String>(0)?;
     let support = row.get::<i64>(1)? as usize;
@@ -374,8 +404,21 @@ pub async fn candidates_from_sequences(
     if prefix_len == 0 || recent_len < prefix_len {
       continue;
     }
-    let recent_slice = &recent_commands[recent_len - prefix_len..];
-    if sequence[..prefix_len] == *recent_slice {
+    let recent_slice = &normalized_recent_commands[recent_len - prefix_len..];
+    let mut matched = sequence[..prefix_len] == *recent_slice;
+    if !matched {
+      let seq_signatures = sequence[..prefix_len]
+        .iter()
+        .map(|cmd| command_signature(cmd))
+        .collect::<Vec<_>>();
+      matched = seq_signatures.len() == prefix_len
+        && seq_signatures
+          .iter()
+          .zip(recent_signatures[recent_len - prefix_len..].iter())
+          .all(|(seq_sig, recent_sig)| seq_sig.is_some() && seq_sig == recent_sig);
+    }
+
+    if matched {
       let next = sequence.last().cloned().unwrap_or_default();
       candidates.push(SequenceCandidate {
         command: next,

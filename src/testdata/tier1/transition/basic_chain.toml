@@ -1,0 +1,72 @@
+[meta]
+description = "Verify transition scoring from previous command"
+tags = ["transition", "markov"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 1.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "git add ."
+at = "-10m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git commit -m 'msg'"
+at = "-9m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git add ."
+at = "-8m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git commit -m 'fix'"
+at = "-7m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git add ."
+at = "-6m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git status"
+at = "-5m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "transition_after_git_add"
+mode = "next_command"
+prev_command = "git add ."
+prev_exit = 0
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+top = ["git commit -m 'msg'", "git commit -m 'fix'"]
+contains = ["git status"]
+
+[[scenario.expect.candidate]]
+cmd = "git commit -m 'msg'"
+min_transition = 0.5

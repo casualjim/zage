@@ -1,0 +1,44 @@
+[meta]
+description = "Verify hostname and username context"
+tags = ["context", "hostname", "username"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 1.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "deploy_prod"
+at = "-1h"
+cwd = "/tmp"
+hostname = "prod-server"
+username = "deploy"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "local_dev"
+at = "-1h"
+cwd = "/tmp"
+hostname = "workstation"
+username = "developer"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "hostname_context"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+hostname = "prod-server"
+username = "deploy"
+session = "s1"
+
+[scenario.expect]
+top = ["deploy_prod"]
+absent = ["local_dev"]

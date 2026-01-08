@@ -1,0 +1,56 @@
+[meta]
+description = "Verify case sensitivity in prefix matching"
+tags = ["anti-hallucination", "edge", "case"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "Git status"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "git status"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "GIT status"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 3
+
+[[scenario]]
+name = "lowercase_prefix"
+mode = "completion"
+input = "git"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["git status"]
+absent = ["Git status", "GIT status"]
+
+[[scenario]]
+name = "uppercase_prefix"
+mode = "completion"
+input = "Git"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["Git status"]
+absent = ["git status", "GIT status"]

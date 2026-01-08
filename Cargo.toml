@@ -33,6 +33,7 @@ tree-sitter = "0.26.3"
 tree-sitter-bash = "0.25.1"
 tree-sitter-zsh = "0.52.0"
 uuid = { version = "1.16.0", features = ["fast-rng", "std", "v7"] }
+tempfile = { version = "3.20.0", optional = true }
 uzers = "0.12"
 
 # Force OpenSSL to use vendored version for Linux targets to avoid cross-compilation issues
@@ -44,6 +45,7 @@ assert_cmd = "2"
 color-backtrace = "0.7.0"
 csv = "1.3"
 ctor = "0.4"
+libtest-mimic = "0.8.1"
 predicates = "3"
 tempfile = "3.20.0"
 xz2 = "0.1"
@@ -52,3 +54,12 @@ xz2 = "0.1"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+
+[features]
+tier1-tests = ["tempfile"]
+
+[[test]]
+name = "tier1"
+path = "tests/tier1.rs"
+harness = false
+required-features = ["tier1-tests"]

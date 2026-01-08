@@ -1,0 +1,29 @@
+[meta]
+description = "Verify empty history produces no suggestions"
+tags = ["anti-hallucination", "empty"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[scenario]]
+name = "empty_history_next_command"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+empty = true
+
+[[scenario]]
+name = "empty_history_completion"
+mode = "completion"
+input = "git c"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+empty = true

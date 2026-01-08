@@ -1,0 +1,53 @@
+[meta]
+description = "Verify db assertions with params"
+tags = ["integration", "db"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "git status"
+at = "-3m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "git add ."
+at = "-2m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git commit -m 'fix'"
+at = "-1m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "db_assertions"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["git status", "git add .", "git commit -m 'fix'"]
+
+[[scenario.expect.db]]
+description = "Verify command frequency was indexed"
+sql = "SELECT freq FROM command_stats WHERE command = ?"
+params = ["git status"]
+operator = "eq"
+value = 5
+
+[[scenario.expect.db]]
+description = "Verify transition was recorded"
+sql = "SELECT freq FROM transition_stats WHERE prev_command = ? AND next_command = ?"
+params = ["git add .", "git commit -m 'fix'"]
+operator = "gte"
+value = 1

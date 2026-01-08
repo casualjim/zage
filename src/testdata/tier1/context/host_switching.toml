@@ -1,0 +1,63 @@
+[meta]
+description = "Verify host context isolation"
+tags = ["context", "hostname", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 1.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "production_cmd"
+at = "-1h"
+cwd = "/app"
+hostname = "prod-server-1"
+exit = 0
+session = "s1"
+count = 20
+
+[[history]]
+cmd = "staging_cmd"
+at = "-1h"
+cwd = "/app"
+hostname = "staging-server"
+exit = 0
+session = "s1"
+count = 20
+
+[[history]]
+cmd = "local_cmd"
+at = "-1h"
+cwd = "/app"
+hostname = "dev-laptop"
+exit = 0
+session = "s1"
+count = 20
+
+[[scenario]]
+name = "host_prod"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/app"
+hostname = "prod-server-1"
+session = "s1"
+
+[scenario.expect]
+top = ["production_cmd"]
+
+[[scenario]]
+name = "host_staging"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/app"
+hostname = "staging-server"
+session = "s1"
+
+[scenario.expect]
+top = ["staging_cmd"]

@@ -3,6 +3,8 @@
 > **Important:** Prefer the `mise` tasks for installs, builds, tests, and formatting. Only use raw toolchain commands when no `mise` wrapper exists, and call that out explicitly.
 >
 > **CRITICAL: Use the Rust LSP for all code navigation!** Do NOT use grep/find/rg or manual file browsing - the Rust LSP provides accurate, fast, type-aware navigation. See the "Code Navigation (Use Rust LSP!)" section for detailed commands.
+>
+> **CRITICAL: Do NOT run git mutations without explicit approval from the user** Do NOT ever run git checkout/revert/restore/reset without EXPLICIT APPROVAL from the USER
 
 
 ## Build, Test, and Development Commands
@@ -81,6 +83,12 @@ mcp__rust-lsp__completion "crates/slipstreamd/src/routes.rs" 42 20
 
 **Remember: When you need to understand or navigate code, reach for the Rust LSP first!**
 
+
+> REMINDER: 
+> ALWAYS get approval from the user for git checkout/reset/restore/revert/...
+> NEVER run destructive git commands without explicit approval
+
+
 ## Code Style & Formatting
 - Rust:
   - Use `eyre::Result` for error handling, `thiserror` for domain errors
@@ -126,3 +134,6 @@ Bad examples:
 - "refactor(embedding): Split search into dedicated Searcher service"
 - "feat: add reranking provider"
 - "fix: flaky test"
+
+## SUPER IMPORTANT
+- Do NOT run git commands that can result in loss of work unilaterally. ALWAYS get approval from the user for git checkout/reset/restore/revert/...

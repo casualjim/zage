@@ -31,16 +31,19 @@ score = w_recency    × recency
       + 0.1          × session_recency
 ```
 
-Default weights:
+Default weights (from `RankingWeights::default()`):
 - `w_recency = 0.25`
-- `w_frequency = 0.20`
-- `w_transition = 0.15`
-- `w_context = 0.20`
+- `w_frequency = 0.25`
+- `w_transition = 0.20`
+- `w_context = 0.15`
 - `w_sequence = 0.10`
-- `w_similarity = 0.10`
+- `w_similarity = 0.05`
+
+Additionally, `session_recency` has a hardcoded weight of `0.1` (not configurable via `RankingWeights`).
 
 Each sub-score is computed as:
-- **recency**: `exp(-age / half_life)` where `half_life = 7 days`
+- **recency**: `exp(-age / half_life)` where `half_life = 604800 seconds (7 days)`
+  - Returns `0.0` if `last_seen <= 0` or `now <= last_seen`
 - **frequency**: `ln(freq + 1) + 0.5 × ln(repo_freq + 1)`
 - **transition**: `ln(transition_freq + 1) + 0.7 × ln(repo_transition_freq + 1)`
 - **context**: `ln(context_freq + 1) + 0.8 × ln(session_freq + 1) + phase_boost`
@@ -70,13 +73,16 @@ tags = ["recency", "transition", "anti-hallucination"]  # Optional categorizatio
 # Freeze the current time (ISO 8601 format)
 now = "2024-06-15T12:00:00Z"
 
-# Override ranking weights (omit to use defaults)
+# Override ranking weights (omit to use defaults from RankingWeights::default())
+# Defaults: recency=0.25, frequency=0.25, transition=0.20, context=0.15, sequence=0.10, similarity=0.05
 w_recency = 1.0
 w_frequency = 0.0
 w_transition = 0.0
 w_context = 0.0
 w_sequence = 0.0
 w_similarity = 0.0
+
+# Note: session_recency weight (0.1) is hardcoded and cannot be overridden
 
 # Override recency half-life (default: 604800 seconds = 7 days)
 recency_half_life_seconds = 604800
@@ -241,6 +247,7 @@ tags = ["recency", "physics"]
 
 [physics]
 now = "2024-06-15T12:00:00Z"
+# Isolate recency by zeroing other weights (defaults: 0.25, 0.25, 0.20, 0.15, 0.10, 0.05)
 w_recency = 1.0
 w_frequency = 0.0
 w_transition = 0.0
@@ -282,16 +289,16 @@ top = ["recent_cmd", "day_old_cmd", "week_old_cmd"]
 
 [[scenario.expect.candidate]]
 cmd = "recent_cmd"
-min_recency = 0.99    # 1 hour ago ≈ exp(-3600/604800) ≈ 0.994
+min_recency = 0.99    # 1 hour ago ≈ exp(-3600/604800) ≈ 0.9940
 
 [[scenario.expect.candidate]]
 cmd = "day_old_cmd"
-min_recency = 0.86    # 1 day ago ≈ exp(-86400/604800) ≈ 0.867
+min_recency = 0.86    # 1 day ago ≈ exp(-86400/604800) ≈ 0.8669
 max_recency = 0.88
 
 [[scenario.expect.candidate]]
 cmd = "week_old_cmd"
-min_recency = 0.36    # 1 week ago ≈ exp(-604800/604800) ≈ 0.368
+min_recency = 0.36    # 1 week ago = half_life ≈ exp(-1) ≈ 0.3679
 max_recency = 0.38
 ```
 
@@ -312,7 +319,7 @@ w_transition = 0.0
 w_context = 0.0
 w_sequence = 0.0
 w_similarity = 0.0
-recency_half_life_seconds = 86400  # 1 day for easier testing
+recency_half_life_seconds = 86400  # Override default 604800 (7 days) to 1 day for easier testing
 
 [[history]]
 cmd = "at_half_life"
@@ -331,7 +338,7 @@ session = "s1"
 
 [[scenario.expect.candidate]]
 cmd = "at_half_life"
-min_recency = 0.36
+min_recency = 0.36    # exp(-86400/86400) = exp(-1) ≈ 0.3679
 max_recency = 0.38
 ```
 
@@ -348,6 +355,7 @@ tags = ["frequency"]
 
 [physics]
 now = "2024-06-15T12:00:00Z"
+# Isolate frequency scoring
 w_recency = 0.0
 w_frequency = 1.0
 w_transition = 0.0
@@ -392,7 +400,7 @@ top = ["very_common_cmd", "common_cmd", "rare_cmd"]
 
 [[scenario.expect.candidate]]
 cmd = "very_common_cmd"
-min_frequency = 3.9  # ln(50+1) ≈ 3.93
+min_frequency = 3.9  # ln(50+1) ≈ 3.93 (global freq only, no repo boost here)
 
 [[scenario.expect.candidate]]
 cmd = "common_cmd"
@@ -403,6 +411,9 @@ max_frequency = 2.5
 cmd = "rare_cmd"
 min_frequency = 0.6  # ln(1+1) ≈ 0.69
 max_frequency = 0.8
+
+# Note: frequency score = ln(freq+1) + 0.5 * ln(repo_freq+1)
+# In this test, repo_freq = 0 because no repo context, so it's just ln(freq+1)
 ```
 
 #### 3.2.2 Repo Frequency Boost
@@ -416,6 +427,8 @@ tags = ["frequency", "repo"]
 
 [physics]
 now = "2024-06-15T12:00:00Z"
+# Isolate frequency to test repo boost component
+# frequency = ln(freq+1) + 0.5 * ln(repo_freq+1)
 w_recency = 0.0
 w_frequency = 1.0
 w_transition = 0.0
@@ -469,6 +482,8 @@ tags = ["transition", "markov"]
 
 [physics]
 now = "2024-06-15T12:00:00Z"
+# Isolate transition scoring
+# transition = ln(transition_freq+1) + 0.7 * ln(repo_transition_freq+1)
 w_recency = 0.0
 w_frequency = 0.0
 w_transition = 1.0
@@ -549,6 +564,7 @@ tags = ["transition", "exit_status"]
 
 [physics]
 now = "2024-06-15T12:00:00Z"
+# Isolate transition for exit-status testing
 w_recency = 0.0
 w_frequency = 0.0
 w_transition = 1.0
@@ -635,6 +651,8 @@ tags = ["transition", "repo"]
 
 [physics]
 now = "2024-06-15T12:00:00Z"
+# Isolate transition for repo-specific chain testing
+# repo_transition_freq contributes 0.7 * ln(freq+1) to transition score
 w_recency = 0.0
 w_frequency = 0.0
 w_transition = 1.0
@@ -716,6 +734,8 @@ tags = ["context", "cwd"]
 
 [physics]
 now = "2024-06-15T12:00:00Z"
+# Isolate context scoring
+# context = ln(context_freq+1) + 0.8 * ln(session_freq+1) + phase_match_boost
 w_recency = 0.0
 w_frequency = 0.0
 w_transition = 0.0
@@ -777,6 +797,7 @@ tags = ["context", "cwd", "repo"]
 
 [physics]
 now = "2024-06-15T12:00:00Z"
+# Isolate context for subdirectory fallback testing
 w_recency = 0.0
 w_frequency = 0.0
 w_transition = 0.0
@@ -824,6 +845,9 @@ tags = ["context", "session"]
 
 [physics]
 now = "2024-06-15T12:00:00Z"
+# Isolate context for session boost testing
+# session_freq contributes 0.8 * ln(freq+1) to context score
+# Additionally, session_recency (hardcoded 0.1 weight) adds session-specific recency
 w_recency = 0.0
 w_frequency = 0.0
 w_transition = 0.0
@@ -874,6 +898,7 @@ tags = ["context", "hostname", "username"]
 
 [physics]
 now = "2024-06-15T12:00:00Z"
+# Isolate context for hostname/username testing
 w_recency = 0.0
 w_frequency = 0.0
 w_transition = 0.0
@@ -927,6 +952,9 @@ tags = ["sequence", "bigram"]
 
 [physics]
 now = "2024-06-15T12:00:00Z"
+# Isolate sequence scoring
+# sequence = confidence * max(lift, 1.0) * order_weight
+# order_weight = 1.0 if prefix_len >= 2 (trigram), else 0.7 (bigram)
 w_recency = 0.0
 w_frequency = 0.0
 w_transition = 0.0
@@ -1013,6 +1041,8 @@ tags = ["sequence", "trigram"]
 
 [physics]
 now = "2024-06-15T12:00:00Z"
+# Isolate sequence for trigram testing
+# Trigrams have order_weight = 1.0 (vs 0.7 for bigrams)
 w_recency = 0.0
 w_frequency = 0.0
 w_transition = 0.0
@@ -1096,6 +1126,8 @@ tags = ["similarity", "tokens"]
 
 [physics]
 now = "2024-06-15T12:00:00Z"
+# Isolate similarity scoring
+# similarity = Sørensen–Dice coefficient = 2*|intersection| / (|A| + |B|)
 w_recency = 0.0
 w_frequency = 0.0
 w_transition = 0.0
@@ -1592,6 +1624,7 @@ tags = ["anti-hallucination", "context"]
 
 [physics]
 now = "2024-06-15T12:00:00Z"
+# Isolate context for cross-contamination testing
 w_recency = 0.0
 w_frequency = 0.0
 w_transition = 0.0
@@ -1762,10 +1795,11 @@ tags = ["phase"]
 
 [physics]
 now = "2024-06-15T12:00:00Z"
+# Phase boost is added to context score via phase_match_boost()
 w_recency = 0.0
 w_frequency = 0.0
 w_transition = 0.0
-w_context = 1.0  # Phase boost is part of context
+w_context = 1.0
 w_sequence = 0.0
 w_similarity = 0.0
 
@@ -1908,6 +1942,176 @@ session = "s1"
 contains = ["docker run -it", "docker run -d"]
 ```
 
+### 3.12 Integration Scenarios
+
+#### 3.12.1 Competing Signals
+
+**Objective**: Verify score interactions when multiple signals conflict
+
+```toml
+[meta]
+description = "Verify recency can beat moderate frequency under default weights"
+tags = ["integration", "tradeoff"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "frequent_old_cmd"
+at = "-7d"
+cwd = "/tmp/other"
+exit = 0
+session = "s2"
+count = 5
+
+[[history]]
+cmd = "recent_cmd"
+at = "-1h"
+cwd = "/tmp/project"
+exit = 0
+session = "s1"
+count = 1
+
+[[scenario]]
+name = "competing_signals_recency_wins"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp/project"
+session = "s1"
+
+[scenario.expect]
+top = ["recent_cmd"]
+contains = ["frequent_old_cmd"]
+```
+
+#### 3.12.2 Default Weights Verification
+
+**Objective**: Verify the default weight balance produces expected behavior
+
+```toml
+[meta]
+description = "Verify default weights produce balanced ranking"
+tags = ["integration", "weights"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+# Using default weights - no overrides
+
+[fs]
+"project/.git/" = "dir"
+
+[[history]]
+cmd = "balanced_winner"
+at = "-30m"
+cwd = "project"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "recency_only"
+at = "-5m"
+cwd = "/other"
+exit = 0
+session = "s2"
+count = 1
+
+[[scenario]]
+name = "default_weights_balance"
+mode = "next_command"
+
+[scenario.context]
+cwd = "project"
+session = "s1"
+
+[scenario.expect]
+# Balanced winner has better context + frequency, should beat pure recency
+top = ["balanced_winner"]
+contains = ["recency_only"]
+```
+
+#### 3.12.3 Full Stack Integration
+
+**Objective**: Test all components working together
+
+```toml
+[meta]
+description = "Verify full stack integration with all features"
+tags = ["integration", "full"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[fs]
+"myproject/.git/" = "dir"
+"myproject/src/" = "dir"
+
+[aliases]
+gst = "git status"
+
+[options]
+use_sequences = true
+run_sequence_analysis = true
+min_sequence_support = 2
+
+[[history]]
+cmd = "git status"
+at = "-10m"
+cwd = "myproject"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git add ."
+at = "-9m"
+cwd = "myproject"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git commit -m 'fix'"
+at = "-8m"
+cwd = "myproject"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git status"
+at = "-7m"
+cwd = "myproject"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git add ."
+at = "-6m"
+cwd = "myproject"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git commit -m 'update'"
+at = "-5m"
+cwd = "myproject"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "full_stack_after_add"
+mode = "next_command"
+prev_command = "git add ."
+prev_exit = 0
+
+[scenario.context]
+cwd = "myproject/src"
+session = "s1"
+
+[scenario.expect]
+# git commit should be top due to transition + sequence + context
+contains = ["git commit -m 'fix'", "git commit -m 'update'"]
+```
+
 ---
 
 ## 4. Database State Assertions
@@ -1963,19 +2167,46 @@ value = 1.5
 ### 5.1 Test Harness API
 
 ```rust
+/// Ranking weights - mirrors src/predict.rs RankingWeights
+/// Default values: recency=0.25, frequency=0.25, transition=0.20, 
+///                 context=0.15, sequence=0.10, similarity=0.05
+/// Note: session_recency has hardcoded weight of 0.1 in score_candidates()
+pub struct RankingWeights {
+    pub recency: f64,
+    pub frequency: f64,
+    pub transition: f64,
+    pub context: f64,
+    pub sequence: f64,
+    pub similarity: f64,
+}
+
 /// Configuration for deterministic testing
 pub struct TestConfig {
-    /// Frozen timestamp for recency calculations
+    /// Frozen timestamp for recency calculations (Unix seconds)
+    /// If None, uses SystemTime::now()
     pub now: Option<i64>,
     
     /// Override ranking weights
+    /// If None, uses RankingWeights::default()
     pub weights: Option<RankingWeights>,
     
-    /// Override recency half-life
+    /// Override recency half-life in seconds
+    /// Default: 604800 (7 days = 60*60*24*7)
     pub recency_half_life: Option<f64>,
     
     /// Enable debug mode for score breakdown
     pub debug: bool,
+}
+
+/// Score breakdown - mirrors src/predict.rs ScoreBreakdown
+/// These are the raw sub-scores BEFORE applying weights
+pub struct ScoreBreakdown {
+    pub recency: f64,      // exp(-age / half_life), 0.0 if invalid
+    pub frequency: f64,    // ln(freq+1) + 0.5 * ln(repo_freq+1)
+    pub transition: f64,   // ln(trans_freq+1) + 0.7 * ln(repo_trans_freq+1)
+    pub context: f64,      // ln(ctx_freq+1) + 0.8 * ln(session_freq+1) + phase_boost
+    pub sequence: f64,     // confidence * max(lift, 1.0) * order_weight
+    pub similarity: f64,   // Sørensen–Dice coefficient on tokens
 }
 
 /// Extended suggestion with full breakdown for testing
@@ -1997,23 +2228,30 @@ pub async fn suggest_for_test(
 ### 5.2 Required Refactoring
 
 1. **TimeProvider Trait**
-   - Extract `SystemTime::now()` calls into injectable `TimeProvider`
+   - Extract `SystemTime::now()` calls in `suggest()` and `score_candidates()` into injectable `TimeProvider`
    - Default implementation uses wall clock
-   - Test implementation uses frozen time
+   - Test implementation uses frozen time from `TestConfig.now`
 
 2. **Configurable Weights**
-   - Make `RankingWeights` a parameter to `suggest()` or part of `SuggestConfig`
-   - Current hardcoded `RankingWeights::default()` becomes the default
+   - Make `RankingWeights` a parameter to `score_candidates()` or part of `SuggestConfig`
+   - Current hardcoded `RankingWeights::default()` (0.25, 0.25, 0.20, 0.15, 0.10, 0.05) becomes the default
+   - Note: `session_recency` weight (0.1) is hardcoded in `score_candidates()` line 375
 
-3. **Score Breakdown Exposure**
-   - Ensure `ScoreBreakdown` is always populated (currently is)
-   - Add `rank` field to test output
+3. **Configurable Half-Life**
+   - Extract `half_life = 60.0 * 60.0 * 24.0 * 7.0` in `ranking.rs:recency_score()` to be injectable
+   - Default remains 604800 seconds (7 days)
+   - Allow override via `TestConfig.recency_half_life`
 
-4. **Filesystem Fixture**
+4. **Score Breakdown Exposure**
+   - `ScoreBreakdown` is already populated in `score_candidates()` lines 380-387
+   - Add `rank` field to test output (1-indexed position after sorting)
+
+5. **Filesystem Fixture**
    - Helper to materialize `[fs]` block into `tempfile::TempDir`
    - Path resolution: relative paths → absolute paths in temp dir
+   - Ensure `.git/` directories are created so `find_repo_root()` works
 
-5. **Session ID Resolution**
+6. **Session ID Resolution**
    - Stable hash function for session string → i64
    - Same string always produces same ID
 
@@ -2117,50 +2355,69 @@ async fn tier1_verification_suite() {
 
 | Component | Test File | Status |
 |-----------|-----------|--------|
-| Recency decay | `recency/decay_curve.toml` | ☐ |
-| Recency half-life | `recency/half_life.toml` | ☐ |
-| Frequency basic | `frequency/basic_ranking.toml` | ☐ |
-| Frequency repo boost | `frequency/repo_boost.toml` | ☐ |
-| Transition basic | `transition/basic_chain.toml` | ☐ |
-| Transition exit status | `transition/exit_status.toml` | ☐ |
-| Transition repo-specific | `transition/repo_specific.toml` | ☐ |
-| Context CWD | `context/cwd.toml` | ☐ |
-| Context subdirectory | `context/subdirectory.toml` | ☐ |
-| Context session | `context/session.toml` | ☐ |
-| Context hostname/user | `context/hostname.toml` | ☐ |
-| Sequence bigram | `sequence/bigram.toml` | ☐ |
-| Sequence trigram | `sequence/trigram.toml` | ☐ |
-| Similarity tokens | `similarity/token_matching.toml` | ☐ |
+| Recency decay | `recency/decay_curve.toml` | ✓ |
+| Recency half-life | `recency/half_life.toml` | ✓ |
+| Recency future timestamps | `recency/future_timestamps.toml` | ✓ |
+| Recency invalid timestamps | `recency/invalid_timestamps.toml` | ✓ |
+| Frequency basic | `frequency/basic_ranking.toml` | ✓ |
+| Frequency repo boost | `frequency/repo_boost.toml` | ✓ |
+| Frequency zero | `frequency/zero_frequency.toml` | ✓ |
+| Transition basic | `transition/basic_chain.toml` | ✓ |
+| Transition exit status | `transition/exit_status.toml` | ✓ |
+| Transition no previous | `transition/no_previous.toml` | ✓ |
+| Transition repo-specific | `transition/repo_specific.toml` | ✓ |
+| Context CWD | `context/cwd.toml` | ✓ |
+| Context subdirectory | `context/subdirectory.toml` | ✓ |
+| Context parent inheritance | `context/parent_inheritance.toml` | ✓ |
+| Context session | `context/session.toml` | ✓ |
+| Context session recency | `context/session_recency_weight.toml` | ✓ |
+| Context hostname/user | `context/hostname.toml` | ✓ |
+| Sequence bigram | `sequence/bigram.toml` | ✓ |
+| Sequence trigram | `sequence/trigram.toml` | ✓ |
+| Sequence disabled | `sequence/disabled.toml` | ✓ |
+| Sequence low confidence | `sequence/low_confidence.toml` | ✓ |
+| Similarity tokens | `similarity/token_matching.toml` | ✓ |
+| Similarity no overlap | `similarity/no_overlap.toml` | ✓ |
 
 ### 6.2 Structural Semantics
 
 | Component | Test File | Status |
 |-----------|-----------|--------|
-| Flag commutativity | `structure/flag_commutativity.toml` | ☐ |
-| Arg position strictness | `structure/arg_position.toml` | ☐ |
-| Flag-arg binding | `structure/flag_arg_binding.toml` | ☐ |
-| Quoted arguments | `structure/quotes.toml` | ☐ |
-| Environment prefix | `structure/env_prefix.toml` | ☐ |
-| Pipe handling | `structure/pipes.toml` | ☐ |
+| Flag commutativity | `structure/flag_commutativity.toml` | ✓ |
+| Arg position strictness | `structure/arg_position.toml` | ✓ |
+| Flag-arg binding | `structure/flag_arg_binding.toml` | ✓ |
+| Quoted arguments | `structure/quotes.toml` | ✓ |
+| Environment prefix | `structure/env_prefix.toml` | ✓ |
+| Pipe handling | `structure/pipes.toml` | ✓ |
+| Cursor position | `structure/cursor.toml` | ✓ |
 
 ### 6.3 Anti-Hallucination
 
 | Component | Test File | Status |
 |-----------|-----------|--------|
-| Empty history | `anti_hallucination/empty_history.toml` | ☐ |
-| Strict prefix | `anti_hallucination/strict_prefix.toml` | ☐ |
-| Ghost candidates | `anti_hallucination/ghost_candidates.toml` | ☐ |
-| Cross-contamination | `anti_hallucination/cross_contamination.toml` | ☐ |
+| Empty history | `anti_hallucination/empty_history.toml` | ✓ |
+| Strict prefix | `anti_hallucination/strict_prefix.toml` | ✓ |
+| Ghost candidates | `anti_hallucination/ghost_candidates.toml` | ✓ |
+| Cross-contamination | `anti_hallucination/cross_contamination.toml` | ✓ |
 
 ### 6.4 Features
 
 | Component | Test File | Status |
 |-----------|-----------|--------|
-| Alias expansion | `aliases/expansion.toml` | ☐ |
-| Alias suffix | `aliases/suffix.toml` | ☐ |
-| Phase detection | `phase/detection.toml` | ☐ |
-| Arg templates | `templates/args.toml` | ☐ |
-| Flag templates | `templates/flags.toml` | ☐ |
+| Alias expansion | `aliases/expansion.toml` | ✓ |
+| Alias suffix | `aliases/suffix.toml` | ✓ |
+| Phase detection | `phase/detection.toml` | ✓ |
+| Arg templates | `templates/args.toml` | ✓ |
+| Flag templates | `templates/flags.toml` | ✓ |
+
+### 6.5 Integration Tests
+
+| Component | Test File | Status |
+|-----------|-----------|--------|
+| Competing signals | `integration/competing_signals.toml` | ✓ |
+| Default weights | `integration/default_weights.toml` | ✓ |
+| Full stack | `integration/full_stack.toml` | ✓ |
+| DB assertions | `integration/db_assertions.toml` | ✓ |
 
 ---
 
@@ -2200,3 +2457,1817 @@ Once the new test suite is complete and passing:
 1. Remove `src/testdata/completion_cases.toml`
 2. Remove the old test runner in `predict.rs` tests
 3. Update CI to run only the new verification suite
+
+---
+
+## 9. Gap Analysis and Additional Edge Cases
+
+This section documents edge cases and additional test scenarios that should be added to achieve comprehensive coverage.
+
+### 9.1 Recency Edge Cases
+
+#### 9.1.1 Future Timestamps
+
+**Objective**: Commands with future timestamps should return recency score of 0.0
+
+```toml
+[meta]
+description = "Verify future timestamps are handled gracefully"
+tags = ["recency", "edge", "future"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 1.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "future_cmd"
+at = "+1h"  # 1 hour in the future
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "past_cmd"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "future_timestamp_ignored"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+top = ["past_cmd"]
+
+[[scenario.expect.candidate]]
+cmd = "future_cmd"
+min_recency = 0.0
+max_recency = 0.0
+```
+
+#### 9.1.2 Invalid/Zero Timestamps
+
+**Objective**: Commands with zero or negative timestamps return recency 0.0
+
+```toml
+[meta]
+description = "Verify invalid timestamps are handled"
+tags = ["recency", "edge", "invalid"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 1.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "zero_ts_cmd"
+at = 0
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "valid_cmd"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "zero_timestamp_handled"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+top = ["valid_cmd"]
+```
+
+#### 9.1.3 Multiple Half-Lives
+
+**Objective**: Very old commands decay exponentially across multiple half-lives
+
+```toml
+[meta]
+description = "Verify decay over multiple half-lives"
+tags = ["recency", "physics", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 1.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "two_half_lives"
+at = "-14d"  # 2 weeks = 2 half-lives
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "three_half_lives"
+at = "-21d"  # 3 weeks = 3 half-lives
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "multi_half_life_decay"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[[scenario.expect.candidate]]
+cmd = "two_half_lives"
+min_recency = 0.13  # exp(-2) ≈ 0.135
+max_recency = 0.14
+
+[[scenario.expect.candidate]]
+cmd = "three_half_lives"
+min_recency = 0.04  # exp(-3) ≈ 0.050
+max_recency = 0.06
+```
+
+### 9.2 Frequency Edge Cases
+
+#### 9.2.1 Zero Frequency
+
+**Objective**: Commands with count=0 produce frequency score of 0.0
+
+```toml
+[meta]
+description = "Verify zero frequency handling"
+tags = ["frequency", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 1.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "single_cmd"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 1
+
+[[scenario]]
+name = "minimal_frequency"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[[scenario.expect.candidate]]
+cmd = "single_cmd"
+min_frequency = 0.69  # ln(1+1) = ln(2) ≈ 0.693
+max_frequency = 0.70
+```
+
+#### 9.2.2 High Frequency Logarithmic Behavior
+
+**Objective**: Verify logarithmic scaling at high frequencies
+
+```toml
+[meta]
+description = "Verify logarithmic scaling for high frequency commands"
+tags = ["frequency", "edge", "scaling"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 1.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "freq_100"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 100
+
+[[history]]
+cmd = "freq_1000"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 1000
+
+[[scenario]]
+name = "high_frequency_scaling"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[[scenario.expect.candidate]]
+cmd = "freq_100"
+min_frequency = 4.6  # ln(101) ≈ 4.615
+max_frequency = 4.7
+
+[[scenario.expect.candidate]]
+cmd = "freq_1000"
+min_frequency = 6.9  # ln(1001) ≈ 6.909
+max_frequency = 7.0
+```
+
+#### 9.2.3 Equal Frequency Tie-Breaking
+
+**Objective**: Commands with equal frequency are tie-broken by recency or alphabetically
+
+```toml
+[meta]
+description = "Verify tie-breaking for equal frequency"
+tags = ["frequency", "edge", "tiebreak"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 1.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "cmd_a"
+at = "-2h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "cmd_b"
+at = "-1h"  # More recent
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10  # Same frequency
+
+[[scenario]]
+name = "equal_frequency_tiebreak"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# Should be ordered by recency as tiebreaker
+top = ["cmd_b", "cmd_a"]
+```
+
+### 9.3 Transition Edge Cases
+
+#### 9.3.1 No Previous Command
+
+**Objective**: Transition scoring when there's no previous command
+
+```toml
+[meta]
+description = "Verify behavior when no previous command exists"
+tags = ["transition", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 1.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "any_cmd"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "no_previous_command"
+mode = "next_command"
+# No prev_command specified
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# With only transition weight and no prev_command, should have no results
+# or all results have 0 transition score
+empty = false  # May still return results from other sources
+```
+
+#### 9.3.2 Long Transition Chains
+
+**Objective**: Multi-hop transitions (A→B→C→D) patterns
+
+```toml
+[meta]
+description = "Verify long transition chains"
+tags = ["transition", "edge", "chain"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 1.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+# Establish a chain: make → test → deploy → notify
+[[history]]
+cmd = "make"
+at = "-10m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "test"
+at = "-9m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "deploy"
+at = "-8m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "notify"
+at = "-7m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+# Repeat the chain
+[[history]]
+cmd = "make"
+at = "-6m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "test"
+at = "-5m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "deploy"
+at = "-4m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "notify"
+at = "-3m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "chain_step_1"
+mode = "next_command"
+prev_command = "make"
+prev_exit = 0
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+top = ["test"]
+
+[[scenario]]
+name = "chain_step_2"
+mode = "next_command"
+prev_command = "test"
+prev_exit = 0
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+top = ["deploy"]
+
+[[scenario]]
+name = "chain_step_3"
+mode = "next_command"
+prev_command = "deploy"
+prev_exit = 0
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+top = ["notify"]
+```
+
+### 9.4 Context Edge Cases
+
+#### 9.4.1 Deep Subdirectory Nesting
+
+**Objective**: Context inheritance works at 4+ levels deep
+
+```toml
+[meta]
+description = "Verify context inheritance at deep nesting levels"
+tags = ["context", "cwd", "edge", "deep"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 1.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[fs]
+"project/.git/" = "dir"
+"project/src/lib/util/helpers/" = "dir"
+
+[[history]]
+cmd = "root_cmd"
+at = "-1h"
+cwd = "project"
+exit = 0
+session = "s1"
+count = 10
+
+[[scenario]]
+name = "deep_nesting_context"
+mode = "next_command"
+
+[scenario.context]
+cwd = "project/src/lib/util/helpers"
+session = "s1"
+
+[scenario.expect]
+contains = ["root_cmd"]
+
+[[scenario.expect.candidate]]
+cmd = "root_cmd"
+min_context = 0.1  # Should still get context from repo root
+```
+
+#### 9.4.2 Non-Git Repository (No .git marker)
+
+**Objective**: Directories without .git don't get repo-specific context
+
+```toml
+[meta]
+description = "Verify non-git directories don't get repo context"
+tags = ["context", "repo", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 1.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[fs]
+"project_with_git/.git/" = "dir"
+"project_no_git/" = "dir"  # No .git
+
+[[history]]
+cmd = "git_project_cmd"
+at = "-1h"
+cwd = "project_with_git"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "no_git_cmd"
+at = "-1h"
+cwd = "project_no_git"
+exit = 0
+session = "s1"
+count = 10
+
+[[scenario]]
+name = "no_git_marker"
+mode = "next_command"
+
+[scenario.context]
+cwd = "project_no_git"
+session = "s1"
+
+[scenario.expect]
+# Both should appear since frequency is isolated
+# but git_project_cmd shouldn't get repo_freq boost
+contains = ["no_git_cmd", "git_project_cmd"]
+```
+
+#### 9.4.3 Host Switching
+
+**Objective**: Same history, different host context
+
+```toml
+[meta]
+description = "Verify host context isolation"
+tags = ["context", "hostname", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 1.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "production_cmd"
+at = "-1h"
+cwd = "/app"
+hostname = "prod-server-1"
+exit = 0
+session = "s1"
+count = 20
+
+[[history]]
+cmd = "staging_cmd"
+at = "-1h"
+cwd = "/app"
+hostname = "staging-server"
+exit = 0
+session = "s1"
+count = 20
+
+[[history]]
+cmd = "local_cmd"
+at = "-1h"
+cwd = "/app"
+hostname = "dev-laptop"
+exit = 0
+session = "s1"
+count = 20
+
+[[scenario]]
+name = "host_prod"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/app"
+hostname = "prod-server-1"
+session = "s1"
+
+[scenario.expect]
+top = ["production_cmd"]
+
+[[scenario]]
+name = "host_staging"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/app"
+hostname = "staging-server"
+session = "s1"
+
+[scenario.expect]
+top = ["staging_cmd"]
+```
+
+### 9.5 Sequence Edge Cases
+
+#### 9.5.1 Conflicting Sequences
+
+**Objective**: Multiple valid sequences compete
+
+```toml
+[meta]
+description = "Verify conflicting sequence resolution"
+tags = ["sequence", "edge", "conflict"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 1.0
+w_similarity = 0.0
+
+[options]
+use_sequences = true
+run_sequence_analysis = true
+min_sequence_support = 2
+
+# Pattern 1: git add → git commit (3 times)
+[[history]]
+cmd = "git add"
+at = "-30m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git commit"
+at = "-29m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git add"
+at = "-28m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git commit"
+at = "-27m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git add"
+at = "-26m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git commit"
+at = "-25m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+# Pattern 2: git add → git status (2 times)
+[[history]]
+cmd = "git add"
+at = "-20m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git status"
+at = "-19m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git add"
+at = "-18m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git status"
+at = "-17m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "conflicting_sequences"
+mode = "next_command"
+prev_command = "git add"
+prev_exit = 0
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# git commit should win with higher support
+top = ["git commit"]
+contains = ["git status"]
+```
+
+#### 9.5.2 Sequences Disabled
+
+**Objective**: Verify sequences don't affect results when disabled
+
+```toml
+[meta]
+description = "Verify sequences can be disabled"
+tags = ["sequence", "edge", "disabled"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 1.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0  # Sequence weight is zero
+w_similarity = 0.0
+
+[options]
+use_sequences = false
+
+[[history]]
+cmd = "sequence_a"
+at = "-10m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "sequence_b"
+at = "-9m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "sequence_a"
+at = "-8m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "sequence_b"
+at = "-7m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "recent_only"
+at = "-1m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "sequences_disabled"
+mode = "next_command"
+prev_command = "sequence_a"
+prev_exit = 0
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# Most recent command should win since only recency is enabled
+top = ["recent_only"]
+```
+
+### 9.6 Structure Edge Cases
+
+#### 9.6.1 Cursor Position Mid-Word
+
+**Objective**: Completion with cursor not at end of input
+
+```toml
+[meta]
+description = "Verify completion with cursor mid-word"
+tags = ["structure", "cursor", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "git status"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "git stash"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "cursor_mid_word"
+mode = "completion"
+input = "git staXXX"
+cursor = 6  # Cursor at position 6, after "git sta"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["git status", "git stash"]
+```
+
+#### 9.6.2 Very Long Commands
+
+**Objective**: Handle commands exceeding typical length
+
+```toml
+[meta]
+description = "Verify handling of very long commands"
+tags = ["structure", "edge", "long"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "kubectl exec -it pod-name-very-long-identifier-12345 --namespace production-environment -- /bin/bash -c 'cat /var/log/application.log | grep ERROR | tail -n 100'"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "long_command_completion"
+mode = "completion"
+input = "kubectl exec -it pod"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+min_results = 1
+```
+
+#### 9.6.3 Command Substitution
+
+**Objective**: Handle $() and backticks correctly
+
+```toml
+[meta]
+description = "Verify command substitution tokenization"
+tags = ["structure", "edge", "substitution"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "echo $(date +%Y-%m-%d)"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "echo `hostname`"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 3
+
+[[scenario]]
+name = "dollar_paren_substitution"
+mode = "completion"
+input = "echo $("
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["echo $(date +%Y-%m-%d)"]
+
+[[scenario]]
+name = "backtick_substitution"
+mode = "completion"
+input = "echo `"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["echo `hostname`"]
+```
+
+#### 9.6.4 Redirection Operators
+
+**Objective**: Handle >, >>, <, 2>&1 correctly
+
+```toml
+[meta]
+description = "Verify redirection operator handling"
+tags = ["structure", "edge", "redirection"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "make build > build.log 2>&1"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "cat input.txt < data.csv"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 3
+
+[[history]]
+cmd = "echo 'log' >> app.log"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 4
+
+[[scenario]]
+name = "redirect_stdout"
+mode = "completion"
+input = "make build >"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["make build > build.log 2>&1"]
+
+[[scenario]]
+name = "redirect_append"
+mode = "completion"
+input = "echo 'log' >>"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["echo 'log' >> app.log"]
+```
+
+#### 9.6.5 Background and Control Operators
+
+**Objective**: Handle &, &&, ||, ; correctly
+
+```toml
+[meta]
+description = "Verify control operator handling"
+tags = ["structure", "edge", "operators"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "sleep 100 &"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 3
+
+[[history]]
+cmd = "make build && make test"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "make build || echo 'build failed'"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "cd /tmp; ls -la"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 4
+
+[[scenario]]
+name = "and_chain"
+mode = "completion"
+input = "make build &&"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["make build && make test"]
+
+[[scenario]]
+name = "or_chain"
+mode = "completion"
+input = "make build ||"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["make build || echo 'build failed'"]
+
+[[scenario]]
+name = "semicolon_chain"
+mode = "completion"
+input = "cd /tmp;"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["cd /tmp; ls -la"]
+```
+
+#### 9.6.6 Glob Patterns
+
+**Objective**: Handle * and ? in commands
+
+```toml
+[meta]
+description = "Verify glob pattern handling"
+tags = ["structure", "edge", "glob"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "ls *.txt"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "rm -f temp?.log"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "find . -name '*.rs'"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 8
+
+[[scenario]]
+name = "star_glob"
+mode = "completion"
+input = "ls *"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["ls *.txt"]
+
+[[scenario]]
+name = "question_glob"
+mode = "completion"
+input = "rm -f temp?"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["rm -f temp?.log"]
+```
+
+#### 9.6.7 Unicode in Commands
+
+**Objective**: Handle non-ASCII characters correctly
+
+```toml
+[meta]
+description = "Verify Unicode character handling"
+tags = ["structure", "edge", "unicode"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "echo 'Héllo Wörld'"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "cat 日本語ファイル.txt"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 3
+
+[[history]]
+cmd = "echo '🚀 Deployment started'"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 4
+
+[[scenario]]
+name = "unicode_accents"
+mode = "completion"
+input = "echo 'Héllo"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["echo 'Héllo Wörld'"]
+
+[[scenario]]
+name = "unicode_emoji"
+mode = "completion"
+input = "echo '🚀"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["echo '🚀 Deployment started'"]
+```
+
+### 9.7 Anti-Hallucination Edge Cases
+
+#### 9.7.1 Case Sensitivity
+
+**Objective**: Verify case-sensitive prefix matching
+
+```toml
+[meta]
+description = "Verify case sensitivity in prefix matching"
+tags = ["anti-hallucination", "edge", "case"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "Git status"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "git status"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "GIT status"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 3
+
+[[scenario]]
+name = "lowercase_prefix"
+mode = "completion"
+input = "git"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["git status"]
+absent = ["Git status", "GIT status"]
+
+[[scenario]]
+name = "uppercase_prefix"
+mode = "completion"
+input = "Git"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["Git status"]
+absent = ["git status", "GIT status"]
+```
+
+#### 9.7.2 Whitespace Handling
+
+**Objective**: Leading/trailing whitespace in prefix
+
+```toml
+[meta]
+description = "Verify whitespace handling in prefix"
+tags = ["anti-hallucination", "edge", "whitespace"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "git status"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[scenario]]
+name = "leading_space"
+mode = "completion"
+input = " git"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# Leading space means no command starts with " git"
+empty = true
+
+[[scenario]]
+name = "trailing_spaces"
+mode = "completion"
+input = "git   "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["git status"]
+```
+
+#### 9.7.3 Partial vs Prefix Match
+
+**Objective**: Only prefix matches, not substring matches
+
+```toml
+[meta]
+description = "Verify only prefix matching, not substring"
+tags = ["anti-hallucination", "edge", "substring"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "git status"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "fugitive git"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "prefix_not_substring"
+mode = "completion"
+input = "git"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["git status"]
+absent = ["fugitive git"]  # "git" is substring, not prefix
+```
+
+### 9.8 Alias Edge Cases
+
+#### 9.8.1 Alias with Arguments
+
+**Objective**: Aliases that include their own arguments
+
+```toml
+[meta]
+description = "Verify alias with embedded arguments"
+tags = ["aliases", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[aliases]
+ll = "ls -la"
+glog = "git log --oneline --graph"
+
+[[history]]
+cmd = "ls -la /tmp"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "git log --oneline --graph --all"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "alias_with_extra_args"
+mode = "completion"
+input = "ll "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["ll /tmp"]
+
+[[scenario]]
+name = "alias_extends_history"
+mode = "completion"
+input = "glog "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["glog --all"]
+```
+
+#### 9.8.2 Alias Shadowing
+
+**Objective**: Alias shadows a real command name
+
+```toml
+[meta]
+description = "Verify alias shadowing behavior"
+tags = ["aliases", "edge", "shadow"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[aliases]
+ls = "exa --icons"  # Shadows the real 'ls' command
+
+[[history]]
+cmd = "exa --icons -la"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "ls -la"
+at = "-2h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "alias_shadows_command"
+mode = "completion"
+input = "ls "
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# Both alias expansion and direct command should work
+min_results = 1
+```
+
+### 9.9 Phase Edge Cases
+
+#### 9.9.1 Phase Transitions
+
+**Objective**: Rapid phase changes in session
+
+```toml
+[meta]
+description = "Verify phase detection with rapid transitions"
+tags = ["phase", "edge", "transitions"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 1.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[options]
+run_phase_indexing = true
+
+[phases]
+build = ["cargo build", "make"]
+test = ["cargo test", "pytest"]
+deploy = ["kubectl apply", "docker push"]
+
+# Quick phase transition: build → test → deploy
+[[history]]
+cmd = "cargo build"
+at = "-5m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "cargo test"
+at = "-4m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "kubectl apply -f deployment.yaml"
+at = "-3m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "docker push myimage"
+at = "-2m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[scenario]]
+name = "recent_phase_wins"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# Most recent phase is deploy
+top = ["docker push myimage", "kubectl apply -f deployment.yaml"]
+```
+
+### 9.10 Integration Edge Cases
+
+#### 9.10.1 All Weights Zero
+
+**Objective**: Edge case where all weights are zero
+
+```toml
+[meta]
+description = "Verify behavior when all weights are zero"
+tags = ["integration", "edge", "zero"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "any_command"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[scenario]]
+name = "all_zero_weights"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# With all weights zero, only session_recency (hardcoded 0.1) applies
+# or the system should gracefully handle this edge case
+min_results = 0  # May return nothing or may rely on session_recency
+```
+
+#### 9.10.2 Large History Volume
+
+**Objective**: Performance with large history
+
+```toml
+[meta]
+description = "Verify performance with large history"
+tags = ["integration", "edge", "performance"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+# Simulate large history with count
+[[history]]
+cmd = "common_cmd"
+at = "-1d"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 1000
+
+[[history]]
+cmd = "rare_cmd"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 1
+
+[[scenario]]
+name = "large_history_query"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# Should still return results in reasonable time
+min_results = 1
+max_results = 10
+```
+
+#### 9.10.3 Empty Prefix in Completion Mode
+
+**Objective**: Completion mode with empty prefix
+
+```toml
+[meta]
+description = "Verify completion with empty prefix"
+tags = ["integration", "edge", "empty"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "git status"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[scenario]]
+name = "empty_prefix_completion"
+mode = "completion"
+input = ""
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# Empty prefix should behave like next_command mode
+min_results = 1
+```
+
+---
+
+## 10. Updated Coverage Checklist
+
+### 10.1 Scoring Components (Extended)
+
+| Component | Test File | Status |
+|-----------|-----------|--------|
+| Recency decay | `recency/decay_curve.toml` | ☐ |
+| Recency half-life | `recency/half_life.toml` | ☐ |
+| Recency future timestamps | `recency/future_timestamps.toml` | ☐ |
+| Recency invalid timestamps | `recency/invalid_timestamps.toml` | ☐ |
+| Recency multi-half-life | `recency/multi_half_life.toml` | ☐ |
+| Frequency basic | `frequency/basic_ranking.toml` | ☐ |
+| Frequency repo boost | `frequency/repo_boost.toml` | ☐ |
+| Frequency zero | `frequency/zero_frequency.toml` | ☐ |
+| Frequency high scaling | `frequency/high_scaling.toml` | ☐ |
+| Frequency tiebreak | `frequency/tiebreak.toml` | ☐ |
+| Transition basic | `transition/basic_chain.toml` | ☐ |
+| Transition exit status | `transition/exit_status.toml` | ☐ |
+| Transition no previous | `transition/no_previous.toml` | ☐ |
+| Transition repo-specific | `transition/repo_specific.toml` | ☐ |
+| Transition long chains | `transition/long_chains.toml` | ☐ |
+| Context CWD | `context/cwd.toml` | ☐ |
+| Context subdirectory | `context/subdirectory.toml` | ☐ |
+| Context parent inheritance | `context/parent_inheritance.toml` | ☐ |
+| Context deep nesting | `context/deep_nesting.toml` | ☐ |
+| Context session | `context/session.toml` | ☐ |
+| Context session recency | `context/session_recency_weight.toml` | ☐ |
+| Context hostname/user | `context/hostname.toml` | ☐ |
+| Context host switching | `context/host_switching.toml` | ☐ |
+| Context non-git repo | `context/non_git_repo.toml` | ☐ |
+| Sequence bigram | `sequence/bigram.toml` | ☐ |
+| Sequence trigram | `sequence/trigram.toml` | ☐ |
+| Sequence disabled | `sequence/disabled.toml` | ☐ |
+| Sequence low confidence | `sequence/low_confidence.toml` | ☐ |
+| Sequence conflicts | `sequence/conflicts.toml` | ☐ |
+| Similarity tokens | `similarity/token_matching.toml` | ☐ |
+| Similarity no overlap | `similarity/no_overlap.toml` | ☐ |
+
+### 10.2 Structural Semantics (Extended)
+
+| Component | Test File | Status |
+|-----------|-----------|--------|
+| Flag commutativity | `structure/flag_commutativity.toml` | ☐ |
+| Arg position strictness | `structure/arg_position.toml` | ☐ |
+| Flag-arg binding | `structure/flag_arg_binding.toml` | ☐ |
+| Quoted arguments | `structure/quotes.toml` | ☐ |
+| Environment prefix | `structure/env_prefix.toml` | ☐ |
+| Pipe handling | `structure/pipes.toml` | ☐ |
+| Cursor position | `structure/cursor.toml` | ☐ |
+| Long commands | `structure/long_commands.toml` | ☐ |
+| Command substitution | `structure/command_substitution.toml` | ☐ |
+| Redirection | `structure/redirection.toml` | ☐ |
+| Control operators | `structure/control_operators.toml` | ☐ |
+| Glob patterns | `structure/glob_patterns.toml` | ☐ |
+| Unicode | `structure/unicode.toml` | ☐ |
+
+### 10.3 Anti-Hallucination (Extended)
+
+| Component | Test File | Status |
+|-----------|-----------|--------|
+| Empty history | `anti_hallucination/empty_history.toml` | ☐ |
+| Strict prefix | `anti_hallucination/strict_prefix.toml` | ☐ |
+| Ghost candidates | `anti_hallucination/ghost_candidates.toml` | ☐ |
+| Cross-contamination | `anti_hallucination/cross_contamination.toml` | ☐ |
+| Case sensitivity | `anti_hallucination/case_sensitivity.toml` | ☐ |
+| Whitespace handling | `anti_hallucination/whitespace.toml` | ☐ |
+| Substring vs prefix | `anti_hallucination/substring_prefix.toml` | ☐ |
+
+### 10.4 Features (Extended)
+
+| Component | Test File | Status |
+|-----------|-----------|--------|
+| Alias expansion | `aliases/expansion.toml` | ☐ |
+| Alias suffix | `aliases/suffix.toml` | ☐ |
+| Alias with args | `aliases/with_args.toml` | ☐ |
+| Alias shadowing | `aliases/shadowing.toml` | ☐ |
+| Phase detection | `phase/detection.toml` | ☐ |
+| Phase transitions | `phase/transitions.toml` | ☐ |
+| Arg templates | `templates/args.toml` | ☐ |
+| Flag templates | `templates/flags.toml` | ☐ |
+
+### 10.5 Integration Tests
+
+| Component | Test File | Status |
+|-----------|-----------|--------|
+| Competing signals | `integration/competing_signals.toml` | ☐ |
+| Default weights | `integration/default_weights.toml` | ☐ |
+| Full stack | `integration/full_stack.toml` | ☐ |
+| DB assertions | `integration/db_assertions.toml` | ☐ |
+| All zero weights | `integration/zero_weights.toml` | ☐ |
+| Large history | `integration/large_history.toml` | ☐ |
+| Empty prefix | `integration/empty_prefix.toml` | ☐ |
+
+---
+
+## 11. Implementation Notes
+
+### 11.1 Files Already Implemented
+
+The following test files already exist in `src/testdata/tier1/` and should be verified against this specification:
+
+- `recency/decay_curve.toml`, `half_life.toml`, `future_timestamps.toml`, `invalid_timestamps.toml`
+- `frequency/basic_ranking.toml`, `repo_boost.toml`, `zero_frequency.toml`
+- `transition/basic_chain.toml`, `exit_status.toml`, `no_previous.toml`, `repo_specific.toml`
+- `context/cwd.toml`, `hostname.toml`, `parent_inheritance.toml`, `session_recency_weight.toml`, `session.toml`, `subdirectory.toml`
+- `sequence/bigram.toml`, `disabled.toml`, `low_confidence.toml`, `trigram.toml`
+- `similarity/no_overlap.toml`, `token_matching.toml`
+- `structure/arg_position.toml`, `cursor.toml`, `env_prefix.toml`, `flag_arg_binding.toml`, `flag_commutativity.toml`, `pipes.toml`, `quotes.toml`
+- `anti_hallucination/cross_contamination.toml`, `empty_history.toml`, `ghost_candidates.toml`, `strict_prefix.toml`
+- `aliases/expansion.toml`, `suffix.toml`
+- `phase/detection.toml`
+- `templates/args.toml`, `flags.toml`
+- `integration/competing_signals.toml`, `db_assertions.toml`, `default_weights.toml`, `full_stack.toml`
+
+### 11.2 Files Needing Addition
+
+Based on the gap analysis, the following new test files should be created:
+
+1. `recency/multi_half_life.toml` - Verify decay across multiple half-lives
+2. `frequency/high_scaling.toml` - Verify logarithmic behavior at high frequencies
+3. `frequency/tiebreak.toml` - Verify tie-breaking behavior
+4. `transition/long_chains.toml` - Verify multi-hop transition chains
+5. `context/deep_nesting.toml` - Verify 4+ level subdirectory inheritance
+6. `context/non_git_repo.toml` - Verify behavior without .git marker
+7. `context/host_switching.toml` - Verify host context isolation
+8. `sequence/conflicts.toml` - Verify conflicting sequence resolution
+9. `structure/long_commands.toml` - Verify handling of very long commands
+10. `structure/command_substitution.toml` - Verify $() and backtick handling
+11. `structure/redirection.toml` - Verify >, >>, < handling
+12. `structure/control_operators.toml` - Verify &&, ||, ;, & handling
+13. `structure/glob_patterns.toml` - Verify * and ? handling
+14. `structure/unicode.toml` - Verify non-ASCII character handling
+15. `anti_hallucination/case_sensitivity.toml` - Verify case-sensitive matching
+16. `anti_hallucination/whitespace.toml` - Verify whitespace handling
+17. `anti_hallucination/substring_prefix.toml` - Verify only prefix matches
+18. `aliases/with_args.toml` - Verify aliases with embedded arguments
+19. `aliases/shadowing.toml` - Verify alias shadowing behavior
+20. `phase/transitions.toml` - Verify rapid phase transitions
+21. `integration/zero_weights.toml` - Verify all-zero weights edge case
+22. `integration/large_history.toml` - Verify performance with large history
+23. `integration/empty_prefix.toml` - Verify empty prefix behavior
+
+### 11.3 Priority Order for Implementation
+
+**P0 - Critical (must have for correctness):**
+1. Anti-hallucination edge cases (case sensitivity, whitespace, substring)
+2. Structure edge cases (redirection, control operators, command substitution)
+3. Context edge cases (non-git repo, deep nesting)
+
+**P1 - High (important for robustness):**
+4. Frequency edge cases (tiebreak, high scaling)
+5. Transition edge cases (long chains)
+6. Sequence edge cases (conflicts)
+
+**P2 - Medium (good to have):**
+7. Unicode handling
+8. Alias edge cases
+9. Phase transitions
+
+**P3 - Low (nice to have):**
+10. Integration edge cases (zero weights, large history)
+11. Glob patterns
+12. Multi-half-life recency

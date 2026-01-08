@@ -1,0 +1,72 @@
+[meta]
+description = "Verify repo-specific transition chains"
+tags = ["transition", "repo"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 1.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[fs]
+"rust_project/.git/" = "dir"
+"node_project/.git/" = "dir"
+
+[[history]]
+cmd = "git checkout"
+at = "-10m"
+cwd = "rust_project"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "main"
+at = "-9m"
+cwd = "rust_project"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git checkout"
+at = "-8m"
+cwd = "node_project"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "master"
+at = "-7m"
+cwd = "node_project"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "rust_repo_branch"
+mode = "next_command"
+prev_command = "git checkout"
+prev_exit = 0
+
+[scenario.context]
+cwd = "rust_project"
+session = "s1"
+
+[scenario.expect]
+top = ["main"]
+absent = ["master"]
+
+[[scenario]]
+name = "node_repo_branch"
+mode = "next_command"
+prev_command = "git checkout"
+prev_exit = 0
+
+[scenario.context]
+cwd = "node_project"
+session = "s1"
+
+[scenario.expect]
+top = ["master"]
+absent = ["main"]

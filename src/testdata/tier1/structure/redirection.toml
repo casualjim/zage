@@ -1,0 +1,54 @@
+[meta]
+description = "Verify redirection operator handling"
+tags = ["structure", "edge", "redirection"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+
+[[history]]
+cmd = "make build > build.log 2>&1"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "cat input.txt < data.csv"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 3
+
+[[history]]
+cmd = "echo 'log' >> app.log"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 4
+
+[[scenario]]
+name = "redirect_stdout"
+mode = "completion"
+input = "make build >"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["make build > build.log 2>&1"]
+
+[[scenario]]
+name = "redirect_append"
+mode = "completion"
+input = "echo 'log' >>"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+contains = ["echo 'log' >> app.log"]

@@ -1,0 +1,40 @@
+[meta]
+description = "Verify tie-breaking for equal frequency"
+tags = ["frequency", "edge", "tiebreak"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 1.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "cmd_a"
+at = "-2h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10
+
+[[history]]
+cmd = "cmd_b"
+at = "-1h"  # More recent
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 10  # Same frequency
+
+[[scenario]]
+name = "equal_frequency_tiebreak"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[scenario.expect]
+# Should be ordered by recency as tiebreaker
+top = ["cmd_b", "cmd_a"]

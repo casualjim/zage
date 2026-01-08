@@ -1,0 +1,44 @@
+[meta]
+description = "Verify parent repo context across multiple levels"
+tags = ["context", "cwd", "repo", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 1.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[fs]
+"workspace/.git/" = "dir"
+"workspace/app/src/deep/" = "dir"
+"workspace/tools/" = "dir"
+
+[[history]]
+cmd = "app_cmd"
+at = "-1h"
+cwd = "workspace/app"
+exit = 0
+session = "s1"
+count = 5
+
+[[history]]
+cmd = "tools_cmd"
+at = "-2h"
+cwd = "workspace/tools"
+exit = 0
+session = "s1"
+count = 2
+
+[[scenario]]
+name = "parent_repo_inheritance"
+mode = "next_command"
+
+[scenario.context]
+cwd = "workspace/app/src/deep"
+session = "s1"
+
+[scenario.expect]
+top = ["app_cmd", "tools_cmd"]

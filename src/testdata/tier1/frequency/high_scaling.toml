@@ -1,0 +1,46 @@
+[meta]
+description = "Verify logarithmic scaling for high frequency commands"
+tags = ["frequency", "edge", "scaling"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 1.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "freq_100"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 100
+
+[[history]]
+cmd = "freq_1000"
+at = "-1h"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+count = 1000
+
+[[scenario]]
+name = "high_frequency_scaling"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+session = "s1"
+
+[[scenario.expect.candidate]]
+cmd = "freq_100"
+min_frequency = 4.6  # ln(101) ≈ 4.615
+max_frequency = 4.7
+
+[[scenario.expect.candidate]]
+cmd = "freq_1000"
+min_frequency = 6.9  # ln(1001) ≈ 6.909
+max_frequency = 7.0

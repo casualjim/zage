@@ -1,0 +1,36 @@
+[meta]
+description = "Verify transition scoring with no previous command"
+tags = ["transition", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 1.0
+w_context = 0.0
+w_sequence = 0.0
+w_similarity = 0.0
+
+[[history]]
+cmd = "git status"
+at = "-10m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git add ."
+at = "-9m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "no_previous_command"
+mode = "next_command"
+
+[scenario.context]
+cwd = "/tmp"
+
+[scenario.expect]
+empty = true

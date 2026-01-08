@@ -1,0 +1,73 @@
+[meta]
+description = "Verify low-confidence sequences are filtered"
+tags = ["sequence", "edge"]
+
+[physics]
+now = "2024-06-15T12:00:00Z"
+w_recency = 0.0
+w_frequency = 0.0
+w_transition = 0.0
+w_context = 0.0
+w_sequence = 1.0
+w_similarity = 0.0
+
+[options]
+use_sequences = true
+run_sequence_analysis = true
+min_sequence_support = 2
+min_sequence_confidence = 0.9
+min_sequence_lift = 2.0
+
+[[history]]
+cmd = "git pull"
+at = "-20m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "cargo build"
+at = "-19m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git pull"
+at = "-18m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "cargo test"
+at = "-17m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "git pull"
+at = "-16m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[history]]
+cmd = "cargo build"
+at = "-15m"
+cwd = "/tmp"
+exit = 0
+session = "s1"
+
+[[scenario]]
+name = "low_confidence_sequence"
+mode = "next_command"
+prev_command = "git pull"
+prev_exit = 0
+
+[scenario.context]
+cwd = "/tmp"
+
+[scenario.expect]
+empty = true
