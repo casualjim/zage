@@ -4,6 +4,7 @@ hk = "latest"
 pkl = "latest"
 rust =  { version = "latest", profile = "default", components = "llvm-tools" }
 shellcheck = "latest"
+taplo = "latest"
 
 [tasks.pre-commit]
 run = "hk run pre-commit"

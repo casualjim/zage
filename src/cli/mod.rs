@@ -179,6 +179,20 @@ pub enum Commands {
   },
 }
 
+pub struct SuggestArgs {
+  pub count: usize,
+  pub current_line: Option<String>,
+  pub recent_limit: usize,
+  pub cwd: Option<String>,
+  pub hostname: Option<String>,
+  pub username: Option<String>,
+  pub session_id: Option<i64>,
+  pub no_sequences: bool,
+  pub completion_format: CompletionFormat,
+  pub show_scores: bool,
+  pub autosuggest: bool,
+}
+
 #[derive(Subcommand, Debug, Clone, Copy)]
 pub enum ServiceAction {
   /// Install the user service (systemd or launchd)
@@ -243,17 +257,19 @@ pub async fn run(cli: Cli) -> Result<()> {
     }) => {
       suggest::run(
         &db,
-        count,
-        current_line,
-        recent_limit,
-        cwd,
-        hostname,
-        username,
-        session_id,
-        no_sequences,
-        completion_format,
-        show_scores,
-        autosuggest,
+        SuggestArgs {
+          count,
+          current_line,
+          recent_limit,
+          cwd,
+          hostname,
+          username,
+          session_id,
+          no_sequences,
+          completion_format,
+          show_scores,
+          autosuggest,
+        },
       )
       .await?;
     }
@@ -263,14 +279,7 @@ pub async fn run(cli: Cli) -> Result<()> {
       min_lift,
       max_len,
     }) => {
-      sequences::run(
-        &db,
-        min_support,
-        min_confidence,
-        min_lift,
-        max_len,
-      )
-      .await?;
+      sequences::run(&db, min_support, min_confidence, min_lift, max_len).await?;
     }
     Some(Commands::Train {
       epochs,

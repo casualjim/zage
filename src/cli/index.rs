@@ -8,11 +8,7 @@ pub async fn run(db: &Db, max_commands: Option<usize>, with_sequences: bool) -> 
   let report = rebuild_stats(&db.conn, max_commands).await?;
   eprintln!(
     "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}, phase_stats={}",
-    report.commands,
-    report.transitions,
-    report.contexts,
-    report.token_cache,
-    report.phase_stats
+    report.commands, report.transitions, report.contexts, report.token_cache, report.phase_stats
   );
 
   if with_sequences {

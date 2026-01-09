@@ -1,12 +1,12 @@
 use std::collections::{HashMap, HashSet};
 
+use crate::core::{Candidate, Suggestion};
 use crate::hash_util::stable_hash;
 use crate::predict::ranking::{DEFAULT_RECENCY_HALF_LIFE_SECONDS, recency_score, token_similarity};
-use crate::core::{Candidate, Suggestion};
 use crate::tokenize::{extract_command_parts, normalized_tokens, tokenize, tokenize_index};
 
-use super::{BASE_FEATURES, FEATURE_COUNT, HASH_FEATURES};
 use super::config::RerankContext;
+use super::{BASE_FEATURES, FEATURE_COUNT, HASH_FEATURES};
 
 #[derive(Debug, Clone)]
 pub(crate) struct FeatureVector {
@@ -83,7 +83,11 @@ pub(crate) fn features_from_suggestion(
 
   let repo_match = if candidate.repo_freq > 0 { 1.0 } else { 0.0 };
   let session_match = if candidate.session_freq > 0 { 1.0 } else { 0.0 };
-  let head_recent = if recent_heads.contains(&head) { 1.0 } else { 0.0 };
+  let head_recent = if recent_heads.contains(&head) {
+    1.0
+  } else {
+    0.0
+  };
 
   let mut values = vec![0.0; FEATURE_COUNT];
   values[0] = tier1_score;
@@ -372,8 +376,7 @@ pub(crate) fn build_feature_matrix(vectors: &[Vec<f64>]) -> crate::Result<gbrt_r
       data[(row, col)] = *value;
     }
   }
-  gbrt_rs::FeatureMatrix::new(data)
-    .map_err(|err| crate::ZageError::GenericError(Box::new(err)))
+  gbrt_rs::FeatureMatrix::new(data).map_err(|err| crate::ZageError::GenericError(Box::new(err)))
 }
 
 pub(crate) fn feature_names() -> Vec<String> {
@@ -385,7 +388,10 @@ pub(crate) fn command_head(command: &str) -> String {
   if let Some(parts) = extract_command_parts(command, &tokens) {
     return parts.head;
   }
-  tokens.first().map(|tok| tok.raw.clone()).unwrap_or_default()
+  tokens
+    .first()
+    .map(|tok| tok.raw.clone())
+    .unwrap_or_default()
 }
 
 pub(crate) fn command_signature(command: &str, shellname: &str) -> Option<String> {

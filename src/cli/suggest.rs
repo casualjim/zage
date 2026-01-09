@@ -2,27 +2,28 @@ use std::collections::HashSet;
 
 use color_eyre::eyre::Result;
 
-use crate::cli::CompletionFormat;
+use crate::cli::{CompletionFormat, SuggestArgs};
 use crate::db::Db;
 use crate::predict::{ScoreBreakdown, SuggestConfig, Suggestion, suggest};
 use crate::server::{self, Request, Response};
 use crate::shell_history::get_hostname;
 use crate::tokenize::tokenize;
 
-pub async fn run(
-  db: &Db,
-  count: usize,
-  current_line: Option<String>,
-  recent_limit: usize,
-  cwd: Option<String>,
-  hostname: Option<String>,
-  username: Option<String>,
-  session_id: Option<i64>,
-  no_sequences: bool,
-  completion_format: CompletionFormat,
-  show_scores: bool,
-  autosuggest: bool,
-) -> Result<()> {
+pub async fn run(db: &Db, args: SuggestArgs) -> Result<()> {
+  let SuggestArgs {
+    count,
+    current_line,
+    recent_limit,
+    cwd,
+    hostname,
+    username,
+    session_id,
+    no_sequences,
+    completion_format,
+    show_scores,
+    autosuggest,
+  } = args;
+
   let cwd = match cwd {
     Some(val) => Some(val),
     None => std::env::current_dir()
@@ -31,8 +32,8 @@ pub async fn run(
   };
 
   let hostname = hostname.or_else(|| Some(get_hostname()));
-  let username = username
-    .or_else(|| uzers::get_current_username().map(|v| v.to_string_lossy().into_owned()));
+  let username =
+    username.or_else(|| uzers::get_current_username().map(|v| v.to_string_lossy().into_owned()));
 
   let has_prefix = current_line
     .as_ref()

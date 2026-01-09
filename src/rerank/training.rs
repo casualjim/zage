@@ -8,10 +8,10 @@ use rand::rng;
 use rand::seq::SliceRandom;
 use serde_json;
 
-use crate::{Result, ZageError};
 use crate::repo::{find_repo_root, read_git_branch};
 use crate::shell_history::Invocation;
 use crate::tokenize::normalized_tokens;
+use crate::{Result, ZageError};
 
 use super::calibration::{CalibrationParams, fit_platt, fit_stack, sigmoid};
 use super::config::{TrainConfig, TrainReport};

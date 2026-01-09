@@ -41,8 +41,8 @@ pub async fn run(
   };
   for invocation in invocations.iter_mut() {
     if invocation.expanded_command.is_empty() {
-      invocation.expanded_command = expand_alias(&invocation.command, &aliases)
-        .unwrap_or_else(|| invocation.command.clone());
+      invocation.expanded_command =
+        expand_alias(&invocation.command, &aliases).unwrap_or_else(|| invocation.command.clone());
     }
   }
   import_history(&db.conn, invocations).await?;
@@ -55,11 +55,7 @@ pub async fn run(
     let token_seq_report = analyze_token_sequences(&db.conn, SequenceConfig::default()).await?;
     eprintln!(
       "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}, phase_stats={}",
-      report.commands,
-      report.transitions,
-      report.contexts,
-      report.token_cache,
-      report.phase_stats
+      report.commands, report.transitions, report.contexts, report.token_cache, report.phase_stats
     );
     eprintln!(
       "Command sequence stats: sequences={}, bigrams={}, trigrams={}",

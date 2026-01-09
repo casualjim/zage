@@ -4,9 +4,9 @@ use std::path::Path;
 mod bash;
 mod zsh;
 
+pub use crate::core::Invocation;
 pub use bash::parse_history_file as parse_bash_history;
 pub use zsh::parse_history_file as parse_zsh_history;
-pub use crate::core::Invocation;
 
 /// Which shell history format to import
 #[derive(Clone, Copy, Debug)]

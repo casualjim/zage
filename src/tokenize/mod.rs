@@ -6,7 +6,7 @@ mod normalize;
 mod tree_sitter;
 
 pub use command_parts::{CommandParts, extract_command_parts};
-pub use lexer::{tokenize, token_strings, token_strings_index, tokenize_index};
+pub use lexer::{token_strings, token_strings_index, tokenize, tokenize_index};
 pub use normalize::{normalize_token, normalized_tokens};
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

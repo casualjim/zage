@@ -11,11 +11,15 @@ mod training;
 
 pub use calibration::CalibrationParams;
 pub use config::{RerankContext, TrainConfig, TrainReport};
-pub use model::{ModelStatus, clear_model_cache, model_status, reset_model, runtime_context, warm_model_cache};
+pub use model::{
+  ModelStatus, clear_model_cache, model_status, reset_model, runtime_context, warm_model_cache,
+};
 pub use training::train_model;
 
 #[cfg(test)]
-pub(crate) use features::{add_hash, build_feature_matrix, feature_names, features_from_suggestion};
+pub(crate) use features::{
+  add_hash, build_feature_matrix, feature_names, features_from_suggestion,
+};
 pub(crate) use model::rerank_suggestions;
 
 #[cfg(test)]
@@ -23,11 +27,11 @@ pub(crate) use model::load_model;
 #[cfg(test)]
 mod tests {
   use super::*;
-  use std::collections::{HashMap, HashSet};
-  use gbrt_rs::{Dataset, GBRTModel, ModelIO};
-  use gbrt_rs::boosting::GBRTConfig;
   use crate::core::{Candidate, Suggestion};
   use crate::predict::{ScoreBreakdown, candidate_for_test};
+  use gbrt_rs::boosting::GBRTConfig;
+  use gbrt_rs::{Dataset, GBRTModel, ModelIO};
+  use std::collections::{HashMap, HashSet};
   use std::sync::Mutex;
   use tempfile::tempdir;
 

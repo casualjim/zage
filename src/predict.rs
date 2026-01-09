@@ -3,19 +3,19 @@ use std::collections::{HashMap, HashSet};
 use libsql::{Connection, Value};
 
 use crate::Result;
-pub use crate::core::{ScoreBreakdown, Suggestion};
-pub use config::{RankingWeights, SuggestConfig};
 use crate::core::{Candidate, SystemTimeProvider, TimeProvider};
+pub use crate::core::{ScoreBreakdown, Suggestion};
 use crate::db::get_recent_invocations;
 use crate::phase::PhaseConfig;
 use crate::repo::find_repo_root;
 use crate::rerank;
 use crate::shell_history::detect_shellname;
 use crate::tokenize::{TokenKind, extract_command_parts, normalized_tokens, tokenize_index};
+pub use config::{RankingWeights, SuggestConfig};
 
 pub mod aliases;
-mod config;
 mod candidates;
+mod config;
 mod phase_support;
 pub(crate) mod ranking;
 mod runtime;

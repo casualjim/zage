@@ -9,10 +9,10 @@ use serde::Deserialize;
 use serde_json;
 use tracing::warn;
 
-use crate::{Result, ZageError};
 use crate::core::{Candidate, Suggestion};
-use crate::rerank_config::RerankConfig;
 use crate::repo::read_git_branch;
+use crate::rerank_config::RerankConfig;
+use crate::{Result, ZageError};
 
 use super::MODEL_NAME;
 use super::calibration::{CalibrationParams, sigmoid};
