@@ -49,10 +49,10 @@ for file in "${history_files[@]}"; do
   if [[ "$file" == *.zsh_history* ]] || [[ "$file" == *zsh* ]]; then
     shell="zsh"
   fi
-  cargo run --quiet -- import "$file" --shell "$shell"
+  cargo run --quiet --release -- import "$file" --shell "$shell" --no-index
 done
 
-cargo run --quiet -- index --with-sequences
-cargo run --quiet -- train --min-history 1000 --max-samples 25000
+cargo run --quiet --release -- index --with-sequences
+cargo run --quiet --release -- train --min-history 1000 --max-samples 25000
 
 echo "Pretrain complete: $model_dir"

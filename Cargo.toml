@@ -3,6 +3,9 @@ name = "zage"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+tier1-tests = ["tempfile"]
+
 [dependencies]
 bstr = { version = "1.9.0", features = ["serde"] }
 clap = { version = "4.5.37", features = ["derive", "env", "string", "unicode"] }
@@ -24,6 +27,7 @@ rkyv = { version = "0.7.44", features = ["validation"] }
 serde = { version = "1.0.219", features = ["derive"] }
 serde_json = "1.0.140"
 serde_yaml = "0.9"
+tempfile = { version = "3.20.0", optional = true }
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 toml = "0.9"
@@ -33,7 +37,6 @@ tree-sitter = "0.26.3"
 tree-sitter-bash = "0.25.1"
 tree-sitter-zsh = "0.52.0"
 uuid = { version = "1.16.0", features = ["fast-rng", "std", "v7"] }
-tempfile = { version = "3.20.0", optional = true }
 uzers = "0.12"
 
 # Force OpenSSL to use vendored version for Linux targets to avoid cross-compilation issues
@@ -54,9 +57,6 @@ xz2 = "0.1"
 [profile.dist]
 inherits = "release"
 lto = "thin"
-
-[features]
-tier1-tests = ["tempfile"]
 
 [[test]]
 name = "tier1"

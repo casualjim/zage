@@ -11,4 +11,12 @@ if [ -x "$scripts_dir/fetch_masaryk.sh" ]; then
   "$scripts_dir/fetch_masaryk.sh"
 fi
 
+if [ -x "$scripts_dir/fetch_uci_unix.sh" ]; then
+  "$scripts_dir/fetch_uci_unix.sh"
+fi
+
+if [ -x "$scripts_dir/fetch_sea.sh" ]; then
+  "$scripts_dir/fetch_sea.sh"
+fi
+
 echo "Corpora fetch complete."

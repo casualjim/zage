@@ -48,6 +48,9 @@ enum Commands {
     /// Shell type (bash or zsh); defaults to $SHELL env var basename
     #[arg(long, env = "SHELL")]
     shell: Shell,
+    /// Skip rebuilding stats and sequences after import (for bulk imports)
+    #[arg(long)]
+    no_index: bool,
   },
 
   /// Build or rebuild index tables for prediction
@@ -221,6 +224,7 @@ async fn main() -> Result<()> {
       hostname,
       username,
       shell,
+      no_index,
     }) => {
       // Import history and exit
       debug!("File argument value: {:?}", file);
@@ -253,26 +257,30 @@ async fn main() -> Result<()> {
         }
       }
       import_history(&db.conn, invocations).await?;
-      let report = rebuild_stats(&db.conn, None).await?;
-      let seq_report = analyze_sequences(&db.conn, SequenceConfig::default()).await?;
-      let token_seq_report = analyze_token_sequences(&db.conn, SequenceConfig::default()).await?;
-      println!("Imported history from {:?}", history_file);
-      println!(
-        "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}, phase_stats={}",
-        report.commands,
-        report.transitions,
-        report.contexts,
-        report.token_cache,
-        report.phase_stats
-      );
-      println!(
-        "Command sequence stats: sequences={}, bigrams={}, trigrams={}",
-        seq_report.sequences, seq_report.bigrams, seq_report.trigrams
-      );
-      println!(
-        "Token sequence stats: sequences={}, bigrams={}, trigrams={}",
-        token_seq_report.sequences, token_seq_report.bigrams, token_seq_report.trigrams
-      );
+      eprintln!("Imported history from {:?}", history_file);
+      if *no_index {
+        eprintln!("Index rebuild skipped (requested via --no-index)");
+      } else {
+        let report = rebuild_stats(&db.conn, None).await?;
+        let seq_report = analyze_sequences(&db.conn, SequenceConfig::default()).await?;
+        let token_seq_report = analyze_token_sequences(&db.conn, SequenceConfig::default()).await?;
+        eprintln!(
+          "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}, phase_stats={}",
+          report.commands,
+          report.transitions,
+          report.contexts,
+          report.token_cache,
+          report.phase_stats
+        );
+        eprintln!(
+          "Command sequence stats: sequences={}, bigrams={}, trigrams={}",
+          seq_report.sequences, seq_report.bigrams, seq_report.trigrams
+        );
+        eprintln!(
+          "Token sequence stats: sequences={}, bigrams={}, trigrams={}",
+          token_seq_report.sequences, token_seq_report.bigrams, token_seq_report.trigrams
+        );
+      }
       info!("Imported history from {:?}", history_file);
     }
 
@@ -281,7 +289,7 @@ async fn main() -> Result<()> {
       with_sequences,
     }) => {
       let report = rebuild_stats(&db.conn, *max_commands).await?;
-      println!(
+      eprintln!(
         "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}, phase_stats={}",
         report.commands,
         report.transitions,
@@ -292,12 +300,12 @@ async fn main() -> Result<()> {
 
       if *with_sequences {
         let seq_report = analyze_sequences(&db.conn, SequenceConfig::default()).await?;
-        println!(
+        eprintln!(
           "Command sequence stats: sequences={}, bigrams={}, trigrams={}",
           seq_report.sequences, seq_report.bigrams, seq_report.trigrams
         );
         let token_report = analyze_token_sequences(&db.conn, SequenceConfig::default()).await?;
-        println!(
+        eprintln!(
           "Token sequence stats: sequences={}, bigrams={}, trigrams={}",
           token_report.sequences, token_report.bigrams, token_report.trigrams
         );
@@ -476,12 +484,12 @@ async fn main() -> Result<()> {
         max_len: *max_len,
       };
       let report = analyze_sequences(&db.conn, config.clone()).await?;
-      println!(
+      eprintln!(
         "Command sequence stats: sequences={}, bigrams={}, trigrams={}",
         report.sequences, report.bigrams, report.trigrams
       );
       let token_report = analyze_token_sequences(&db.conn, config).await?;
-      println!(
+      eprintln!(
         "Token sequence stats: sequences={}, bigrams={}, trigrams={}",
         token_report.sequences, token_report.bigrams, token_report.trigrams
       );
@@ -502,7 +510,7 @@ async fn main() -> Result<()> {
         },
       )
       .await?;
-      println!(
+      eprintln!(
         "Trained reranker: samples={}, pairs={}, validation_accuracy={:.2}, model={}",
         report.samples,
         report.pairs,
@@ -512,7 +520,7 @@ async fn main() -> Result<()> {
     }
     Some(Commands::ModelStatus) => {
       if let Some(model) = model_status()? {
-        println!(
+        eprintln!(
           "Reranker model (trees={}, objective={}, loss={}, created_at={}, path={})",
           model.n_trees,
           model.objective,
@@ -521,12 +529,12 @@ async fn main() -> Result<()> {
           model.model_path.display()
         );
       } else {
-        println!("Reranker model not found");
+        eprintln!("Reranker model not found");
       }
     }
     Some(Commands::ModelReset) => {
       reset_model()?;
-      println!("Reranker model reset");
+      eprintln!("Reranker model reset");
     }
 
     Some(Commands::Server { .. }) => {

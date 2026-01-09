@@ -2,6 +2,7 @@
 hk = "latest"
 pkl = "latest"
 rust = "latest"
+shellcheck = "latest"
 
 [tasks.pre-commit]
 run = "hk run pre-commit"

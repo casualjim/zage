@@ -8,16 +8,17 @@ use crate::db::get_recent_invocations;
 use crate::phase::PhaseConfig;
 use crate::repo::find_repo_root;
 use crate::rerank;
+use crate::shell_history::detect_shellname;
 use crate::tokenize::{TokenKind, extract_command_parts, normalized_tokens, tokenize_index};
 
 pub mod aliases;
 mod candidates;
 mod phase_support;
 pub(crate) mod ranking;
-#[cfg(any(test, feature = "tier1-tests"))]
-pub mod verifier;
 mod sql;
 mod templates;
+#[cfg(any(test, feature = "tier1-tests"))]
+pub mod verifier;
 
 use crate::rerank_config::RerankConfig;
 use aliases::{
@@ -30,12 +31,12 @@ use candidates::{
   push_opt_i64, push_opt_string,
 };
 use phase_support::{
-  PhaseSignal, command_head_for_phase, detect_session_phase,
-  detect_session_phase_from_commands, load_phase_for_heads, phase_match_boost,
+  PhaseSignal, command_head_for_phase, detect_session_phase, detect_session_phase_from_commands,
+  load_phase_for_heads, phase_match_boost,
 };
 use ranking::{
-  load_normalized_tokens, low_confidence, recency_score, token_similarity,
-  DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+  DEFAULT_RECENCY_HALF_LIFE_SECONDS, load_normalized_tokens, low_confidence, recency_score,
+  token_similarity,
 };
 use sql::query_prepared;
 use templates::{
@@ -46,6 +47,7 @@ const GLOBAL_CANDIDATE_LIMIT: usize = 50;
 const GLOBAL_CANDIDATE_LIMIT_FALLBACK: usize = 200;
 const RECENT_CANDIDATE_LIMIT: usize = 200;
 const RECENT_CANDIDATE_LIMIT_FALLBACK: usize = 500;
+const FULL_LINE_POOL_LIMIT: usize = 50;
 
 pub trait TimeProvider: Send + Sync {
   fn now(&self) -> i64;
@@ -144,9 +146,9 @@ pub(crate) struct Candidate {
   context_freq: i64,
   pub(crate) session_freq: i64,
   session_last_seen: i64,
-  sequence_confidence: f64,
-  sequence_lift: f64,
-  sequence_prefix_len: usize,
+  pub(crate) sequence_confidence: f64,
+  pub(crate) sequence_lift: f64,
+  pub(crate) sequence_prefix_len: usize,
 }
 
 #[derive(Debug, Clone)]
@@ -390,11 +392,13 @@ pub(crate) async fn suggest_with_runtime(
     }
   }
 
+  let shellname = detect_shellname();
   let context = rerank::runtime_context(
     &repo_root,
     &recent_heads,
     session_tokens,
     session_phase.as_ref().map(|phase| phase.phase.as_str()),
+    &shellname,
   );
   let _ = rerank::rerank_suggestions(&mut scored, &candidates, &context, &rerank_config);
 
@@ -601,6 +605,11 @@ async fn completion_candidates(
     .and_then(find_repo_root)
     .unwrap_or_default();
   let prefer_full_line = config.prefer_full_line;
+  let pool_limit = if prefer_full_line {
+    config.max_results.max(FULL_LINE_POOL_LIMIT)
+  } else {
+    config.max_results
+  };
   let token_priors = token_sequence_predictions(conn, prefix_norm).await?;
   let (prefix_flags, prefix_args) = {
     let tokens = tokenize_index("sh", prefix);
@@ -617,8 +626,8 @@ async fn completion_candidates(
           .iter()
           .map(|arg| arg.normalized.clone())
           .collect::<Vec<_>>();
-        if !ends_with_space {
-          if let Some(last) = tokens.last()
+        if !ends_with_space
+          && let Some(last) = tokens.last()
             && matches!(
               last.kind,
               TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment
@@ -637,7 +646,6 @@ async fn completion_candidates(
               args.remove(pos);
             }
           }
-        }
         (flags, args)
       })
       .unwrap_or_default()
@@ -659,7 +667,7 @@ async fn completion_candidates(
         .partial_cmp(&a.score)
         .unwrap_or(std::cmp::Ordering::Equal)
     });
-    suggestions.truncate(config.max_results);
+    suggestions.truncate(pool_limit);
     env_suggestions = Some(suggestions);
   }
 
@@ -721,7 +729,7 @@ async fn completion_candidates(
             .partial_cmp(&a.score)
             .unwrap_or(std::cmp::Ordering::Equal)
         });
-        arg_suggestions.truncate(config.max_results);
+        arg_suggestions.truncate(pool_limit);
         let last_char = prefix.chars().last();
         let ends_with_space = last_char.map(|c| c.is_whitespace()).unwrap_or(false);
         let ends_with_quote = matches!(last_char, Some('"') | Some('\''));
@@ -810,9 +818,9 @@ async fn completion_candidates(
 
     let expanded = expand_alias(&command, aliases);
     let expanded_for_score = expanded.as_deref().unwrap_or(&command);
-    let matches_prefix = match_prefixes.iter().any(|variant| {
-      command.starts_with(variant) || expanded_for_score.starts_with(variant)
-    });
+    let matches_prefix = match_prefixes
+      .iter()
+      .any(|variant| command.starts_with(variant) || expanded_for_score.starts_with(variant));
     if !matches_prefix {
       continue;
     }
@@ -1004,7 +1012,11 @@ async fn completion_candidates(
 
   if let Some(mut suggestions) = env_suggestions {
     if !scored.is_empty() {
-      let weight: f64 = if apply_env_prefix.is_empty() { 0.8 } else { 1.0 };
+      let weight: f64 = if apply_env_prefix.is_empty() {
+        0.8
+      } else {
+        1.0
+      };
       if (weight - 1.0).abs() > f64::EPSILON {
         for suggestion in suggestions.iter_mut() {
           suggestion.score *= weight;

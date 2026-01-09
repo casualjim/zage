@@ -84,7 +84,7 @@ mcp__rust-lsp__completion "crates/slipstreamd/src/routes.rs" 42 20
 **Remember: When you need to understand or navigate code, reach for the Rust LSP first!**
 
 
-> REMINDER: 
+> REMINDER:
 > ALWAYS get approval from the user for git checkout/reset/restore/revert/...
 > NEVER run destructive git commands without explicit approval
 

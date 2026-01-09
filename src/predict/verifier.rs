@@ -19,8 +19,8 @@ use crate::shell_history::Invocation;
 use super::RankingWeights;
 use super::ScoreBreakdown;
 use super::SuggestConfig;
-use super::Suggestion;
 use super::SuggestRuntime;
+use super::Suggestion;
 use super::SystemTimeProvider;
 use super::TimeProvider;
 use super::aliases::expand_alias;
@@ -222,7 +222,7 @@ fn build_runtime(
     let provider = SystemTimeProvider;
     provider.now()
   };
-  let weights = test_config.weights.unwrap_or_else(RankingWeights::default);
+  let weights = test_config.weights.unwrap_or_default();
   let recency_half_life = test_config
     .recency_half_life
     .unwrap_or(DEFAULT_RECENCY_HALF_LIFE_SECONDS);
@@ -286,7 +286,9 @@ fn parse_relative_offset(raw: &str) -> Result<i64> {
     (1i64, raw)
   };
   if rest.is_empty() {
-    return Err(ZageError::ConfigError("relative offset missing value".to_string()));
+    return Err(ZageError::ConfigError(
+      "relative offset missing value".to_string(),
+    ));
   }
   let last = rest.chars().last().unwrap_or('s');
   if last.is_ascii_digit() {
@@ -435,11 +437,7 @@ fn build_weights(physics: Option<&Physics>) -> Option<RankingWeights> {
     weights.similarity = value;
     changed = true;
   }
-  if changed {
-    Some(weights)
-  } else {
-    None
-  }
+  if changed { Some(weights) } else { None }
 }
 
 fn build_test_config(physics: Option<&Physics>) -> Result<TestConfig> {
@@ -478,12 +476,8 @@ fn build_suggest_config(
   let mut config = SuggestConfig::default();
   config.recent_limit = 50;
   let expect = &scenario.expect;
-  let top_items = expect.top.as_ref().map(Vec::as_slice).unwrap_or(&[]);
-  let contains_items = expect
-    .contains
-    .as_ref()
-    .map(Vec::as_slice)
-    .unwrap_or(&[]);
+  let top_items = expect.top.as_deref().unwrap_or(&[]);
+  let contains_items = expect.contains.as_deref().unwrap_or(&[]);
   let mut required = top_items.len();
   if !contains_items.is_empty() {
     let mut extras = 0usize;
@@ -503,9 +497,7 @@ fn build_suggest_config(
   required = required.max(expect.min_results.unwrap_or(0));
   let max_results = expect.max_results.unwrap_or(required.max(1));
   config.max_results = max_results;
-  config.use_sequences = options
-    .and_then(|opt| opt.use_sequences)
-    .unwrap_or(true);
+  config.use_sequences = options.and_then(|opt| opt.use_sequences).unwrap_or(true);
   config.prefix = scenario_prefix(scenario);
 
   let ctx = scenario.context.as_ref();
@@ -757,10 +749,7 @@ fn compare_numeric(actual: f64, operator: &str, expected: f64) -> bool {
   }
 }
 
-async fn assert_db_expectations(
-  conn: &Connection,
-  scenario: &Scenario,
-) -> Result<()> {
+async fn assert_db_expectations(conn: &Connection, scenario: &Scenario) -> Result<()> {
   let expects = match scenario.expect.db.as_ref() {
     Some(list) => list,
     None => return Ok(()),
@@ -769,7 +758,12 @@ async fn assert_db_expectations(
     let params = expect
       .params
       .as_ref()
-      .map(|values| values.iter().map(expect_value_to_libsql).collect::<Vec<_>>())
+      .map(|values| {
+        values
+          .iter()
+          .map(expect_value_to_libsql)
+          .collect::<Vec<_>>()
+      })
       .unwrap_or_default();
     let mut rows = conn
       .query(&expect.sql, libsql::params_from_iter(params))
@@ -787,7 +781,9 @@ async fn assert_db_expectations(
         compare_numeric(actual as f64, &expect.operator, *expected as f64)
       }
       ExpectedValue::Float(expected) => {
-        let actual = row.get::<f64>(0).or_else(|_| row.get::<i64>(0).map(|v| v as f64))?;
+        let actual = row
+          .get::<f64>(0)
+          .or_else(|_| row.get::<i64>(0).map(|v| v as f64))?;
         compare_numeric(actual, &expect.operator, *expected)
       }
       ExpectedValue::String(expected) => {
@@ -810,9 +806,7 @@ async fn assert_db_expectations(
     };
     if !ok {
       let description = expect
-        .description
-        .as_ref()
-        .map(String::as_str)
+        .description.as_deref()
         .unwrap_or("db assertion failed");
       return Err(ZageError::ConfigError(format!(
         "scenario {}: {}",
@@ -858,7 +852,10 @@ fn set_env_guard(key: &'static str, value: Option<String>) -> EnvGuard {
 
 fn env_lock() -> std::sync::MutexGuard<'static, ()> {
   static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-  LOCK.get_or_init(|| Mutex::new(())).lock().expect("env lock")
+  LOCK
+    .get_or_init(|| Mutex::new(()))
+    .lock()
+    .expect("env lock")
 }
 
 fn build_phases_config(phases: &HashMap<String, Vec<String>>) -> String {
@@ -912,14 +909,7 @@ async fn run_tier1_spec(path: &Path, scenario_index: Option<usize>) -> Result<()
   let test_config = build_test_config(spec.physics.as_ref())?;
   let physics_now = test_config.now;
 
-  seed_history(
-    &db.conn,
-    &spec.history,
-    &temp_dir,
-    physics_now,
-    &aliases,
-  )
-  .await?;
+  seed_history(&db.conn, &spec.history, &temp_dir, physics_now, &aliases).await?;
 
   let _env_lock = env_lock();
   let run_phase_indexing = spec

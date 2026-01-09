@@ -165,13 +165,11 @@ pub(crate) async fn add_context_candidates(
   }
 
   if hostname.is_some() || username.is_some() {
-    if hostname.is_some()
-      && fetch_context_candidates(conn, cwd, hostname, None, candidates).await?
+    if hostname.is_some() && fetch_context_candidates(conn, cwd, hostname, None, candidates).await?
     {
       return Ok(());
     }
-    if username.is_some()
-      && fetch_context_candidates(conn, cwd, None, username, candidates).await?
+    if username.is_some() && fetch_context_candidates(conn, cwd, None, username, candidates).await?
     {
       return Ok(());
     }

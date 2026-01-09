@@ -69,8 +69,15 @@ pub(crate) async fn arg_template_candidates(
     token_priors,
   };
 
-  let repo_positional =
-    fetch_arg_candidates(conn, &repo_query, ctx.arg_index, &like, now, recency_half_life).await?;
+  let repo_positional = fetch_arg_candidates(
+    conn,
+    &repo_query,
+    ctx.arg_index,
+    &like,
+    now,
+    recency_half_life,
+  )
+  .await?;
 
   let repo_any = fetch_arg_candidates_any(conn, &repo_query, &like, now, recency_half_life).await?;
 
@@ -85,9 +92,15 @@ pub(crate) async fn arg_template_candidates(
       token_priors,
     };
 
-    global_positional =
-      fetch_arg_candidates(conn, &global_query, ctx.arg_index, &like, now, recency_half_life)
-        .await?;
+    global_positional = fetch_arg_candidates(
+      conn,
+      &global_query,
+      ctx.arg_index,
+      &like,
+      now,
+      recency_half_life,
+    )
+    .await?;
 
     global_any =
       fetch_arg_candidates_any(conn, &global_query, &like, now, recency_half_life).await?;
@@ -145,7 +158,15 @@ pub(crate) async fn env_template_candidates(
     .unwrap_or_else(|| "%".to_string());
 
   let repo_env = if ctx.match_on_key {
-    fetch_env_key_candidates(conn, &ctx.repo_root, &like, &ctx.base, now, recency_half_life).await?
+    fetch_env_key_candidates(
+      conn,
+      &ctx.repo_root,
+      &like,
+      &ctx.base,
+      now,
+      recency_half_life,
+    )
+    .await?
   } else {
     fetch_env_candidates(
       conn,
@@ -164,7 +185,16 @@ pub(crate) async fn env_template_candidates(
     global_env = if ctx.match_on_key {
       fetch_env_key_candidates(conn, "", &like, &ctx.base, now, recency_half_life).await?
     } else {
-      fetch_env_candidates(conn, "", &like, &ctx.base, token_priors, now, recency_half_life).await?
+      fetch_env_candidates(
+        conn,
+        "",
+        &like,
+        &ctx.base,
+        token_priors,
+        now,
+        recency_half_life,
+      )
+      .await?
     };
   }
 
@@ -914,9 +944,9 @@ mod tests {
       1_000,
       crate::predict::ranking::DEFAULT_RECENCY_HALF_LIFE_SECONDS,
     )
-      .await
-      .unwrap()
-      .unwrap();
+    .await
+    .unwrap()
+    .unwrap();
     let commands: Vec<String> = suggestions.into_iter().map(|s| s.command).collect();
 
     assert!(commands.iter().any(|c| c == "git status"));
@@ -947,9 +977,9 @@ mod tests {
       1_000,
       crate::predict::ranking::DEFAULT_RECENCY_HALF_LIFE_SECONDS,
     )
-      .await
-      .unwrap()
-      .unwrap();
+    .await
+    .unwrap()
+    .unwrap();
     let commands: Vec<String> = suggestions.into_iter().map(|s| s.command).collect();
 
     assert!(commands.iter().any(|c| c == "git commit"));

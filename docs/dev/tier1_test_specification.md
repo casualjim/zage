@@ -2168,7 +2168,7 @@ value = 1.5
 
 ```rust
 /// Ranking weights - mirrors src/predict.rs RankingWeights
-/// Default values: recency=0.25, frequency=0.25, transition=0.20, 
+/// Default values: recency=0.25, frequency=0.25, transition=0.20,
 ///                 context=0.15, sequence=0.10, similarity=0.05
 /// Note: session_recency has hardcoded weight of 0.1 in score_candidates()
 pub struct RankingWeights {
@@ -2185,15 +2185,15 @@ pub struct TestConfig {
     /// Frozen timestamp for recency calculations (Unix seconds)
     /// If None, uses SystemTime::now()
     pub now: Option<i64>,
-    
+
     /// Override ranking weights
     /// If None, uses RankingWeights::default()
     pub weights: Option<RankingWeights>,
-    
+
     /// Override recency half-life in seconds
     /// Default: 604800 (7 days = 60*60*24*7)
     pub recency_half_life: Option<f64>,
-    
+
     /// Enable debug mode for score breakdown
     pub debug: bool,
 }
@@ -2312,34 +2312,34 @@ src/
 #[tokio::test]
 async fn tier1_verification_suite() {
     let test_files = glob("src/testdata/tier1/**/*.toml").unwrap();
-    
+
     for path in test_files {
         let content = fs::read_to_string(&path).unwrap();
         let spec: TestSpec = toml::from_str(&content).unwrap();
-        
+
         // Create temp directory with filesystem structure
         let temp_dir = materialize_filesystem(&spec.fs);
-        
+
         // Initialize database
         let db = open_db(temp_dir.path().join("test.db")).await.unwrap();
         init(&db.conn).await.unwrap();
-        
+
         // Seed history with path resolution
         seed_history(&db.conn, &spec.history, &temp_dir).await;
-        
+
         // Rebuild stats (and optionally sequences)
         rebuild_stats(&db.conn, None).await.unwrap();
         if spec.options.run_sequence_analysis {
             analyze_sequences(&db.conn, spec.sequence_config()).await.unwrap();
         }
-        
+
         // Run each scenario
         for scenario in &spec.scenarios {
             let config = build_suggest_config(&scenario, &temp_dir);
             let test_config = build_test_config(&spec.physics);
-            
+
             let results = suggest_for_test(&db.conn, config, test_config).await.unwrap();
-            
+
             // Assert expectations
             assert_scenario_expectations(&scenario.expect, &results, &scenario.name);
         }

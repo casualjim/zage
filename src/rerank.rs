@@ -15,19 +15,17 @@ use serde_json;
 use tracing::warn;
 
 use crate::hash_util::stable_hash;
-use crate::predict::ranking::{
-  recency_score, token_similarity, DEFAULT_RECENCY_HALF_LIFE_SECONDS,
-};
+use crate::predict::ranking::{DEFAULT_RECENCY_HALF_LIFE_SECONDS, recency_score, token_similarity};
 use crate::predict::{Candidate, Suggestion};
 use crate::repo::{find_repo_root, read_git_branch};
 use crate::rerank_config::RerankConfig;
 use crate::shell_history::Invocation;
-use crate::tokenize::{extract_command_parts, normalized_tokens, tokenize};
+use crate::tokenize::{extract_command_parts, normalized_tokens, tokenize, tokenize_index};
 use crate::{Result, ZageError};
 
 const MODEL_NAME: &str = "rerank";
 const HASH_FEATURES: usize = 64;
-const BASE_FEATURES: usize = 9;
+const BASE_FEATURES: usize = 13;
 const FEATURE_COUNT: usize = BASE_FEATURES + HASH_FEATURES;
 static MODEL_CACHE: OnceLock<RwLock<Option<Arc<GradientBooster>>>> = OnceLock::new();
 static CALIBRATION_CACHE: OnceLock<RwLock<Option<CalibrationParams>>> = OnceLock::new();
@@ -129,6 +127,7 @@ pub struct RerankContext {
   pub recent_heads: Vec<String>,
   pub session_tokens: Vec<String>,
   pub session_phase: Option<String>,
+  pub shellname: String,
   pub branch: Option<String>,
   pub time_bucket: u8,
 }
@@ -193,16 +192,24 @@ struct TrainingStats {
   session_commands: HashMap<i64, Vec<String>>,
   head_to_commands: HashMap<String, Vec<String>>,
   commands_seen: Vec<String>,
+  sequence_unigram: HashMap<String, i64>,
+  sequence_bigram: HashMap<(String, String), i64>,
+  sequence_trigram: HashMap<(String, String, String), i64>,
+  sequence_total: i64,
+  sequence_prev1: Option<String>,
+  sequence_prev2: Option<String>,
 }
 
 #[derive(Debug, Clone)]
 struct ContextWindow {
+  recent_commands: Vec<String>,
   recent_heads: Vec<String>,
   session_tokens: Vec<String>,
   session_phase: Option<String>,
   repo_root: String,
   branch: Option<String>,
   time_bucket: u8,
+  shellname: String,
   working_directory: Option<String>,
   hostname: Option<String>,
   username: Option<String>,
@@ -460,14 +467,16 @@ fn features_from_suggestion(
     return None;
   }
 
-  let tier1_score = suggestion.score;
   let recency = suggestion.breakdown.recency;
   let frequency = suggestion.breakdown.frequency;
   let transition = suggestion.breakdown.transition;
   let context_score = suggestion.breakdown.context;
+  let sequence_score = suggestion.breakdown.sequence;
 
   let candidate_tokens = normalized_tokens(&suggestion.command);
   let similarity = token_similarity(&context.session_tokens, &candidate_tokens);
+  let tier1_score =
+    recency + frequency + transition + context_score + sequence_score + similarity;
 
   let repo_match = if candidate.repo_freq > 0 { 1.0 } else { 0.0 };
   let session_match = if candidate.session_freq > 0 { 1.0 } else { 0.0 };
@@ -487,6 +496,10 @@ fn features_from_suggestion(
   values[6] = repo_match;
   values[7] = session_match;
   values[8] = head_recent;
+  values[9] = sequence_score;
+  values[10] = candidate.sequence_confidence;
+  values[11] = candidate.sequence_lift;
+  values[12] = candidate.sequence_prefix_len as f64;
 
   add_hash(&mut values, format!("head:{head}").as_str());
   if let Some(branch) = context.branch.as_ref() {
@@ -555,11 +568,7 @@ fn build_feature_vector(
     .map(|s| s.freq)
     .unwrap_or(0);
 
-  let recency = recency_score(
-    context.now,
-    last_seen,
-    DEFAULT_RECENCY_HALF_LIFE_SECONDS,
-  );
+  let recency = recency_score(context.now, last_seen, DEFAULT_RECENCY_HALF_LIFE_SECONDS);
   let frequency = (freq as f64).ln_1p() + 0.5 * (repo_freq as f64).ln_1p();
   let transition = (transition_freq as f64).ln_1p();
   let context_score = (context_freq as f64).ln_1p() + 0.8 * (session_freq as f64).ln_1p();
@@ -567,7 +576,10 @@ fn build_feature_vector(
   let candidate_tokens = normalized_tokens(command);
   let similarity = token_similarity(&context.session_tokens, &candidate_tokens);
 
-  let tier1_score = recency + frequency + transition + context_score + similarity;
+  let (sequence_score, sequence_confidence, sequence_lift, sequence_prefix_len) =
+    sequence_features(command, context, stats);
+  let tier1_score =
+    recency + frequency + transition + context_score + sequence_score + similarity;
   let repo_match = if repo_freq > 0 { 1.0 } else { 0.0 };
   let session_match = if session_freq > 0 { 1.0 } else { 0.0 };
   let head_recent = if context.recent_heads.iter().any(|h| h == &head) {
@@ -586,6 +598,10 @@ fn build_feature_vector(
   values[6] = repo_match;
   values[7] = session_match;
   values[8] = head_recent;
+  values[9] = sequence_score;
+  values[10] = sequence_confidence;
+  values[11] = sequence_lift;
+  values[12] = sequence_prefix_len;
 
   add_hash(&mut values, format!("head:{head}").as_str());
   if let Some(branch) = context.branch.as_ref() {
@@ -638,12 +654,14 @@ fn build_context(
   let time_bucket = timestamp_bucket(current.start_unix_timestamp.unwrap_or(0));
 
   ContextWindow {
+    recent_commands,
     recent_heads,
     session_tokens,
     session_phase,
     repo_root,
     branch,
     time_bucket,
+    shellname: current.shellname.clone(),
     working_directory: current.working_directory.clone(),
     hostname: current.hostname.clone(),
     username: current.username.clone(),
@@ -701,6 +719,125 @@ fn update_training_stats(
     .or_default()
     .push(command.to_string());
   stats.commands_seen.push(command.to_string());
+
+  let sequence_command = normalize_sequence_command(command, &invocation.shellname);
+  *stats
+    .sequence_unigram
+    .entry(sequence_command.clone())
+    .or_insert(0) += 1;
+  stats.sequence_total += 1;
+  if let Some(prev1) = stats.sequence_prev1.as_ref() {
+    *stats
+      .sequence_bigram
+      .entry((prev1.clone(), sequence_command.clone()))
+      .or_insert(0) += 1;
+  }
+  if let (Some(prev2), Some(prev1)) = (stats.sequence_prev2.as_ref(), stats.sequence_prev1.as_ref())
+  {
+    *stats
+      .sequence_trigram
+      .entry((prev2.clone(), prev1.clone(), sequence_command.clone()))
+      .or_insert(0) += 1;
+  }
+  stats.sequence_prev2 = stats.sequence_prev1.take();
+  stats.sequence_prev1 = Some(sequence_command);
+}
+
+fn sequence_features(
+  command: &str,
+  context: &ContextWindow,
+  stats: &TrainingStats,
+) -> (f64, f64, f64, f64) {
+  if stats.sequence_total <= 0 || context.recent_commands.is_empty() {
+    return (0.0, 0.0, 0.0, 0.0);
+  }
+
+  let candidate = normalize_sequence_command(command, &context.shellname);
+  let total = stats.sequence_total as f64;
+  let base = stats
+    .sequence_unigram
+    .get(&candidate)
+    .map(|v| *v as f64 / total)
+    .unwrap_or(0.0);
+  if base <= 0.0 {
+    return (0.0, 0.0, 0.0, 0.0);
+  }
+
+  let mut best_conf = 0.0;
+  let mut best_lift = 0.0;
+  let mut best_prefix = 0.0;
+
+  if context.recent_commands.len() >= 2 {
+    let prev2 = normalize_sequence_command(
+      context
+        .recent_commands
+        .get(context.recent_commands.len() - 2)
+        .map(|s| s.as_str())
+        .unwrap_or_default(),
+      &context.shellname,
+    );
+    let prev1 = normalize_sequence_command(
+      context
+        .recent_commands
+        .last()
+        .map(|s| s.as_str())
+        .unwrap_or_default(),
+      &context.shellname,
+    );
+    let trigram = stats
+      .sequence_trigram
+      .get(&(prev2.clone(), prev1.clone(), candidate.clone()))
+      .copied()
+      .unwrap_or(0);
+    let prefix = stats
+      .sequence_bigram
+      .get(&(prev2, prev1))
+      .copied()
+      .unwrap_or(0);
+    if trigram > 0 && prefix > 0 {
+      let conf = (trigram as f64) / (prefix as f64);
+      let lift = conf / base;
+      best_conf = conf;
+      best_lift = lift;
+      best_prefix = 2.0;
+    }
+  }
+
+  if best_prefix == 0.0 && !context.recent_commands.is_empty() {
+    let prev1 = normalize_sequence_command(
+      context
+        .recent_commands
+        .last()
+        .map(|s| s.as_str())
+        .unwrap_or_default(),
+      &context.shellname,
+    );
+    let bigram = stats
+      .sequence_bigram
+      .get(&(prev1.clone(), candidate.clone()))
+      .copied()
+      .unwrap_or(0);
+    let prefix = stats
+      .sequence_unigram
+      .get(&prev1)
+      .copied()
+      .unwrap_or(0);
+    if bigram > 0 && prefix > 0 {
+      let conf = (bigram as f64) / (prefix as f64);
+      let lift = conf / base;
+      best_conf = conf;
+      best_lift = lift;
+      best_prefix = 1.0;
+    }
+  }
+
+  if best_prefix == 0.0 || best_conf <= 0.0 {
+    return (0.0, 0.0, 0.0, 0.0);
+  }
+
+  let order_weight = if best_prefix >= 2.0 { 1.0 } else { 0.7 };
+  let score = best_conf * best_lift.max(1.0) * order_weight;
+  (score, best_conf, best_lift, best_prefix)
 }
 
 fn tier1_score_from_stats(command: &str, context: &ContextWindow, stats: &TrainingStats) -> f64 {
@@ -998,6 +1135,27 @@ fn command_head(command: &str) -> String {
     .unwrap_or_default()
 }
 
+fn command_signature(command: &str, shellname: &str) -> Option<String> {
+  let tokens = tokenize_index(shellname, command);
+  let parts = extract_command_parts(command, &tokens)?;
+  let mut signature = parts.head;
+  if let Some(first_arg) = parts.args.first() {
+    signature.push(' ');
+    signature.push_str(first_arg.raw.as_str());
+  }
+  if !parts.flags.is_empty() {
+    let mut flags = parts.flags;
+    flags.sort();
+    signature.push(' ');
+    signature.push_str(&flags.join(" "));
+  }
+  Some(signature)
+}
+
+fn normalize_sequence_command(command: &str, shellname: &str) -> String {
+  command_signature(command, shellname).unwrap_or_else(|| command.to_string())
+}
+
 fn timestamp_bucket(ts: i64) -> u8 {
   if ts <= 0 {
     return 0;
@@ -1126,6 +1284,7 @@ pub fn runtime_context(
   recent_heads: &[String],
   session_tokens: Vec<String>,
   session_phase: Option<&str>,
+  shellname: &str,
 ) -> RerankContext {
   let branch = if repo_root.is_empty() {
     None
@@ -1138,6 +1297,7 @@ pub fn runtime_context(
     recent_heads: recent_heads.to_vec(),
     session_tokens,
     session_phase: session_phase.map(|s| s.to_string()),
+    shellname: shellname.to_string(),
     branch,
     time_bucket,
   }
@@ -1244,6 +1404,7 @@ mod tests {
       recent_heads: vec!["git".to_string()],
       session_tokens: Vec::new(),
       session_phase: None,
+      shellname: "sh".to_string(),
       branch: None,
       time_bucket: 0,
     };
