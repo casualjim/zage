@@ -1,4 +1,5 @@
 [tools]
+"cargo:cargo-sort" = "latest"
 hk = "latest"
 pkl = "latest"
 rust = "latest"
