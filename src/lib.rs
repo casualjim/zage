@@ -3,6 +3,8 @@ pub use err::*;
 mod config;
 mod hash_util;
 pub use config::*;
+pub mod core;
+pub mod cli;
 pub mod db;
 pub mod indexer;
 pub mod phase;

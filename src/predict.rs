@@ -1,9 +1,11 @@
 use std::collections::{HashMap, HashSet};
-use std::time::{SystemTime, UNIX_EPOCH};
 
 use libsql::{Connection, Value};
 
 use crate::Result;
+pub use crate::core::{ScoreBreakdown, Suggestion};
+pub use config::{RankingWeights, SuggestConfig};
+use crate::core::{Candidate, SystemTimeProvider, TimeProvider};
 use crate::db::get_recent_invocations;
 use crate::phase::PhaseConfig;
 use crate::repo::find_repo_root;
@@ -12,9 +14,11 @@ use crate::shell_history::detect_shellname;
 use crate::tokenize::{TokenKind, extract_command_parts, normalized_tokens, tokenize_index};
 
 pub mod aliases;
+mod config;
 mod candidates;
 mod phase_support;
 pub(crate) mod ranking;
+mod runtime;
 mod sql;
 mod templates;
 #[cfg(any(test, feature = "tier1-tests"))]
@@ -38,6 +42,7 @@ use ranking::{
   DEFAULT_RECENCY_HALF_LIFE_SECONDS, load_normalized_tokens, low_confidence, recency_score,
   token_similarity,
 };
+use runtime::SuggestRuntime;
 use sql::query_prepared;
 use templates::{
   arg_template_candidates, env_template_candidates, split_env_prefix, token_sequence_predictions,
@@ -49,151 +54,9 @@ const RECENT_CANDIDATE_LIMIT: usize = 200;
 const RECENT_CANDIDATE_LIMIT_FALLBACK: usize = 500;
 const FULL_LINE_POOL_LIMIT: usize = 50;
 
-pub trait TimeProvider: Send + Sync {
-  fn now(&self) -> i64;
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct SystemTimeProvider;
-
-impl TimeProvider for SystemTimeProvider {
-  fn now(&self) -> i64 {
-    SystemTime::now()
-      .duration_since(UNIX_EPOCH)
-      .unwrap_or_default()
-      .as_secs() as i64
-  }
-}
-
-#[derive(Debug, Clone)]
-pub struct FixedTimeProvider {
-  now: i64,
-}
-
-impl FixedTimeProvider {
-  pub fn new(now: i64) -> Self {
-    Self { now }
-  }
-}
-
-impl TimeProvider for FixedTimeProvider {
-  fn now(&self) -> i64 {
-    self.now
-  }
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct SuggestRuntime {
-  aliases: HashMap<String, String>,
-  weights: RankingWeights,
-  recency_half_life: f64,
-  now: i64,
-}
-#[derive(Debug, Clone)]
-pub struct SuggestConfig {
-  pub max_results: usize,
-  pub recent_limit: usize,
-  pub prefix: Option<String>,
-  pub cwd: Option<String>,
-  pub hostname: Option<String>,
-  pub username: Option<String>,
-  pub session_id: Option<i64>,
-  pub use_sequences: bool,
-  pub prefer_full_line: bool,
-}
-
-impl Default for SuggestConfig {
-  fn default() -> Self {
-    Self {
-      max_results: 5,
-      recent_limit: 10,
-      prefix: None,
-      cwd: None,
-      hostname: None,
-      username: None,
-      session_id: None,
-      use_sequences: true,
-      prefer_full_line: false,
-    }
-  }
-}
-
-#[derive(Debug, Clone)]
-pub struct Suggestion {
-  pub command: String,
-  pub score: f64,
-  pub breakdown: ScoreBreakdown,
-}
-
-#[derive(Debug, Clone, Default)]
-pub struct ScoreBreakdown {
-  pub recency: f64,
-  pub frequency: f64,
-  pub transition: f64,
-  pub context: f64,
-  pub sequence: f64,
-  pub similarity: f64,
-}
-
-#[derive(Debug, Clone)]
-pub(crate) struct Candidate {
-  command: String,
-  freq: i64,
-  last_seen: i64,
-  transition_freq: i64,
-  repo_transition_freq: i64,
-  pub(crate) repo_freq: i64,
-  context_freq: i64,
-  pub(crate) session_freq: i64,
-  session_last_seen: i64,
-  pub(crate) sequence_confidence: f64,
-  pub(crate) sequence_lift: f64,
-  pub(crate) sequence_prefix_len: usize,
-}
-
-#[derive(Debug, Clone)]
-pub struct RankingWeights {
-  pub recency: f64,
-  pub frequency: f64,
-  pub transition: f64,
-  pub context: f64,
-  pub sequence: f64,
-  pub similarity: f64,
-}
-
-impl Default for RankingWeights {
-  fn default() -> Self {
-    Self {
-      recency: 0.25,
-      frequency: 0.25,
-      transition: 0.2,
-      context: 0.15,
-      sequence: 0.1,
-      similarity: 0.05,
-    }
-  }
-}
-
-fn new_candidate(command: &str) -> Candidate {
-  Candidate {
-    command: command.to_string(),
-    freq: 0,
-    last_seen: 0,
-    transition_freq: 0,
-    repo_transition_freq: 0,
-    repo_freq: 0,
-    context_freq: 0,
-    session_freq: 0,
-    session_last_seen: 0,
-    sequence_confidence: 0.0,
-    sequence_lift: 0.0,
-    sequence_prefix_len: 0,
-  }
-}
-
 #[cfg(test)]
 pub(crate) fn candidate_for_test(command: &str) -> Candidate {
-  new_candidate(command)
+  Candidate::new(command)
 }
 
 fn expanded_command_for(
@@ -336,7 +199,7 @@ pub(crate) async fn suggest_with_runtime(
     for (cmd, (freq, last_seen)) in session_stats {
       let entry = candidates
         .entry(cmd.clone())
-        .or_insert_with(|| new_candidate(&cmd));
+        .or_insert_with(|| Candidate::new(&cmd));
       entry.session_freq = entry.session_freq.max(freq);
       entry.session_last_seen = entry.session_last_seen.max(last_seen);
       entry.last_seen = entry.last_seen.max(last_seen);
@@ -1119,7 +982,7 @@ mod tests {
   #[test]
   fn add_alias_candidates_clones_stats() {
     let mut candidates = HashMap::new();
-    let mut base = new_candidate("git status");
+    let mut base = Candidate::new("git status");
     base.freq = 4;
     base.last_seen = 123;
     candidates.insert(base.command.clone(), base.clone());

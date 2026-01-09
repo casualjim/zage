@@ -54,7 +54,7 @@ fn test_import() -> Result<()> {
   import_cmd
     .assert()
     .success()
-    .stdout(predicate::str::contains("Imported history"));
+    .stderr(predicate::str::contains("Imported history"));
 
   Ok(())
 }

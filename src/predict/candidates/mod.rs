@@ -5,9 +5,9 @@ use libsql::{Connection, Value};
 use crate::Result;
 use crate::sequence::candidates_from_sequences;
 
-use super::Candidate;
 use super::phase_support::{PhaseSignal, command_head_for_phase};
 use super::sql::query_prepared;
+use crate::core::Candidate;
 
 pub(crate) async fn add_transition_candidates(
   conn: &Connection,
@@ -100,7 +100,7 @@ async fn fetch_transition_candidates(
     let freq = row.get::<i64>(1)?;
     let entry = candidates
       .entry(cmd.clone())
-      .or_insert_with(|| super::new_candidate(&cmd));
+      .or_insert_with(|| Candidate::new(&cmd));
     if is_repo {
       entry.repo_transition_freq = entry.repo_transition_freq.max(freq);
     } else {
@@ -144,7 +144,7 @@ async fn fetch_context_candidates(
     let last_seen = row.get::<i64>(2)?;
     let entry = candidates
       .entry(cmd.clone())
-      .or_insert_with(|| super::new_candidate(&cmd));
+      .or_insert_with(|| Candidate::new(&cmd));
     entry.context_freq = entry.context_freq.max(freq);
     entry.last_seen = entry.last_seen.max(last_seen);
   }
@@ -201,7 +201,7 @@ pub(crate) async fn add_session_candidates(
     let last_seen = row.get::<i64>(2)?;
     let entry = candidates
       .entry(cmd.clone())
-      .or_insert_with(|| super::new_candidate(&cmd));
+      .or_insert_with(|| Candidate::new(&cmd));
     entry.session_freq = entry.session_freq.max(freq);
     entry.session_last_seen = entry.session_last_seen.max(last_seen);
     entry.last_seen = entry.last_seen.max(last_seen);
@@ -228,7 +228,7 @@ pub(crate) async fn add_repo_candidates(
     let last_seen = row.get::<i64>(2)?;
     let entry = candidates
       .entry(cmd.clone())
-      .or_insert_with(|| super::new_candidate(&cmd));
+      .or_insert_with(|| Candidate::new(&cmd));
     entry.repo_freq = entry.repo_freq.max(freq);
     entry.last_seen = entry.last_seen.max(last_seen);
   }
@@ -297,7 +297,7 @@ pub(crate) async fn add_head_candidates(
         let last_seen = row.get::<i64>(2)?;
         let entry = candidates
           .entry(cmd.clone())
-          .or_insert_with(|| super::new_candidate(&cmd));
+          .or_insert_with(|| Candidate::new(&cmd));
         entry.repo_freq = entry.repo_freq.max(freq);
         entry.last_seen = entry.last_seen.max(last_seen);
       }
@@ -317,7 +317,7 @@ pub(crate) async fn add_head_candidates(
       let last_seen = row.get::<i64>(2)?;
       let entry = candidates
         .entry(cmd.clone())
-        .or_insert_with(|| super::new_candidate(&cmd));
+        .or_insert_with(|| Candidate::new(&cmd));
       entry.freq = entry.freq.max(freq);
       entry.last_seen = entry.last_seen.max(last_seen);
     }
@@ -343,7 +343,7 @@ pub(crate) async fn add_global_candidates(
     let last_seen = row.get::<i64>(2)?;
     let entry = candidates
       .entry(cmd.clone())
-      .or_insert_with(|| super::new_candidate(&cmd));
+      .or_insert_with(|| Candidate::new(&cmd));
     entry.freq = entry.freq.max(freq);
     entry.last_seen = entry.last_seen.max(last_seen);
   }
@@ -371,7 +371,7 @@ pub(crate) async fn add_recent_candidates(
     let last_seen = row.get::<i64>(2)?;
     let entry = candidates
       .entry(cmd.clone())
-      .or_insert_with(|| super::new_candidate(&cmd));
+      .or_insert_with(|| Candidate::new(&cmd));
     entry.freq = entry.freq.max(freq);
     entry.last_seen = entry.last_seen.max(last_seen);
   }
@@ -413,7 +413,7 @@ pub(crate) async fn hydrate_candidate_stats(
       let last_seen = row.get::<i64>(2)?;
       let entry = candidates
         .entry(cmd.clone())
-        .or_insert_with(|| super::new_candidate(&cmd));
+        .or_insert_with(|| Candidate::new(&cmd));
       entry.freq = entry.freq.max(freq);
       entry.last_seen = entry.last_seen.max(last_seen);
     }
@@ -445,7 +445,7 @@ pub(crate) async fn hydrate_candidate_stats(
         let last_seen = row.get::<i64>(2)?;
         let entry = candidates
           .entry(cmd.clone())
-          .or_insert_with(|| super::new_candidate(&cmd));
+          .or_insert_with(|| Candidate::new(&cmd));
         entry.repo_freq = entry.repo_freq.max(freq);
         entry.last_seen = entry.last_seen.max(last_seen);
       }
@@ -464,7 +464,7 @@ pub(crate) async fn add_sequence_candidates(
   for seq in sequences {
     let entry = candidates
       .entry(seq.command.clone())
-      .or_insert_with(|| super::new_candidate(&seq.command));
+      .or_insert_with(|| Candidate::new(&seq.command));
     if seq.prefix_len >= entry.sequence_prefix_len {
       entry.sequence_confidence = entry.sequence_confidence.max(seq.confidence);
       entry.sequence_lift = entry.sequence_lift.max(seq.lift);
@@ -565,7 +565,7 @@ fn add_template_candidate(
   if candidates.contains_key(command) {
     return;
   }
-  let mut entry = super::new_candidate(command);
+  let mut entry = Candidate::new(command);
   if is_repo {
     entry.repo_freq = freq;
   } else {

@@ -1,4 +1,3 @@
-use serde::{Deserialize, Serialize};
 use std::os::unix::fs::MetadataExt;
 use std::path::Path;
 
@@ -7,6 +6,7 @@ mod zsh;
 
 pub use bash::parse_history_file as parse_bash_history;
 pub use zsh::parse_history_file as parse_zsh_history;
+pub use crate::core::Invocation;
 
 /// Which shell history format to import
 #[derive(Clone, Copy, Debug)]
@@ -24,26 +24,6 @@ impl std::str::FromStr for Shell {
       "zsh" => Ok(Shell::Zsh),
       other => Err(format!("Unknown shell: {}", other)),
     }
-  }
-}
-
-#[derive(Debug, Default, Serialize, Deserialize, Clone)]
-pub struct Invocation {
-  pub command: String,
-  pub expanded_command: String,
-  pub shellname: String,
-  pub working_directory: Option<String>,
-  pub hostname: Option<String>,
-  pub username: Option<String>,
-  pub exit_status: Option<i64>,
-  pub start_unix_timestamp: Option<i64>,
-  pub end_unix_timestamp: Option<i64>,
-  pub session_id: i64,
-}
-
-impl Invocation {
-  fn sameish(&self, other: &Self) -> bool {
-    self.command == other.command && self.start_unix_timestamp == other.start_unix_timestamp
   }
 }
 
