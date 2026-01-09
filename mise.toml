@@ -1,5 +1,5 @@
 [tools]
-"aqua:nextest-rs/nextest/cargo-nextest" = "latest"
+"cargo:cargo-nextest" = "latest"
 "cargo:cargo-sort" = "latest"
 hk = "latest"
 pkl = "latest"
