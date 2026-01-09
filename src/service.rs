@@ -86,7 +86,7 @@ Requires={}\n\
 \n\
 [Service]\n\
 Type=simple\n\
-ExecStart={}\n\
+ExecStart={} server\n\
 Environment=ZAGE_LOG=info\n\
 Restart=on-failure\n\
 RestartSec=5\n\

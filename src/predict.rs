@@ -364,7 +364,7 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
       + 0.1 * session_recency
       + context.weights.similarity * similarity;
 
-    if score <= 0.0 {
+    if !score.is_finite() || score <= 0.0 {
       continue;
     }
 
@@ -383,21 +383,17 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
   }
 
   scored.sort_by(|a, b| {
-    let diff = (b.score - a.score).abs();
-    if diff < 1e-4 {
-      let recency_cmp = a
-        .breakdown
-        .recency
-        .partial_cmp(&b.breakdown.recency)
-        .unwrap_or(std::cmp::Ordering::Equal);
-      if recency_cmp != std::cmp::Ordering::Equal {
-        return recency_cmp;
-      }
-      return a.command.cmp(&b.command);
+    let score_bucket_a = (a.score * 10_000.0).round() as i64;
+    let score_bucket_b = (b.score * 10_000.0).round() as i64;
+    let score_cmp = score_bucket_b.cmp(&score_bucket_a);
+    if score_cmp != std::cmp::Ordering::Equal {
+      return score_cmp;
     }
-    b.score
-      .partial_cmp(&a.score)
-      .unwrap_or(std::cmp::Ordering::Equal)
+    let recency_cmp = a.breakdown.recency.total_cmp(&b.breakdown.recency);
+    if recency_cmp != std::cmp::Ordering::Equal {
+      return recency_cmp;
+    }
+    a.command.cmp(&b.command)
   });
   Ok(scored)
 }
@@ -531,11 +527,7 @@ async fn completion_candidates(
   )
   .await?
   {
-    suggestions.sort_by(|a, b| {
-      b.score
-        .partial_cmp(&a.score)
-        .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    suggestions.sort_by(|a, b| b.score.total_cmp(&a.score));
     suggestions.truncate(pool_limit);
     env_suggestions = Some(suggestions);
   }
@@ -593,11 +585,7 @@ async fn completion_candidates(
       if arg_suggestions.is_empty() {
         // fall through to normal completion candidates
       } else {
-        arg_suggestions.sort_by(|a, b| {
-          b.score
-            .partial_cmp(&a.score)
-            .unwrap_or(std::cmp::Ordering::Equal)
-        });
+        arg_suggestions.sort_by(|a, b| b.score.total_cmp(&a.score));
         arg_suggestions.truncate(pool_limit);
         let last_char = prefix.chars().last();
         let ends_with_space = last_char.map(|c| c.is_whitespace()).unwrap_or(false);
@@ -868,11 +856,7 @@ async fn completion_candidates(
   }
 
   if prefer_full_line && !scored.is_empty() {
-    scored.sort_by(|a, b| {
-      b.score
-        .partial_cmp(&a.score)
-        .unwrap_or(std::cmp::Ordering::Equal)
-    });
+    scored.sort_by(|a, b| b.score.total_cmp(&a.score));
     scored.truncate(config.max_results);
     return Ok(scored);
   }
@@ -902,11 +886,7 @@ async fn completion_candidates(
     scored.append(&mut suggestions);
   }
 
-  scored.sort_by(|a, b| {
-    b.score
-      .partial_cmp(&a.score)
-      .unwrap_or(std::cmp::Ordering::Equal)
-  });
+  scored.sort_by(|a, b| b.score.total_cmp(&a.score));
   scored.truncate(config.max_results);
   Ok(scored)
 }

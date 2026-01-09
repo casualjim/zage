@@ -4,13 +4,61 @@ use color_eyre::eyre::{Result, eyre};
 use dirs::home_dir;
 use tracing::{debug, info};
 
+use crate::cli::Backend;
 use crate::db::{Db, import_history};
 use crate::indexer::rebuild_stats;
 use crate::predict::aliases::{expand_alias, load_aliases};
 use crate::sequence::{SequenceConfig, analyze_sequences, analyze_token_sequences};
+use crate::server::{self, Request, Response};
 use crate::shell_history::{Shell, parse_bash_history, parse_zsh_history};
 
 pub async fn run(
+  backend: Backend<'_>,
+  file: Option<PathBuf>,
+  hostname: Option<String>,
+  username: Option<String>,
+  shell: Shell,
+  no_index: bool,
+) -> Result<()> {
+  match backend {
+    Backend::Server => run_server(file, hostname, username, shell, no_index).await,
+    Backend::Embedded(db) => run_embedded(db, file, hostname, username, shell, no_index).await,
+  }
+}
+
+async fn run_server(
+  file: Option<PathBuf>,
+  hostname: Option<String>,
+  username: Option<String>,
+  shell: Shell,
+  no_index: bool,
+) -> Result<()> {
+  let shell_name = match shell {
+    Shell::Zsh => "zsh".to_string(),
+    Shell::Bash => "bash".to_string(),
+  };
+
+  let request = Request::Import {
+    file: file.map(|p| p.to_string_lossy().into_owned()),
+    hostname,
+    username,
+    shell: shell_name,
+    no_index,
+  };
+  match server::try_request(request).await? {
+    Some(Response::Text { lines }) => {
+      for line in lines {
+        eprintln!("{line}");
+      }
+      Ok(())
+    }
+    Some(Response::Error { message }) => Err(eyre!(message)),
+    Some(_) => Err(eyre!("Unexpected response from server")),
+    None => Err(eyre!("Import server unavailable")),
+  }
+}
+
+async fn run_embedded(
   db: &Db,
   file: Option<PathBuf>,
   hostname: Option<String>,

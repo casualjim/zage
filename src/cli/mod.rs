@@ -49,6 +49,9 @@ pub enum Commands {
     /// Skip rebuilding stats and sequences after import (for bulk imports)
     #[arg(long)]
     no_index: bool,
+    /// Use the embedded SQLite database
+    #[arg(long)]
+    embedded_db: bool,
   },
 
   /// Build or rebuild index tables for prediction
@@ -60,6 +63,9 @@ pub enum Commands {
     /// Also recompute sequence statistics
     #[arg(long)]
     with_sequences: bool,
+    /// Use the embedded SQLite database
+    #[arg(long)]
+    embedded_db: bool,
   },
 
   /// Suggest next command
@@ -107,6 +113,9 @@ pub enum Commands {
     /// Return full-line suggestions for autosuggest backends
     #[arg(long)]
     autosuggest: bool,
+    /// Use the embedded SQLite database
+    #[arg(long)]
+    embedded_db: bool,
   },
 
   /// Analyze and store frequent command sequences
@@ -123,6 +132,9 @@ pub enum Commands {
     /// Maximum sequence length (2 or 3)
     #[arg(long, default_value = "3")]
     max_len: usize,
+    /// Use the embedded SQLite database
+    #[arg(long)]
+    embedded_db: bool,
   },
 
   /// Run the suggestion server (foreground)
@@ -148,13 +160,24 @@ pub enum Commands {
     /// Maximum number of history entries to use
     #[arg(long, default_value = "25000")]
     max_samples: usize,
+    /// Use the embedded SQLite database
+    #[arg(long)]
+    embedded_db: bool,
   },
 
   /// Show reranker model status
-  ModelStatus,
+  ModelStatus {
+    /// Use the embedded SQLite database
+    #[arg(long)]
+    embedded_db: bool,
+  },
 
   /// Reset (delete) the reranker model
-  ModelReset,
+  ModelReset {
+    /// Use the embedded SQLite database
+    #[arg(long)]
+    embedded_db: bool,
+  },
 
   /// (Internal) Record a single command invocation (used by shell hooks)
   Record {
@@ -176,9 +199,13 @@ pub enum Commands {
     /// The shell session ID
     #[arg(long)]
     session_id: Option<i64>, // Optional for now
+    /// Use the embedded SQLite database
+    #[arg(long)]
+    embedded_db: bool,
   },
 }
 
+#[derive(Clone)]
 pub struct SuggestArgs {
   pub count: usize,
   pub current_line: Option<String>,
@@ -191,6 +218,11 @@ pub struct SuggestArgs {
   pub completion_format: CompletionFormat,
   pub show_scores: bool,
   pub autosuggest: bool,
+}
+
+pub enum Backend<'a> {
+  Server,
+  Embedded(&'a Db),
 }
 
 #[derive(Subcommand, Debug, Clone, Copy)]
@@ -223,9 +255,6 @@ pub async fn run(cli: Cli) -> Result<()> {
   );
   info!("Starting application");
 
-  let db_path = resolve_db_path(&cli.db_path)?;
-  let db = open_db_for_cli(&db_path).await?;
-
   match cli.command {
     Some(Commands::Import {
       file,
@@ -233,14 +262,36 @@ pub async fn run(cli: Cli) -> Result<()> {
       username,
       shell,
       no_index,
+      embedded_db,
     }) => {
-      import::run(&db, file, hostname, username, shell, no_index).await?;
+      if embedded_db {
+        let db_path = resolve_db_path(&cli.db_path)?;
+        let db = open_db_for_cli(&db_path).await?;
+        import::run(
+          Backend::Embedded(&db),
+          file,
+          hostname,
+          username,
+          shell,
+          no_index,
+        )
+        .await?;
+      } else {
+        import::run(Backend::Server, file, hostname, username, shell, no_index).await?;
+      }
     }
     Some(Commands::Index {
       max_commands,
       with_sequences,
+      embedded_db,
     }) => {
-      index::run(&db, max_commands, with_sequences).await?;
+      if embedded_db {
+        let db_path = resolve_db_path(&cli.db_path)?;
+        let db = open_db_for_cli(&db_path).await?;
+        index::run(Backend::Embedded(&db), max_commands, with_sequences).await?;
+      } else {
+        index::run(Backend::Server, max_commands, with_sequences).await?;
+      }
     }
     Some(Commands::Suggest {
       count,
@@ -254,48 +305,100 @@ pub async fn run(cli: Cli) -> Result<()> {
       completion_format,
       show_scores,
       autosuggest,
+      embedded_db,
     }) => {
-      suggest::run(
-        &db,
-        SuggestArgs {
-          count,
-          current_line,
-          recent_limit,
-          cwd,
-          hostname,
-          username,
-          session_id,
-          no_sequences,
-          completion_format,
-          show_scores,
-          autosuggest,
-        },
-      )
-      .await?;
+      let args = SuggestArgs {
+        count,
+        current_line,
+        recent_limit,
+        cwd,
+        hostname,
+        username,
+        session_id,
+        no_sequences,
+        completion_format,
+        show_scores,
+        autosuggest,
+      };
+      if embedded_db {
+        let db_path = resolve_db_path(&cli.db_path)?;
+        let db = open_db_for_cli(&db_path).await?;
+        suggest::run(Backend::Embedded(&db), args).await?;
+      } else {
+        suggest::run(Backend::Server, args).await?;
+      }
     }
     Some(Commands::AnalyzeSequences {
       min_support,
       min_confidence,
       min_lift,
       max_len,
+      embedded_db,
     }) => {
-      sequences::run(&db, min_support, min_confidence, min_lift, max_len).await?;
+      if embedded_db {
+        let db_path = resolve_db_path(&cli.db_path)?;
+        let db = open_db_for_cli(&db_path).await?;
+        sequences::run(
+          Backend::Embedded(&db),
+          min_support,
+          min_confidence,
+          min_lift,
+          max_len,
+        )
+        .await?;
+      } else {
+        sequences::run(
+          Backend::Server,
+          min_support,
+          min_confidence,
+          min_lift,
+          max_len,
+        )
+        .await?;
+      }
     }
     Some(Commands::Train {
       epochs,
       negatives,
       min_history,
       max_samples,
+      embedded_db,
     }) => {
-      train::run(&db, epochs, negatives, min_history, max_samples).await?;
+      if embedded_db {
+        let db_path = resolve_db_path(&cli.db_path)?;
+        let db = open_db_for_cli(&db_path).await?;
+        train::run(
+          Backend::Embedded(&db),
+          epochs,
+          negatives,
+          min_history,
+          max_samples,
+        )
+        .await?;
+      } else {
+        train::run(Backend::Server, epochs, negatives, min_history, max_samples).await?;
+      }
     }
-    Some(Commands::ModelStatus) => {
-      train::model_status()?;
+    Some(Commands::ModelStatus { embedded_db }) => {
+      if embedded_db {
+        let db_path = resolve_db_path(&cli.db_path)?;
+        let db = open_db_for_cli(&db_path).await?;
+        train::model_status(Backend::Embedded(&db)).await?;
+      } else {
+        train::model_status(Backend::Server).await?;
+      }
     }
-    Some(Commands::ModelReset) => {
-      train::model_reset()?;
+    Some(Commands::ModelReset { embedded_db }) => {
+      if embedded_db {
+        let db_path = resolve_db_path(&cli.db_path)?;
+        let db = open_db_for_cli(&db_path).await?;
+        train::model_reset(Backend::Embedded(&db)).await?;
+      } else {
+        train::model_reset(Backend::Server).await?;
+      }
     }
     Some(Commands::Server {}) => {
+      let db_path = resolve_db_path(&cli.db_path)?;
       server::run(&db_path).await?;
     }
     Some(Commands::Service { action }) => {
@@ -308,17 +411,33 @@ pub async fn run(cli: Cli) -> Result<()> {
       start_timestamp,
       end_timestamp,
       session_id,
+      embedded_db,
     }) => {
-      record::run(
-        &db,
-        command,
-        working_directory,
-        exit_status,
-        start_timestamp,
-        end_timestamp,
-        session_id,
-      )
-      .await?;
+      if embedded_db {
+        let db_path = resolve_db_path(&cli.db_path)?;
+        let db = open_db_for_cli(&db_path).await?;
+        record::run(
+          Backend::Embedded(&db),
+          command,
+          working_directory,
+          exit_status,
+          start_timestamp,
+          end_timestamp,
+          session_id,
+        )
+        .await?;
+      } else {
+        record::run(
+          Backend::Server,
+          command,
+          working_directory,
+          exit_status,
+          start_timestamp,
+          end_timestamp,
+          session_id,
+        )
+        .await?;
+      }
     }
     None => {
       let mut cmd = Cli::command();

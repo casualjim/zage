@@ -1,15 +1,14 @@
 use std::collections::HashSet;
 
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, eyre};
 
-use crate::cli::{CompletionFormat, SuggestArgs};
-use crate::db::Db;
+use crate::cli::{Backend, CompletionFormat, SuggestArgs};
 use crate::predict::{ScoreBreakdown, SuggestConfig, Suggestion, suggest};
 use crate::server::{self, Request, Response};
 use crate::shell_history::get_hostname;
 use crate::tokenize::tokenize;
 
-pub async fn run(db: &Db, args: SuggestArgs) -> Result<()> {
+pub async fn run(backend: Backend<'_>, args: SuggestArgs) -> Result<()> {
   let SuggestArgs {
     count,
     current_line,
@@ -40,37 +39,42 @@ pub async fn run(db: &Db, args: SuggestArgs) -> Result<()> {
     .map(|s| !s.is_empty())
     .unwrap_or(false);
 
-  let mut server_suggestions = None;
-  let request = Request::Suggest {
-    current_line: current_line.clone().unwrap_or_default(),
-    working_directory: cwd.clone().unwrap_or_else(|| "".to_string()),
-    session_id: session_id.unwrap_or_default() as u64,
-    limit: count as u32,
-    prefer_full_line: autosuggest,
+  let server_suggestions = match &backend {
+    Backend::Server => {
+      let request = Request::Suggest {
+        current_line: current_line.clone().unwrap_or_default(),
+        working_directory: cwd.clone().unwrap_or_else(|| "".to_string()),
+        session_id: session_id.unwrap_or_default() as u64,
+        limit: count as u32,
+        prefer_full_line: autosuggest,
+      };
+      match server::try_request(request).await? {
+        Some(Response::Suggestions { items }) => Some(map_server_suggestions(items)),
+        Some(Response::Error { message }) => return Err(eyre!(message)),
+        Some(_) => return Err(eyre!("Unexpected response from server")),
+        None => return Err(eyre!("Suggest server unavailable")),
+      }
+    }
+    Backend::Embedded(_) => None,
   };
-  if let Ok(Some(response)) = server::try_request(request).await
-    && let Response::Suggestions { items } = response
-  {
-    server_suggestions = Some(map_server_suggestions(items));
-  }
 
   if has_prefix {
-    let base_config = SuggestConfig {
-      max_results: count,
-      recent_limit,
-      prefix: current_line.clone(),
-      cwd: cwd.clone(),
-      hostname: hostname.clone(),
-      username: username.clone(),
-      session_id,
-      use_sequences: !no_sequences,
-      prefer_full_line: autosuggest,
-    };
-
-    let completions = if let Some(items) = server_suggestions {
-      items
-    } else {
-      suggest(&db.conn, base_config).await?
+    let completions = match backend {
+      Backend::Server => server_suggestions.ok_or_else(|| eyre!("Suggest server unavailable"))?,
+      Backend::Embedded(db) => {
+        let base_config = SuggestConfig {
+          max_results: count,
+          recent_limit,
+          prefix: current_line.clone(),
+          cwd: cwd.clone(),
+          hostname: hostname.clone(),
+          username: username.clone(),
+          session_id,
+          use_sequences: !no_sequences,
+          prefer_full_line: autosuggest,
+        };
+        suggest(&db.conn, base_config).await?
+      }
     };
     if completions.is_empty() {
       return Ok(());
@@ -124,22 +128,22 @@ pub async fn run(db: &Db, args: SuggestArgs) -> Result<()> {
       }
     }
   } else {
-    let config = SuggestConfig {
-      max_results: count,
-      recent_limit,
-      prefix: None,
-      cwd,
-      hostname,
-      username,
-      session_id,
-      use_sequences: !no_sequences,
-      prefer_full_line: autosuggest,
-    };
-
-    let suggestions = if let Some(items) = server_suggestions {
-      items
-    } else {
-      suggest(&db.conn, config).await?
+    let suggestions = match backend {
+      Backend::Server => server_suggestions.ok_or_else(|| eyre!("Suggest server unavailable"))?,
+      Backend::Embedded(db) => {
+        let config = SuggestConfig {
+          max_results: count,
+          recent_limit,
+          prefix: None,
+          cwd,
+          hostname,
+          username,
+          session_id,
+          use_sequences: !no_sequences,
+          prefer_full_line: autosuggest,
+        };
+        suggest(&db.conn, config).await?
+      }
     };
     if autosuggest {
       if let Some(first) = suggestions.first() {

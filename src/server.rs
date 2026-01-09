@@ -5,7 +5,7 @@ use std::sync::Arc;
 use std::time::Duration;
 
 use deadpool_libsql::{Manager, Pool};
-use libsql::Database;
+use libsql::{Connection, Database};
 use rkyv::{Archive, Deserialize, Serialize};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
@@ -13,10 +13,15 @@ use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-use crate::db::{insert_invocation, open_db, update_stats_for_invocation};
+use crate::db::{import_history, insert_invocation, open_db, update_stats_for_invocation};
+use crate::indexer::rebuild_stats;
+use crate::predict::aliases::{expand_alias, load_aliases};
 use crate::predict::{SuggestConfig, Suggestion as InternalSuggestion, suggest};
-use crate::rerank::{TrainConfig, model_status, train_model, warm_model_cache};
-use crate::shell_history::{Invocation, detect_shellname};
+use crate::rerank::{TrainConfig, model_status, reset_model, train_model, warm_model_cache};
+use crate::sequence::{SequenceConfig, analyze_sequences, analyze_token_sequences};
+use crate::shell_history::{
+  Invocation, Shell, detect_shellname, parse_bash_history, parse_zsh_history,
+};
 use crate::{Result, ZageError};
 
 const DEFAULT_TIMEOUT_MS: u64 = 200;
@@ -40,8 +45,32 @@ pub enum Request {
     limit: u32,
     prefer_full_line: bool,
   },
+  Import {
+    file: Option<String>,
+    hostname: Option<String>,
+    username: Option<String>,
+    shell: String,
+    no_index: bool,
+  },
+  Index {
+    max_commands: Option<usize>,
+    with_sequences: bool,
+  },
+  AnalyzeSequences {
+    min_support: usize,
+    min_confidence: f64,
+    min_lift: f64,
+    max_len: usize,
+  },
   Ping,
-  Train,
+  Train {
+    epochs: usize,
+    negatives: usize,
+    min_history: usize,
+    max_samples: usize,
+  },
+  ModelStatus,
+  ModelReset,
   Status,
   Shutdown,
 }
@@ -58,6 +87,9 @@ pub enum Response {
     model_loaded: bool,
     history_count: u64,
     last_train: Option<i64>,
+  },
+  Text {
+    lines: Vec<String>,
   },
   Error {
     message: String,
@@ -90,9 +122,7 @@ struct ConnectionPool {
 impl ConnectionPool {
   fn new(db: Database) -> Result<Self> {
     let manager = Manager::from_libsql_database(db);
-    let default_size = std::thread::available_parallelism()
-      .map(|n| n.get())
-      .unwrap_or(4);
+    let default_size = 30;
     let max_size = std::env::var("ZAGE_DB_POOL_SIZE")
       .ok()
       .and_then(|val| val.parse::<usize>().ok())
@@ -105,33 +135,24 @@ impl ConnectionPool {
   }
 
   async fn get(&self) -> Result<deadpool_libsql::Object> {
-    self
+    let conn = self
       .pool
       .get()
       .await
-      .map_err(|err| ZageError::ConfigError(err.to_string()))
+      .map_err(|err| ZageError::ConfigError(err.to_string()))?;
+    let _ = apply_pragma(&conn, "PRAGMA busy_timeout=5000").await;
+    Ok(conn)
   }
 }
 
 pub async fn run_server(db_path: &Path) -> Result<()> {
-  let listener = if let Some(listener) = activated_listener()? {
-    info!("zage server listening on activated socket");
-    listener
-  } else {
-    let socket_path = socket_path()?;
-    if socket_path.exists() {
-      std::fs::remove_file(&socket_path)?;
-    }
-    if let Some(parent) = socket_path.parent() {
-      std::fs::create_dir_all(parent)?;
-    }
-
-    let listener = UnixListener::bind(&socket_path)?;
-    info!("zage server listening on {}", socket_path.display());
-    listener
-  };
-
   let db = open_db(db_path).await?;
+  if let Err(err) = apply_pragma(&db.conn, "PRAGMA journal_mode=WAL").await {
+    warn!("failed to enable WAL: {}", err);
+  }
+  if let Err(err) = apply_pragma(&db.conn, "PRAGMA busy_timeout=5000").await {
+    warn!("failed to set busy_timeout: {}", err);
+  }
   let pool = Arc::new(ConnectionPool::new(db.db)?);
   let _ = warm_model_cache();
 
@@ -157,6 +178,23 @@ pub async fn run_server(db_path: &Path) -> Result<()> {
     }
   });
 
+  let listener = if let Some(listener) = activated_listener()? {
+    info!("zage server listening on activated socket");
+    listener
+  } else {
+    let socket_path = socket_path()?;
+    if socket_path.exists() {
+      std::fs::remove_file(&socket_path)?;
+    }
+    if let Some(parent) = socket_path.parent() {
+      std::fs::create_dir_all(parent)?;
+    }
+
+    let listener = UnixListener::bind(&socket_path)?;
+    info!("zage server listening on {}", socket_path.display());
+    listener
+  };
+
   loop {
     let (stream, _) = listener.accept().await?;
     let conn = pool.clone();
@@ -167,6 +205,12 @@ pub async fn run_server(db_path: &Path) -> Result<()> {
       }
     });
   }
+}
+
+async fn apply_pragma(conn: &Connection, sql: &str) -> Result<()> {
+  let mut rows = conn.query(sql, ()).await?;
+  let _ = rows.next().await?;
+  Ok(())
 }
 
 pub async fn try_request(request: Request) -> Result<Option<Response>> {
@@ -310,13 +354,33 @@ async fn handle_client(
     let request =
       rkyv::from_bytes::<Request>(&buf).map_err(|err| ZageError::ConfigError(err.to_string()))?;
 
+    let request_kind = request_kind(&request);
     let response = handle_request(request, &pool, &record_tx).await;
+    if let Response::Error { message } = &response {
+      warn!("server request error ({}): {}", request_kind, message);
+    }
     let payload =
       rkyv::to_bytes::<_, 256>(&response).map_err(|err| ZageError::ConfigError(err.to_string()))?;
     let len = (payload.len() as u32).to_le_bytes();
     stream.write_all(&len).await?;
     stream.write_all(&payload).await?;
     stream.flush().await?;
+  }
+}
+
+fn request_kind(request: &Request) -> &'static str {
+  match request {
+    Request::Record { .. } => "record",
+    Request::Suggest { .. } => "suggest",
+    Request::Import { .. } => "import",
+    Request::Index { .. } => "index",
+    Request::AnalyzeSequences { .. } => "analyze-sequences",
+    Request::Ping => "ping",
+    Request::Train { .. } => "train",
+    Request::ModelStatus => "model-status",
+    Request::ModelReset => "model-reset",
+    Request::Status => "status",
+    Request::Shutdown => "shutdown",
   }
 }
 
@@ -328,10 +392,112 @@ async fn handle_request(
   match request {
     Request::Ping => Response::Pong,
     Request::Status => status_response(pool).await,
-    Request::Train => match pool.get().await {
+    Request::Train {
+      epochs,
+      negatives,
+      min_history,
+      max_samples,
+    } => match pool.get().await {
       Ok(conn) => {
-        let _ = train_model(&conn, TrainConfig::default()).await;
-        Response::Ack
+        let result = train_model(
+          &conn,
+          TrainConfig {
+            epochs,
+            negatives_per_pos: negatives,
+            min_history,
+            max_samples,
+          },
+        )
+        .await;
+        match result {
+          Ok(report) => Response::Text {
+            lines: vec![format!(
+              "Trained reranker: samples={}, pairs={}, validation_accuracy={:.2}, model={}",
+              report.samples,
+              report.pairs,
+              report.validation_accuracy,
+              report.model_path.display()
+            )],
+          },
+          Err(err) => Response::Error {
+            message: err.to_string(),
+          },
+        }
+      }
+      Err(err) => Response::Error {
+        message: err.to_string(),
+      },
+    },
+    Request::ModelStatus => match model_status() {
+      Ok(model) => Response::Text {
+        lines: vec![match model {
+          Some(status) => format!(
+            "Reranker model (trees={}, objective={}, loss={}, created_at={}, path={})",
+            status.n_trees,
+            status.objective,
+            status.loss,
+            status.created_at,
+            status.model_path.display()
+          ),
+          None => "Reranker model not found".to_string(),
+        }],
+      },
+      Err(err) => Response::Error {
+        message: err.to_string(),
+      },
+    },
+    Request::ModelReset => match reset_model() {
+      Ok(()) => Response::Text {
+        lines: vec!["Reranker model reset".to_string()],
+      },
+      Err(err) => Response::Error {
+        message: err.to_string(),
+      },
+    },
+    Request::Import {
+      file,
+      hostname,
+      username,
+      shell,
+      no_index,
+    } => match pool.get().await {
+      Ok(conn) => match handle_import(&conn, file, hostname, username, shell, no_index).await {
+        Ok(lines) => Response::Text { lines },
+        Err(err) => Response::Error {
+          message: err.to_string(),
+        },
+      },
+      Err(err) => Response::Error {
+        message: err.to_string(),
+      },
+    },
+    Request::Index {
+      max_commands,
+      with_sequences,
+    } => match pool.get().await {
+      Ok(conn) => match handle_index(&conn, max_commands, with_sequences).await {
+        Ok(lines) => Response::Text { lines },
+        Err(err) => Response::Error {
+          message: err.to_string(),
+        },
+      },
+      Err(err) => Response::Error {
+        message: err.to_string(),
+      },
+    },
+    Request::AnalyzeSequences {
+      min_support,
+      min_confidence,
+      min_lift,
+      max_len,
+    } => match pool.get().await {
+      Ok(conn) => {
+        match handle_sequences(&conn, min_support, min_confidence, min_lift, max_len).await {
+          Ok(lines) => Response::Text { lines },
+          Err(err) => Response::Error {
+            message: err.to_string(),
+          },
+        }
       }
       Err(err) => Response::Error {
         message: err.to_string(),
@@ -411,6 +577,133 @@ async fn handle_request(
       }
     }
   }
+}
+
+async fn handle_import(
+  conn: &Connection,
+  file: Option<String>,
+  hostname: Option<String>,
+  username: Option<String>,
+  shell: String,
+  no_index: bool,
+) -> Result<Vec<String>> {
+  let history_file = if let Some(path) = file {
+    PathBuf::from(path)
+  } else {
+    default_history_path(&shell)?
+  };
+
+  let shell = parse_shell(&shell)?;
+  let aliases = load_aliases();
+  let mut invocations = match shell {
+    Shell::Zsh => parse_zsh_history(&history_file, hostname.clone(), username.clone())?,
+    Shell::Bash => parse_bash_history(&history_file, hostname.clone(), username.clone())?,
+  };
+  for invocation in invocations.iter_mut() {
+    if invocation.expanded_command.is_empty() {
+      invocation.expanded_command =
+        expand_alias(&invocation.command, &aliases).unwrap_or_else(|| invocation.command.clone());
+    }
+  }
+  import_history(conn, invocations).await?;
+
+  let mut lines = vec![format!("Imported history from {:?}", history_file)];
+  if no_index {
+    lines.push("Index rebuild skipped (requested via --no-index)".to_string());
+    return Ok(lines);
+  }
+
+  let report = rebuild_stats(conn, None).await?;
+  let seq_report = analyze_sequences(conn, SequenceConfig::default()).await?;
+  let token_seq_report = analyze_token_sequences(conn, SequenceConfig::default()).await?;
+  lines.push(format!(
+    "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}, phase_stats={}",
+    report.commands, report.transitions, report.contexts, report.token_cache, report.phase_stats
+  ));
+  lines.push(format!(
+    "Command sequence stats: sequences={}, bigrams={}, trigrams={}",
+    seq_report.sequences, seq_report.bigrams, seq_report.trigrams
+  ));
+  lines.push(format!(
+    "Token sequence stats: sequences={}, bigrams={}, trigrams={}",
+    token_seq_report.sequences, token_seq_report.bigrams, token_seq_report.trigrams
+  ));
+  Ok(lines)
+}
+
+async fn handle_index(
+  conn: &Connection,
+  max_commands: Option<usize>,
+  with_sequences: bool,
+) -> Result<Vec<String>> {
+  let report = rebuild_stats(conn, max_commands).await?;
+  let mut lines = vec![format!(
+    "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}, phase_stats={}",
+    report.commands, report.transitions, report.contexts, report.token_cache, report.phase_stats
+  )];
+
+  if with_sequences {
+    let seq_report = analyze_sequences(conn, SequenceConfig::default()).await?;
+    lines.push(format!(
+      "Command sequence stats: sequences={}, bigrams={}, trigrams={}",
+      seq_report.sequences, seq_report.bigrams, seq_report.trigrams
+    ));
+    let token_report = analyze_token_sequences(conn, SequenceConfig::default()).await?;
+    lines.push(format!(
+      "Token sequence stats: sequences={}, bigrams={}, trigrams={}",
+      token_report.sequences, token_report.bigrams, token_report.trigrams
+    ));
+  }
+
+  Ok(lines)
+}
+
+async fn handle_sequences(
+  conn: &Connection,
+  min_support: usize,
+  min_confidence: f64,
+  min_lift: f64,
+  max_len: usize,
+) -> Result<Vec<String>> {
+  let config = SequenceConfig {
+    min_support,
+    min_confidence,
+    min_lift,
+    max_len,
+  };
+  let report = analyze_sequences(conn, config.clone()).await?;
+  let token_report = analyze_token_sequences(conn, config).await?;
+  Ok(vec![
+    format!(
+      "Command sequence stats: sequences={}, bigrams={}, trigrams={}",
+      report.sequences, report.bigrams, report.trigrams
+    ),
+    format!(
+      "Token sequence stats: sequences={}, bigrams={}, trigrams={}",
+      token_report.sequences, token_report.bigrams, token_report.trigrams
+    ),
+  ])
+}
+
+fn parse_shell(shell: &str) -> Result<Shell> {
+  match shell.to_lowercase().as_str() {
+    "zsh" => Ok(Shell::Zsh),
+    "bash" => Ok(Shell::Bash),
+    other => Err(ZageError::ConfigError(format!(
+      "unsupported shell: {other}"
+    ))),
+  }
+}
+
+fn default_history_path(shell: &str) -> Result<PathBuf> {
+  let mut path =
+    dirs::home_dir().ok_or_else(|| ZageError::ConfigError("missing home dir".to_string()))?;
+  let filename = match parse_shell(shell)? {
+    Shell::Zsh => ".zsh_history",
+    Shell::Bash => ".bash_history",
+  };
+  path.push(filename);
+  Ok(path)
 }
 
 async fn status_response(pool: &Arc<ConnectionPool>) -> Response {

@@ -206,11 +206,7 @@ pub(crate) fn rerank_suggestions(
     }
   }
 
-  updated.sort_by(|a, b| {
-    b.score
-      .partial_cmp(&a.score)
-      .unwrap_or(std::cmp::Ordering::Equal)
-  });
+  updated.sort_by(|a, b| b.score.total_cmp(&a.score));
 
   let top = updated.first().map(|s| s.score).unwrap_or(0.0);
   let second = updated.get(1).map(|s| s.score).unwrap_or(0.0);

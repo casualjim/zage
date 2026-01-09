@@ -1,13 +1,14 @@
-use color_eyre::eyre::Result;
+use color_eyre::eyre::{Result, eyre};
 use tracing::{debug, info};
 
-use crate::db::{Db, insert_invocation, update_stats_for_invocation};
+use crate::cli::Backend;
+use crate::db::{insert_invocation, update_stats_for_invocation};
 use crate::predict::aliases::{expand_alias, load_aliases};
 use crate::server::{self, Request, Response};
 use crate::shell_history::{Invocation, detect_shellname, get_hostname};
 
 pub async fn run(
-  db: &Db,
+  backend: Backend<'_>,
   command: String,
   working_directory: String,
   exit_status: i64,
@@ -28,37 +29,43 @@ pub async fn run(
     end_timestamp,
     session_id: session_id.unwrap_or_else(|| std::process::id() as i64) as u64,
   };
-  if let Ok(Some(Response::Ack)) = server::try_request(server_req).await {
-    return Ok(());
+  match backend {
+    Backend::Server => match server::try_request(server_req).await? {
+      Some(Response::Ack) => Ok(()),
+      Some(Response::Error { message }) => Err(eyre!(message)),
+      Some(_) => Err(eyre!("Unexpected response from server")),
+      None => Err(eyre!("Record server unavailable")),
+    },
+    Backend::Embedded(db) => {
+      let hostname = get_hostname();
+      let username = uzers::get_current_username()
+        .map(|v| v.to_string_lossy().into_owned())
+        .unwrap_or_else(|| "unknown".to_string());
+      let session_id = session_id.unwrap_or_else(|| std::process::id() as i64);
+
+      let invocation = Invocation {
+        command: command.clone(),
+        expanded_command: expanded_command.clone(),
+        shellname: detect_shellname(),
+        working_directory: Some(working_directory.clone()),
+        hostname: Some(hostname.clone()),
+        username: Some(username.clone()),
+        exit_status: Some(exit_status),
+        start_unix_timestamp: Some(start_timestamp),
+        end_unix_timestamp: Some(end_timestamp),
+        session_id,
+      };
+
+      debug!("Inserting invocation: {:?}", invocation);
+      let inserted = insert_invocation(&db.conn, &invocation).await?;
+      if inserted {
+        update_stats_for_invocation(&db.conn, &invocation).await?;
+        info!("Invocation recorded successfully.");
+      } else {
+        info!("Duplicate invocation skipped: {:?}", invocation.command);
+      }
+
+      Ok(())
+    }
   }
-
-  let hostname = get_hostname();
-  let username = uzers::get_current_username()
-    .map(|v| v.to_string_lossy().into_owned())
-    .unwrap_or_else(|| "unknown".to_string());
-  let session_id = session_id.unwrap_or_else(|| std::process::id() as i64);
-
-  let invocation = Invocation {
-    command: command.clone(),
-    expanded_command: expanded_command.clone(),
-    shellname: detect_shellname(),
-    working_directory: Some(working_directory.clone()),
-    hostname: Some(hostname.clone()),
-    username: Some(username.clone()),
-    exit_status: Some(exit_status),
-    start_unix_timestamp: Some(start_timestamp),
-    end_unix_timestamp: Some(end_timestamp),
-    session_id,
-  };
-
-  debug!("Inserting invocation: {:?}", invocation);
-  let inserted = insert_invocation(&db.conn, &invocation).await?;
-  if inserted {
-    update_stats_for_invocation(&db.conn, &invocation).await?;
-    info!("Invocation recorded successfully.");
-  } else {
-    info!("Duplicate invocation skipped: {:?}", invocation.command);
-  }
-
-  Ok(())
 }

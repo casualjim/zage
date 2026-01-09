@@ -48,6 +48,7 @@ fn test_import() -> Result<()> {
     .arg("--db-path")
     .arg(db_file.to_str().unwrap())
     .arg("import")
+    .arg("--embedded-db")
     .arg("--shell")
     .arg("zsh")
     .arg(hist_file.to_str().unwrap());
@@ -79,6 +80,7 @@ fn test_record_command() -> Result<()> {
     .arg("--db-path")
     .arg(&db_path)
     .arg("record")
+    .arg("--embedded-db")
     .arg("--command")
     .arg(cmd_str)
     .arg("--working-directory")
