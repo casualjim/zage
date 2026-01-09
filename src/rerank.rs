@@ -467,6 +467,7 @@ fn features_from_suggestion(
     return None;
   }
 
+  let time_bucket = context.time_bucket;
   let recency = suggestion.breakdown.recency;
   let frequency = suggestion.breakdown.frequency;
   let transition = suggestion.breakdown.transition;
@@ -475,8 +476,7 @@ fn features_from_suggestion(
 
   let candidate_tokens = normalized_tokens(&suggestion.command);
   let similarity = token_similarity(&context.session_tokens, &candidate_tokens);
-  let tier1_score =
-    recency + frequency + transition + context_score + sequence_score + similarity;
+  let tier1_score = recency + frequency + transition + context_score + sequence_score + similarity;
 
   let repo_match = if candidate.repo_freq > 0 { 1.0 } else { 0.0 };
   let session_match = if candidate.session_freq > 0 { 1.0 } else { 0.0 };
@@ -505,10 +505,7 @@ fn features_from_suggestion(
   if let Some(branch) = context.branch.as_ref() {
     add_hash(&mut values, format!("branch:{branch}:{head}").as_str());
   }
-  add_hash(
-    &mut values,
-    format!("time:{}:{head}", context.time_bucket).as_str(),
-  );
+  add_hash(&mut values, format!("time:{time_bucket}:{head}").as_str());
   if let Some(phase) = context.session_phase.as_ref() {
     add_hash(&mut values, format!("phase:{phase}:{head}").as_str());
   }
@@ -526,6 +523,7 @@ fn build_feature_vector(
     return None;
   }
 
+  let time_bucket = context.time_bucket;
   let stat = stats.command_stats.get(command);
   let freq = stat.map(|s| s.freq).unwrap_or(0);
   let last_seen = stat.map(|s| s.last_seen).unwrap_or(0);
@@ -578,8 +576,7 @@ fn build_feature_vector(
 
   let (sequence_score, sequence_confidence, sequence_lift, sequence_prefix_len) =
     sequence_features(command, context, stats);
-  let tier1_score =
-    recency + frequency + transition + context_score + sequence_score + similarity;
+  let tier1_score = recency + frequency + transition + context_score + sequence_score + similarity;
   let repo_match = if repo_freq > 0 { 1.0 } else { 0.0 };
   let session_match = if session_freq > 0 { 1.0 } else { 0.0 };
   let head_recent = if context.recent_heads.iter().any(|h| h == &head) {
@@ -607,10 +604,7 @@ fn build_feature_vector(
   if let Some(branch) = context.branch.as_ref() {
     add_hash(&mut values, format!("branch:{branch}:{head}").as_str());
   }
-  add_hash(
-    &mut values,
-    format!("time:{}:{head}", context.time_bucket).as_str(),
-  );
+  add_hash(&mut values, format!("time:{time_bucket}:{head}").as_str());
   if let Some(phase) = context.session_phase.as_ref() {
     add_hash(&mut values, format!("phase:{phase}:{head}").as_str());
   }
@@ -817,11 +811,7 @@ fn sequence_features(
       .get(&(prev1.clone(), candidate.clone()))
       .copied()
       .unwrap_or(0);
-    let prefix = stats
-      .sequence_unigram
-      .get(&prev1)
-      .copied()
-      .unwrap_or(0);
+    let prefix = stats.sequence_unigram.get(&prev1).copied().unwrap_or(0);
     if bigram > 0 && prefix > 0 {
       let conf = (bigram as f64) / (prefix as f64);
       let lift = conf / base;

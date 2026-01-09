@@ -1,3 +1,5 @@
+use std::os::unix::io::FromRawFd;
+use std::os::unix::net::UnixListener as StdUnixListener;
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use std::time::Duration;
@@ -112,16 +114,22 @@ impl ConnectionPool {
 }
 
 pub async fn run_server(db_path: &Path) -> Result<()> {
-  let socket_path = socket_path()?;
-  if socket_path.exists() {
-    std::fs::remove_file(&socket_path)?;
-  }
-  if let Some(parent) = socket_path.parent() {
-    std::fs::create_dir_all(parent)?;
-  }
+  let listener = if let Some(listener) = activated_listener()? {
+    info!("zage server listening on activated socket");
+    listener
+  } else {
+    let socket_path = socket_path()?;
+    if socket_path.exists() {
+      std::fs::remove_file(&socket_path)?;
+    }
+    if let Some(parent) = socket_path.parent() {
+      std::fs::create_dir_all(parent)?;
+    }
 
-  let listener = UnixListener::bind(&socket_path)?;
-  info!("zage server listening on {}", socket_path.display());
+    let listener = UnixListener::bind(&socket_path)?;
+    info!("zage server listening on {}", socket_path.display());
+    listener
+  };
 
   let db = open_db(db_path).await?;
   let pool = Arc::new(ConnectionPool::new(db.db)?);
@@ -205,6 +213,9 @@ fn socket_path() -> Result<PathBuf> {
   if let Ok(path) = std::env::var("ZAGE_SOCKET_PATH") {
     return Ok(PathBuf::from(path));
   }
+  if cfg!(target_os = "macos") {
+    return Ok(PathBuf::from("/tmp/zage.sock"));
+  }
   if let Ok(dir) = std::env::var("XDG_RUNTIME_DIR") {
     return Ok(PathBuf::from(dir).join("zage.sock"));
   }
@@ -212,6 +223,75 @@ fn socket_path() -> Result<PathBuf> {
     return Ok(PathBuf::from(tmp).join("zage.sock"));
   }
   Ok(PathBuf::from("/tmp/zage.sock"))
+}
+
+fn activated_listener() -> Result<Option<UnixListener>> {
+  if let Some(listener) = systemd_listener()? {
+    return Ok(Some(listener));
+  }
+  if let Some(listener) = launchd_listener()? {
+    return Ok(Some(listener));
+  }
+  Ok(None)
+}
+
+fn systemd_listener() -> Result<Option<UnixListener>> {
+  let listen_pid = std::env::var("LISTEN_PID")
+    .ok()
+    .and_then(|val| val.parse::<u32>().ok());
+  let listen_fds = std::env::var("LISTEN_FDS")
+    .ok()
+    .and_then(|val| val.parse::<i32>().ok())
+    .unwrap_or(0);
+  let pid = std::process::id();
+  if listen_pid != Some(pid) || listen_fds < 1 {
+    return Ok(None);
+  }
+  unsafe {
+    std::env::remove_var("LISTEN_PID");
+    std::env::remove_var("LISTEN_FDS");
+  }
+
+  let fd = 3;
+  let std_listener = unsafe { StdUnixListener::from_raw_fd(fd) };
+  std_listener.set_nonblocking(true)?;
+  Ok(Some(UnixListener::from_std(std_listener)?))
+}
+
+#[cfg(target_os = "macos")]
+fn launchd_listener() -> Result<Option<UnixListener>> {
+  use std::ffi::CString;
+  use std::ptr;
+
+  extern "C" {
+    fn launch_activate_socket(
+      name: *const libc::c_char,
+      fds: *mut *mut libc::c_int,
+      cnt: *mut libc::size_t,
+    ) -> libc::c_int;
+  }
+
+  let name = CString::new("Listeners").map_err(|err| ZageError::ConfigError(err.to_string()))?;
+  let mut fds: *mut libc::c_int = ptr::null_mut();
+  let mut count: libc::size_t = 0;
+  let status = unsafe { launch_activate_socket(name.as_ptr(), &mut fds, &mut count) };
+  if status != 0 || fds.is_null() || count == 0 {
+    if !fds.is_null() {
+      unsafe { libc::free(fds as *mut libc::c_void) };
+    }
+    return Ok(None);
+  }
+  let fd = unsafe { *fds };
+  unsafe { libc::free(fds as *mut libc::c_void) };
+
+  let std_listener = unsafe { StdUnixListener::from_raw_fd(fd) };
+  std_listener.set_nonblocking(true)?;
+  Ok(Some(UnixListener::from_std(std_listener)?))
+}
+
+#[cfg(not(target_os = "macos"))]
+fn launchd_listener() -> Result<Option<UnixListener>> {
+  Ok(None)
 }
 
 async fn handle_client(

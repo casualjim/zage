@@ -16,6 +16,7 @@ use zage::predict::{ScoreBreakdown, SuggestConfig, Suggestion, suggest};
 use zage::rerank::{TrainConfig, model_status, reset_model, train_model};
 use zage::sequence::{SequenceConfig, analyze_sequences, analyze_token_sequences};
 use zage::server::{self, Request, Response};
+use zage::service;
 use zage::shell_history::{
   Invocation, Shell, detect_shellname, get_hostname, parse_bash_history, parse_zsh_history,
 };
@@ -130,6 +131,12 @@ enum Commands {
   /// Run the suggestion server (foreground)
   Server {},
 
+  /// Install or uninstall the background suggestion service
+  Service {
+    #[command(subcommand)]
+    action: ServiceAction,
+  },
+
   /// Train the lightweight reranker model
   Train {
     /// Number of training epochs
@@ -173,6 +180,14 @@ enum Commands {
     #[arg(long)]
     session_id: Option<i64>, // Optional for now
   },
+}
+
+#[derive(Subcommand, Debug)]
+enum ServiceAction {
+  /// Install the user service (systemd or launchd)
+  Install,
+  /// Uninstall the user service (systemd or launchd)
+  Uninstall,
 }
 
 #[derive(Clone, Copy, Debug, clap::ValueEnum)]
@@ -541,6 +556,17 @@ async fn main() -> Result<()> {
       server::run_server(db_path.as_path()).await?;
     }
 
+    Some(Commands::Service { action }) => match action {
+      ServiceAction::Install => {
+        service::install()?;
+        eprintln!("Service installed");
+      }
+      ServiceAction::Uninstall => {
+        service::uninstall()?;
+        eprintln!("Service uninstalled");
+      }
+    },
+
     Some(Commands::Record {
       command,
       working_directory,
@@ -631,9 +657,9 @@ fn format_zsh_item(word: &str, desc: Option<&str>) -> String {
           _ => d_esc.push(ch),
         }
       }
-      format!("{}:{}", escaped, d_esc)
+      format!("{escaped}:{d_esc}")
     }
-    None => format!("{}:", escaped),
+    None => format!("{escaped}:"),
   }
 }
 

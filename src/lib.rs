@@ -12,6 +12,7 @@ pub mod rerank;
 pub mod rerank_config;
 pub mod sequence;
 pub mod server;
+pub mod service;
 pub mod shell_history;
 pub mod tokenize;
 

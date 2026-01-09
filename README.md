@@ -5,9 +5,10 @@ Zage (derived from "Z Shell" and "Sage") is a Rust CLI that predicts the next co
 ## Features
 
 - 🔮 **Command Prediction**: Predicts the most likely next command based on your history
-- 🧠 **Context Awareness**: Uses working directory, hostname, and username signals
+- 🧠 **Context Awareness**: Uses working directory, hostname, username, and session signals
 - 📊 **Sequence Learning**: Mines frequent bigrams/trigrams from your history
-- 🔎 **Token Similarity**: Uses SLP-style tokenization to score partial input
+- 🤖 **ML-Powered Reranking**: Optional GBRT model learns from your behavior patterns
+- 🔎 **Token Similarity**: Tree-sitter-based parsing for accurate command analysis
 - 🪄 **Sensible Defaults**: Works out of the box, but fully configurable
 
 ## Installation
@@ -41,6 +42,10 @@ mise build:debug
    ```bash
    zage suggest --current-line "git " --count 5
    ```
+4. (Optional) Train the ML model after accumulating 1000+ commands:
+   ```bash
+   zage train
+   ```
 
 ## Usage
 
@@ -65,6 +70,32 @@ Ask for suggestions:
 ```bash
 zage suggest --current-line "git " --count 5
 ```
+
+### Training the ML Model (Optional)
+
+Once you have 1000+ commands in your history, train the reranking model:
+
+```bash
+# Train with default settings (150 epochs, 6 negatives per positive)
+zage train
+
+# Or customize training parameters
+zage train --epochs 200 --negatives 8 --min-history 1000 --max-samples 30000
+```
+
+Check model status:
+
+```bash
+zage model-status
+```
+
+Reset (delete) the model:
+
+```bash
+zage model-reset
+```
+
+The model will automatically be used for reranking when available. It learns from your actual command execution patterns to improve suggestion quality.
 
 Zsh autosuggestions (ghost text):
 
@@ -160,13 +191,34 @@ Override with:
 
 ## How It Works
 
-Zage uses statistical ranking and sequence mining to predict commands:
+Zage uses a two-phase approach combining statistical ranking with machine learning:
 
-1. **History Collection**: Stores command history with contextual metadata
-2. **SLP Tokenization**: Splits commands into normalized tokens for prefix matching
-3. **Stats Tables**: Maintains command, transition, and context frequencies + recency
-4. **Sequence Mining**: Computes bigram/trigram support, confidence, and lift
-5. **Ranking**: Combines recency, frequency, transitions, context, sequence lift, and token similarity
+### Phase 1: Statistical Candidate Generation
+1. **History Collection**: Stores command history with rich contextual metadata (working directory, session, git repo, etc.)
+2. **Tree-Sitter Parsing**: Uses tree-sitter-bash and tree-sitter-zsh for accurate command tokenization
+3. **Stats Tables**: Maintains command, transition, and context frequencies with recency decay
+4. **Sequence Mining**: Computes bigram/trigram support, confidence, and lift from command patterns
+5. **Tier-1 Ranking**: Combines recency, frequency, transitions, context, sequence lift, and token similarity
+
+### Phase 2: ML-Powered Reranking (Optional)
+6. **Feature Extraction**: Extracts 77 features from candidates (13 base + 64 hash features)
+7. **GBRT Model**: Gradient Boosted Regression Trees trained on your actual command choices
+8. **Calibration**: Uses Platt scaling and stacking to produce well-calibrated probabilities
+9. **Adaptive Learning**: The model learns what you actually run, not just statistical patterns
+
+### Training the Model
+After you have 1000+ commands in your history, train the model:
+```bash
+zage train
+```
+
+The model uses pairwise learning: for each command you ran, it samples negative examples (commands you *didn't* run) and learns to distinguish them. It considers:
+- Your recent command sequence and workflow patterns
+- Session context and repository location
+- Time of day and git branch
+- Phase detection (build/test/deploy/etc.)
+
+The reranker automatically applies when available, with confidence thresholds and timeouts to ensure fast suggestions.
 
 ## Contributing
 

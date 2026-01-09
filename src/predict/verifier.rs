@@ -473,8 +473,10 @@ fn build_suggest_config(
   options: Option<&Options>,
   root: &TempDir,
 ) -> SuggestConfig {
-  let mut config = SuggestConfig::default();
-  config.recent_limit = 50;
+  let mut config = SuggestConfig {
+    recent_limit: 50,
+    ..SuggestConfig::default()
+  };
   let expect = &scenario.expect;
   let top_items = expect.top.as_deref().unwrap_or(&[]);
   let contains_items = expect.contains.as_deref().unwrap_or(&[]);
@@ -806,7 +808,8 @@ async fn assert_db_expectations(conn: &Connection, scenario: &Scenario) -> Resul
     };
     if !ok {
       let description = expect
-        .description.as_deref()
+        .description
+        .as_deref()
         .unwrap_or("db assertion failed");
       return Err(ZageError::ConfigError(format!(
         "scenario {}: {}",
@@ -898,6 +901,7 @@ pub async fn run_tier1_case(path: &Path, scenario_index: usize) -> Result<()> {
   run_tier1_spec(path, Some(scenario_index)).await
 }
 
+#[allow(clippy::await_holding_lock)]
 async fn run_tier1_spec(path: &Path, scenario_index: Option<usize>) -> Result<()> {
   let spec = load_tier1_spec(path)?;
 

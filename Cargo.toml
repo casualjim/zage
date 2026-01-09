@@ -19,6 +19,7 @@ hostname = "0.4.1"
 human-panic = "2.0"
 itertools = "0.14.0"
 jiff = "0.2.13"
+libc = "0.2"
 libsql = { version = "0.9.29", features = ["remote", "core", "replication"] }
 miette = { version = "7", features = ["fancy"] }
 ndarray = "0.17.0"

@@ -230,33 +230,31 @@ async fn flag_candidates(
 
   let exclude: HashSet<String> = ctx.flags.iter().cloned().collect();
 
-  let mut repo_flags = fetch_flag_candidates(
-    conn,
-    &ctx.repo_root,
-    &ctx.head,
-    &like,
-    &ctx.base,
+  let repo_context = FlagCandidateContext {
+    repo_root: &ctx.repo_root,
+    head: &ctx.head,
+    like: &like,
+    base_prefix: &ctx.base,
     token_priors,
-    &exclude,
+    exclude: &exclude,
     now,
     recency_half_life,
-  )
-  .await?;
+  };
+  let mut repo_flags = fetch_flag_candidates(conn, &repo_context).await?;
 
   let mut global_flags = Vec::new();
   if !ctx.repo_root.is_empty() {
-    global_flags = fetch_flag_candidates(
-      conn,
-      "",
-      &ctx.head,
-      &like,
-      &ctx.base,
+    let global_context = FlagCandidateContext {
+      repo_root: "",
+      head: &ctx.head,
+      like: &like,
+      base_prefix: &ctx.base,
       token_priors,
-      &exclude,
+      exclude: &exclude,
       now,
       recency_half_life,
-    )
-    .await?;
+    };
+    global_flags = fetch_flag_candidates(conn, &global_context).await?;
   }
 
   if matches!(ctx.partial.as_deref(), Some("-")) {
@@ -330,7 +328,7 @@ async fn fetch_arg_candidates(
     {
       base.push(' ');
     }
-    let suggestion = format!("{}{}", base, arg_raw);
+    let suggestion = format!("{base}{arg_raw}");
 
     results.push(Suggestion {
       command: suggestion,
@@ -390,7 +388,7 @@ async fn fetch_arg_candidates_any(
     {
       base.push(' ');
     }
-    let suggestion = format!("{}{}", base, arg_raw);
+    let suggestion = format!("{base}{arg_raw}");
 
     results.push(Suggestion {
       command: suggestion,
@@ -466,7 +464,7 @@ async fn fetch_env_candidates(
     {
       base.push(' ');
     }
-    let suggestion = format!("{}{}", base, env_raw);
+    let suggestion = format!("{base}{env_raw}");
 
     results.push(Suggestion {
       command: suggestion,
@@ -541,7 +539,7 @@ async fn fetch_env_key_candidates(
     {
       base.push(' ');
     }
-    let suggestion = format!("{}{}=", base, env_key);
+    let suggestion = format!("{base}{env_key}=");
 
     results.push(Suggestion {
       command: suggestion,
@@ -560,16 +558,20 @@ async fn fetch_env_key_candidates(
   Ok(results)
 }
 
-async fn fetch_flag_candidates(
-  conn: &Connection,
-  repo_root: &str,
-  head: &str,
-  like: &str,
-  base_prefix: &str,
-  token_priors: &HashMap<String, f64>,
-  exclude: &HashSet<String>,
+struct FlagCandidateContext<'a> {
+  repo_root: &'a str,
+  head: &'a str,
+  like: &'a str,
+  base_prefix: &'a str,
+  token_priors: &'a HashMap<String, f64>,
+  exclude: &'a HashSet<String>,
   now: i64,
   recency_half_life: f64,
+}
+
+async fn fetch_flag_candidates(
+  conn: &Connection,
+  context: &FlagCandidateContext<'_>,
 ) -> Result<Vec<Suggestion>> {
   let mut rows = query_prepared(
     conn,
@@ -578,7 +580,7 @@ async fn fetch_flag_candidates(
      WHERE repo_root = ? AND command_head = ? AND flag_raw LIKE ?
      ORDER BY freq DESC, last_seen DESC
      LIMIT 50",
-    libsql::params![repo_root, head, like],
+    libsql::params![context.repo_root, context.head, context.like],
   )
   .await?;
 
@@ -586,19 +588,23 @@ async fn fetch_flag_candidates(
   while let Some(row) = rows.next().await? {
     let flag_raw = row.get::<String>(0)?;
     let flag_norm = row.get::<String>(1)?;
-    if exclude.contains(&flag_raw) {
+    if context.exclude.contains(&flag_raw) {
       continue;
     }
     let freq = row.get::<i64>(2)?;
     let last_seen = row.get::<i64>(3)?;
 
-    let recency = recency_score(now, last_seen, recency_half_life);
+    let recency = recency_score(context.now, last_seen, context.recency_half_life);
     let frequency = (freq as f64).ln_1p();
-    let token_prior = token_priors.get(&flag_norm).copied().unwrap_or(0.0);
-    let context = if repo_root.is_empty() { 0.0 } else { 1.0 };
-    let score = 0.45 * recency + 0.3 * frequency + 0.2 * token_prior + 0.05 * context;
+    let token_prior = context.token_priors.get(&flag_norm).copied().unwrap_or(0.0);
+    let context_score = if context.repo_root.is_empty() {
+      0.0
+    } else {
+      1.0
+    };
+    let score = 0.45 * recency + 0.3 * frequency + 0.2 * token_prior + 0.05 * context_score;
 
-    let mut base = base_prefix.to_string();
+    let mut base = context.base_prefix.to_string();
     if !base.is_empty()
       && !base
         .chars()
@@ -608,7 +614,7 @@ async fn fetch_flag_candidates(
     {
       base.push(' ');
     }
-    let suggestion = format!("{}{}", base, flag_raw);
+    let suggestion = format!("{base}{flag_raw}");
 
     results.push(Suggestion {
       command: suggestion,
@@ -617,7 +623,7 @@ async fn fetch_flag_candidates(
         recency,
         frequency,
         transition: 0.0,
-        context,
+        context: context_score,
         sequence: token_prior,
         similarity: 0.0,
       },
