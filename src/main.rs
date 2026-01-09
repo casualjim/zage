@@ -340,6 +340,7 @@ async fn main() -> Result<()> {
         working_directory: cwd.clone().unwrap_or_else(|| "".to_string()),
         session_id: session_id.unwrap_or_default() as u64,
         limit: *count as u32,
+        prefer_full_line: *autosuggest,
       };
       if let Ok(Some(response)) = server::try_request(request).await
         && let Response::Suggestions { items } = response
@@ -357,6 +358,7 @@ async fn main() -> Result<()> {
           username: username.clone(),
           session_id: *session_id,
           use_sequences: !*no_sequences,
+          prefer_full_line: *autosuggest,
         };
 
         let completions = if let Some(items) = server_suggestions {
@@ -425,6 +427,7 @@ async fn main() -> Result<()> {
           username,
           session_id: *session_id,
           use_sequences: !*no_sequences,
+          prefer_full_line: *autosuggest,
         };
 
         let suggestions = if let Some(items) = server_suggestions {

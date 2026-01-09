@@ -97,6 +97,7 @@ pub struct SuggestConfig {
   pub username: Option<String>,
   pub session_id: Option<i64>,
   pub use_sequences: bool,
+  pub prefer_full_line: bool,
 }
 
 impl Default for SuggestConfig {
@@ -110,6 +111,7 @@ impl Default for SuggestConfig {
       username: None,
       session_id: None,
       use_sequences: true,
+      prefer_full_line: false,
     }
   }
 }
@@ -598,6 +600,7 @@ async fn completion_candidates(
     .as_deref()
     .and_then(find_repo_root)
     .unwrap_or_default();
+  let prefer_full_line = config.prefer_full_line;
   let token_priors = token_sequence_predictions(conn, prefix_norm).await?;
   let (prefix_flags, prefix_args) = {
     let tokens = tokenize_index("sh", prefix);
@@ -677,57 +680,59 @@ async fn completion_candidates(
     if !has_prefix_match {
       // fall through to normal completion candidates
     } else {
-    let trimmed_prefix = prefix.trim_end();
-    arg_suggestions.retain(|suggestion| {
-      if suggestion.command.trim_end() == trimmed_prefix {
-        return false;
-      }
-      if prefix_flags.is_empty() && prefix_args.is_empty() {
-        return true;
-      }
-      let tokens = tokenize_index("sh", &suggestion.command);
-      let Some(parts) = extract_command_parts(&suggestion.command, &tokens) else {
-        return false;
-      };
-      if !prefix_flags
-        .iter()
-        .all(|flag| parts.flags.iter().any(|cand| cand == flag))
-      {
-        return false;
-      }
-      if !prefix_args.is_empty() {
-        let candidate_args = parts
-          .args
+      let trimmed_prefix = prefix.trim_end();
+      arg_suggestions.retain(|suggestion| {
+        if suggestion.command.trim_end() == trimmed_prefix {
+          return false;
+        }
+        if prefix_flags.is_empty() && prefix_args.is_empty() {
+          return true;
+        }
+        let tokens = tokenize_index("sh", &suggestion.command);
+        let Some(parts) = extract_command_parts(&suggestion.command, &tokens) else {
+          return false;
+        };
+        if !prefix_flags
           .iter()
-          .map(|arg| arg.normalized.clone())
-          .collect::<Vec<_>>();
-        if !prefix_args
-          .iter()
-          .all(|arg| candidate_args.iter().any(|cand| cand == arg))
+          .all(|flag| parts.flags.iter().any(|cand| cand == flag))
         {
           return false;
         }
-      }
-      true
-    });
-    if arg_suggestions.is_empty() {
-      // fall through to normal completion candidates
-    } else {
-      arg_suggestions.sort_by(|a, b| {
-        b.score
-          .partial_cmp(&a.score)
-          .unwrap_or(std::cmp::Ordering::Equal)
+        if !prefix_args.is_empty() {
+          let candidate_args = parts
+            .args
+            .iter()
+            .map(|arg| arg.normalized.clone())
+            .collect::<Vec<_>>();
+          if !prefix_args
+            .iter()
+            .all(|arg| candidate_args.iter().any(|cand| cand == arg))
+          {
+            return false;
+          }
+        }
+        true
       });
-      arg_suggestions.truncate(config.max_results);
-      let last_char = prefix.chars().last();
-      let ends_with_space = last_char.map(|c| c.is_whitespace()).unwrap_or(false);
-      let ends_with_quote = matches!(last_char, Some('"') | Some('\''));
-      if (ends_with_space && !prefix_flags.is_empty()) || ends_with_quote {
-        arg_suggestions_for_merge = Some(arg_suggestions);
+      if arg_suggestions.is_empty() {
+        // fall through to normal completion candidates
       } else {
-        return Ok(arg_suggestions);
+        arg_suggestions.sort_by(|a, b| {
+          b.score
+            .partial_cmp(&a.score)
+            .unwrap_or(std::cmp::Ordering::Equal)
+        });
+        arg_suggestions.truncate(config.max_results);
+        let last_char = prefix.chars().last();
+        let ends_with_space = last_char.map(|c| c.is_whitespace()).unwrap_or(false);
+        let ends_with_quote = matches!(last_char, Some('"') | Some('\''));
+        if prefer_full_line {
+          arg_suggestions_for_merge = Some(arg_suggestions);
+        } else if (ends_with_space && !prefix_flags.is_empty()) || ends_with_quote {
+          arg_suggestions_for_merge = Some(arg_suggestions);
+        } else {
+          return Ok(arg_suggestions);
+        }
       }
-    }
     }
   }
 
@@ -985,6 +990,16 @@ async fn completion_candidates(
         },
       });
     }
+  }
+
+  if prefer_full_line && !scored.is_empty() {
+    scored.sort_by(|a, b| {
+      b.score
+        .partial_cmp(&a.score)
+        .unwrap_or(std::cmp::Ordering::Equal)
+    });
+    scored.truncate(config.max_results);
+    return Ok(scored);
   }
 
   if let Some(mut suggestions) = env_suggestions {

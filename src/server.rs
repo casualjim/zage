@@ -36,6 +36,7 @@ pub enum Request {
     working_directory: String,
     session_id: u64,
     limit: u32,
+    prefer_full_line: bool,
   },
   Ping,
   Train,
@@ -302,6 +303,7 @@ async fn handle_request(
       working_directory,
       session_id,
       limit,
+      prefer_full_line,
     } => {
       let config = SuggestConfig {
         prefix: Some(current_line),
@@ -312,6 +314,7 @@ async fn handle_request(
         max_results: limit as usize,
         use_sequences: true,
         recent_limit: 100,
+        prefer_full_line,
       };
       match pool.get().await {
         Ok(conn) => match suggest(&conn, config).await {
@@ -410,7 +413,7 @@ async fn flush_records(pool: &Arc<ConnectionPool>, buffer: &mut Vec<Invocation>)
       }
       Ok(false) => {}
       Err(err) => {
-        warn!("failed to record invocation: {}", err);
+        warn!(error = ?err, "failed to record invocation");
       }
     }
   }

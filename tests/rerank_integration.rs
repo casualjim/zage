@@ -59,6 +59,7 @@ async fn rerank_training_integrates_with_suggest() -> zage::Result<()> {
       username: None,
       session_id: Some(1),
       use_sequences: false,
+      prefer_full_line: false,
     },
   )
   .await?;

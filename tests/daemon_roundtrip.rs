@@ -49,6 +49,7 @@ async fn daemon_roundtrip_ping_record_suggest() -> zage::Result<()> {
     working_directory: "/tmp".to_string(),
     session_id: 42,
     limit: 5,
+    prefer_full_line: false,
   };
   match zage::server::try_request(suggest).await? {
     Some(Response::Suggestions { .. }) => {}

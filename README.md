@@ -77,6 +77,13 @@ source /path/to/zage/src/shell_integration/zsh.zsh
 # export ZAGE_AUTOSUGGEST_DISABLE=1
 ```
 
+Antidote users:
+
+```bash
+# Add Zage to your bundle list; Antidote will source zage.plugin.zsh
+casualjim/zage
+```
+
 Completion tuning (optional):
 
 ```bash

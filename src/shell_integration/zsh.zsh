@@ -23,25 +23,41 @@ export ZAGE_COMPLETION_FORMAT="zsh"
 
 # Enable zsh-autosuggestions backend unless explicitly disabled
 : ${ZAGE_AUTOSUGGEST_DISABLE:="0"}
+# Force zage to be the only autosuggest strategy when set to 1
+: ${ZAGE_AUTOSUGGEST_ONLY:="0"}
 
 # Provide a zsh-autosuggestions strategy backed by zage
 _zsh_autosuggest_strategy_zage() {
     emulate -L zsh
     local prefix="$BUFFER"
-    local suggestion
-    suggestion="$(zage suggest --autosuggest --count 1 --current-line "$prefix" 2>/dev/null | head -n 1)"
-    if [[ -n "$suggestion" && "$suggestion" == "$prefix"* && "$suggestion" != "$prefix" ]]; then
-      suggestion="${suggestion}"
+    local output
+
+    if [[ -z "$prefix" ]]; then
+      output="$(zage suggest --autosuggest --count 1 2>/dev/null | head -n 1)"
+    else
+      output="$(zage suggest --autosuggest --count 1 --current-line "$prefix" 2>/dev/null | head -n 1)"
+    fi
+
+    if [[ -n "$output" && "$output" == "$prefix"* && "$output" != "$prefix" ]]; then
+      suggestion="$output"
     else
       suggestion=""
+    fi
+
+    if [[ -n "$ZAGE_ZSH_DEBUG" ]]; then
+      print -r -- "[zage-autosuggest] prefix=$prefix suggestion=$suggestion" >> "$ZAGE_ZSH_DEBUG"
     fi
 }
 
 if [[ "$ZAGE_AUTOSUGGEST_DISABLE" != "1" ]]; then
-  if [[ -z "${ZSH_AUTOSUGGEST_STRATEGY+x}" ]]; then
+  if [[ "$ZAGE_AUTOSUGGEST_ONLY" == "1" ]]; then
     ZSH_AUTOSUGGEST_STRATEGY=(zage)
-  elif (( ${ZSH_AUTOSUGGEST_STRATEGY[(I)zage]} == 0 )); then
-    ZSH_AUTOSUGGEST_STRATEGY=(zage $ZSH_AUTOSUGGEST_STRATEGY)
+  else
+    if [[ -z "${ZSH_AUTOSUGGEST_STRATEGY+x}" ]]; then
+      ZSH_AUTOSUGGEST_STRATEGY=(zage)
+    elif (( ${ZSH_AUTOSUGGEST_STRATEGY[(I)zage]} == 0 )); then
+      ZSH_AUTOSUGGEST_STRATEGY=(zage $ZSH_AUTOSUGGEST_STRATEGY)
+    fi
   fi
 fi
 

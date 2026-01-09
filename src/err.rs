@@ -10,27 +10,27 @@ pub enum ZageError {
   #[diagnostic(code(zage::config_error))]
   ConfigError(String),
 
-  #[error("I/O error")]
+  #[error("I/O error: {0}")]
   #[diagnostic(code(zage::io_error))]
   IoError(#[from] std::io::Error),
 
-  #[error("Parse error")]
+  #[error("Parse error: {0}")]
   #[diagnostic(code(zage::parse_error))]
   ParseError(#[from] std::num::ParseIntError),
 
-  #[error("Database error")]
+  #[error("Database error: {0}")]
   #[diagnostic(code(zage::db_error))]
   DbError(#[from] libsql::Error),
 
-  #[error("Invalid utf-8 bytes")]
+  #[error("Invalid utf-8 bytes: {0}")]
   #[diagnostic(code(zage::invalid_utf8))]
   InvalidUtf8(#[from] std::str::Utf8Error),
 
-  #[error("Serialization error")]
+  #[error("Serialization error: {0}")]
   #[diagnostic(code(zage::serialization_error))]
   SerializationError(#[from] serde_json::Error),
 
-  #[error("Generic error")]
+  #[error("Generic error: {0}")]
   #[diagnostic(code(zage::generic_error))]
   GenericError(Box<dyn StdError + Send + Sync>),
 }
