@@ -2,7 +2,7 @@
 
 > **Important:** Prefer the `mise` tasks for installs, builds, tests, and formatting. Only use raw toolchain commands when no `mise` wrapper exists, and call that out explicitly.
 >
-> **CRITICAL: Use the Rust LSP for all code navigation!** Do NOT use grep/find/rg or manual file browsing - the Rust LSP provides accurate, fast, type-aware navigation. See the "Code Navigation (Use Rust LSP!)" section for detailed commands.
+> **CRITICAL: Use the Rust LSP for rust code navigation!** Only use grep/find/rg or manual file browsing when the Rust LSP failed for rust code - the Rust LSP provides accurate, fast, type-aware navigation. See the "Code Navigation (Use Rust LSP!)" section for detailed commands.
 >
 > **CRITICAL: Do NOT run git mutations without explicit approval from the user** Do NOT ever run git checkout/revert/restore/reset without EXPLICIT APPROVAL from the USER
 
@@ -18,7 +18,7 @@ Always default to the `mise` tasks below; only run direct toolchain commands if 
 
 ## Code Navigation (Use Rust LSP!)
 
-**IMPORTANT: Always use the Rust LSP for code navigation!** The Rust LSP should be your primary tool for:
+**IMPORTANT: Always use the Rust LSP for rust code navigation!** The Rust LSP should be your primary tool for:
 - Finding symbols and definitions
 - Navigating to references
 - Getting function signatures and documentation

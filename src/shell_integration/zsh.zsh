@@ -72,12 +72,18 @@ _zage_zle_line_init() {
     fi
 }
 
-if [[ "$ZAGE_AUTOSUGGEST_DISABLE" != "1" ]]; then
+_zage_install_line_init_hook() {
+  emulate -L zsh
+  if [[ "$ZAGE_AUTOSUGGEST_DISABLE" == "1" ]]; then
+    return
+  fi
   autoload -Uz add-zle-hook-widget 2>/dev/null
   if (( ${+functions[add-zle-hook-widget]} )); then
     add-zle-hook-widget line-init _zage_zle_line_init
   fi
-fi
+}
+
+_zage_install_line_init_hook
 
 # Optional debug log file: set ZAGE_ZSH_DEBUG to a filepath to enable
 : ${ZAGE_ZSH_DEBUG:=""}
@@ -154,6 +160,7 @@ _zage_precmd() {
 autoload -Uz add-zsh-hook
 add-zsh-hook preexec _zage_preexec
 add-zsh-hook precmd _zage_precmd
+add-zsh-hook precmd _zage_install_line_init_hook
 
 # Optional: Initial message
 # echo "Zage Zsh integration enabled."
