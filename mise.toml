@@ -2,7 +2,7 @@
 "cargo:cargo-sort" = "latest"
 hk = "latest"
 pkl = "latest"
-rust = "latest"
+rust =  { version = "latest", profile = "default", components = "llvm-tools" }
 shellcheck = "latest"
 
 [tasks.pre-commit]
