@@ -1,10 +1,12 @@
 [tools]
+"aqua:nextest-rs/nextest/cargo-nextest" = "latest"
 "cargo:cargo-sort" = "latest"
 hk = "latest"
 pkl = "latest"
 rust =  { version = "latest", profile = "default", components = "llvm-tools" }
 shellcheck = "latest"
 taplo = "latest"
+"ubi:cargo-bins/cargo-binstall" = "latest"
 
 [tasks.pre-commit]
 run = "hk run pre-commit"
