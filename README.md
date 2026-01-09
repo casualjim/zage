@@ -20,7 +20,27 @@ cd zage
 cargo build --release
 ```
 
+For development, use the pinned toolchain and tasks:
+
+```bash
+mise install
+mise build:debug
+```
+
 ## Quick Start
+
+1. Import shell history:
+   ```bash
+   zage import --shell zsh
+   ```
+2. Build stats (and optional sequences):
+   ```bash
+   zage index --with-sequences
+   ```
+3. Ask for suggestions:
+   ```bash
+   zage suggest --current-line "git " --count 5
+   ```
 
 ## Usage
 
@@ -130,12 +150,6 @@ Default local path:
 Override with:
 
 - `ZAGE_DB_PATH=/path/to/zage.db`
-
-Turso/libSQL (sqld) support:
-
-- `TURSO_DATABASE_URL` (or `LIBSQL_URL`)
-- `TURSO_AUTH_TOKEN` (or `LIBSQL_AUTH_TOKEN`)
-- `TURSO_LOCAL_REPLICA_PATH` (optional, for local replica sync)
 
 ## How It Works
 
