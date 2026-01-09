@@ -25,6 +25,17 @@ use crate::shell_history::{
 use crate::{Result, ZageError};
 
 const DEFAULT_TIMEOUT_MS: u64 = 200;
+const LONG_TIMEOUT_MS: u64 = 300_000;
+
+fn response_timeout_ms(request: &Request) -> u64 {
+  match request {
+    Request::Train { .. }
+    | Request::Import { .. }
+    | Request::Index { .. }
+    | Request::AnalyzeSequences { .. } => LONG_TIMEOUT_MS,
+    _ => DEFAULT_TIMEOUT_MS,
+  }
+}
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
 #[archive(check_bytes)]
@@ -219,13 +230,31 @@ pub async fn try_request(request: Request) -> Result<Option<Response>> {
     return Ok(None);
   }
 
+  let request_kind = request_kind(&request);
+  let response_timeout_ms = response_timeout_ms(&request);
+  let response_timeout = Duration::from_millis(response_timeout_ms);
   let connect = timeout(
     Duration::from_millis(DEFAULT_TIMEOUT_MS),
     UnixStream::connect(&socket_path),
   )
   .await;
-  let Ok(Ok(mut stream)) = connect else {
-    return Ok(None);
+  let mut stream = match connect {
+    Ok(Ok(stream)) => stream,
+    Ok(Err(err)) => {
+      return Err(ZageError::ServerRequestError(format!(
+        "Failed to connect to server socket {} for {request_kind} request: {err}",
+        socket_path.display()
+      )));
+    }
+    Err(_) => {
+      return Err(ZageError::ServerRequestTimeout {
+        timeout_ms: DEFAULT_TIMEOUT_MS,
+        context: format!(
+          "connecting to server socket {} for {request_kind} request",
+          socket_path.display()
+        ),
+      });
+    }
   };
 
   let payload =
@@ -236,18 +265,36 @@ pub async fn try_request(request: Request) -> Result<Option<Response>> {
   stream.flush().await?;
 
   let mut size_buf = [0u8; 4];
-  if timeout(
-    Duration::from_millis(DEFAULT_TIMEOUT_MS),
-    stream.read_exact(&mut size_buf),
-  )
-  .await
-  .is_err()
-  {
-    return Ok(None);
+  match timeout(response_timeout, stream.read_exact(&mut size_buf)).await {
+    Ok(Ok(_)) => {}
+    Ok(Err(err)) => {
+      return Err(ZageError::ServerRequestError(format!(
+        "Failed reading response header from server for {request_kind} request: {err}"
+      )));
+    }
+    Err(_) => {
+      return Err(ZageError::ServerRequestTimeout {
+        timeout_ms: response_timeout_ms,
+        context: format!("waiting for response header for {request_kind} request"),
+      });
+    }
   }
   let size = u32::from_le_bytes(size_buf) as usize;
   let mut buf = vec![0u8; size];
-  stream.read_exact(&mut buf).await?;
+  match timeout(response_timeout, stream.read_exact(&mut buf)).await {
+    Ok(Ok(_)) => {}
+    Ok(Err(err)) => {
+      return Err(ZageError::ServerRequestError(format!(
+        "Failed reading response body from server for {request_kind} request: {err}"
+      )));
+    }
+    Err(_) => {
+      return Err(ZageError::ServerRequestTimeout {
+        timeout_ms: response_timeout_ms,
+        context: format!("waiting for response body for {request_kind} request"),
+      });
+    }
+  }
   let response =
     rkyv::from_bytes::<Response>(&buf).map_err(|err| ZageError::ConfigError(err.to_string()))?;
   Ok(Some(response))

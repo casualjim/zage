@@ -10,6 +10,14 @@ pub enum ZageError {
   #[diagnostic(code(zage::config_error))]
   ConfigError(String),
 
+  #[error("Server request failed: {0}")]
+  #[diagnostic(code(zage::server_request_error))]
+  ServerRequestError(String),
+
+  #[error("Server request timed out after {timeout_ms}ms: {context}")]
+  #[diagnostic(code(zage::server_request_timeout))]
+  ServerRequestTimeout { timeout_ms: u64, context: String },
+
   #[error("I/O error: {0}")]
   #[diagnostic(code(zage::io_error))]
   IoError(#[from] std::io::Error),
