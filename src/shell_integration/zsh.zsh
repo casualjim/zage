@@ -61,6 +61,24 @@ if [[ "$ZAGE_AUTOSUGGEST_DISABLE" != "1" ]]; then
   fi
 fi
 
+# Trigger autosuggestion fetch on a fresh prompt (empty buffer).
+_zage_zle_line_init() {
+    emulate -L zsh
+    if (( ${+functions[_zsh_autosuggest_fetch]} )); then
+      _zsh_autosuggest_fetch
+      if (( ${+functions[_zsh_autosuggest_display]} )); then
+        _zsh_autosuggest_display
+      fi
+    fi
+}
+
+if [[ "$ZAGE_AUTOSUGGEST_DISABLE" != "1" ]]; then
+  autoload -Uz add-zle-hook-widget 2>/dev/null
+  if (( ${+functions[add-zle-hook-widget]} )); then
+    add-zle-hook-widget line-init _zage_zle_line_init
+  fi
+fi
+
 # Optional debug log file: set ZAGE_ZSH_DEBUG to a filepath to enable
 : ${ZAGE_ZSH_DEBUG:=""}
 
