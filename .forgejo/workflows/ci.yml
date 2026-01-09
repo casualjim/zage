@@ -1,0 +1,91 @@
+name: CI Build and Publish
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  build-and-test:
+    runs-on:
+      - docker
+      - linux
+      - amd64
+    container:
+      image: ghcr.io/casualjim/rust-builder:24-04-1.91.0-1.3.1-l1
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: Install mise
+        uses: https://github.com/jdx/mise-action@v3
+        env:
+          MISE_GITHUB_TOKEN: ${{ secrets.MISE_GITHUB_TOKEN }}
+          CARGO_REGISTRIES_FORGEJO_TOKEN: "Bearer ${{ secrets.CARGO_REGISTRIES_FORGEJO_TOKEN }}"
+        with:
+          experimental: true
+          install: true
+          cache: false
+
+      - name: Run format check
+        env:
+          CARGO_REGISTRIES_FORGEJO_TOKEN: "Bearer ${{ secrets.CARGO_REGISTRIES_FORGEJO_TOKEN }}"
+        run: |-
+          mise run format
+
+      - name: Run tests
+        env:
+          CARGO_REGISTRIES_FORGEJO_TOKEN: "Bearer ${{ secrets.CARGO_REGISTRIES_FORGEJO_TOKEN }}"
+        run: |-
+          mise run test
+
+      - name: Build release
+        env:
+          CARGO_REGISTRIES_FORGEJO_TOKEN: "Bearer ${{ secrets.CARGO_REGISTRIES_FORGEJO_TOKEN }}"
+        run: |-
+          mise run build
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to container registry
+        uses: docker/login-action@v3
+        with:
+          registry: git.wagyu.icu
+          username: ${{ secrets.FORGEJO_REGISTRY_USERNAME }}
+          password: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
+
+      - name: Determine image tag
+        id: meta
+        run: |-
+          set -euo pipefail
+          IMAGE_NAME="git.wagyu.icu/${{ github.repository }}"
+          VERSION_TAG=$(git describe --tags --always)
+          echo "version_tag=$VERSION_TAG" >> "$GITHUB_OUTPUT"
+          echo "image_name=$IMAGE_NAME" >> "$GITHUB_OUTPUT"
+          TAGS="${IMAGE_NAME}:${VERSION_TAG}"
+          if [ "${GITHUB_REF}" = "refs/heads/main" ]; then
+            TAGS="${TAGS},${IMAGE_NAME}:latest"
+          fi
+          echo "tags=$TAGS" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          secrets: |
+            CARGO_REGISTRIES_FORGEJO_TOKEN=Bearer ${{ secrets.CARGO_REGISTRIES_FORGEJO_TOKEN }}
+
+      - name: Publish to Cargo Registry
+        if: github.ref == 'refs/heads/main' && github.event_name == 'push'
+        env:
+          CARGO_REGISTRIES_FORGEJO_TOKEN: "Bearer ${{ secrets.CARGO_REGISTRIES_FORGEJO_TOKEN }}"
+        run: |-
+          git config user.name "forgejo-actions[bot]"
+          git config user.email "forgejo-actions[bot]@noreply.wagyu.icu"
+          cargo release patch --execute --no-confirm --all-features
