@@ -4,6 +4,7 @@ use std::fs;
 use gbrt_rs::boosting::GBRTConfig;
 use gbrt_rs::{Dataset, GBRTModel, ModelIO};
 use libsql::Connection;
+use rand::prelude::IndexedRandom;
 use rand::rng;
 use rand::seq::SliceRandom;
 use serde_json;
@@ -66,8 +67,10 @@ pub async fn train_model(conn: &Connection, config: TrainConfig) -> Result<Train
 
       let negatives = sample_negatives(
         &stats,
+        &context,
         &pos.head,
         invocation.session_id,
+        invocation_command(invocation),
         config.negatives_per_pos,
         &mut rng(),
       );
@@ -116,7 +119,15 @@ pub async fn train_model(conn: &Connection, config: TrainConfig) -> Result<Train
     .save_model(booster, &location.dir, &location.name)
     .map_err(|err| ZageError::GenericError(Box::new(err)))?;
 
-  let calibration = calibrate_model(&model, val_set, &mut stats, phase_config.as_ref())?;
+  let eval_history_window = history_window.min(val_set.len().saturating_sub(1));
+  let calibration = calibrate_model(
+    &model,
+    val_set,
+    &mut stats,
+    phase_config.as_ref(),
+    eval_history_window,
+    config.negatives_per_pos,
+  )?;
 
   let status = ModelStatus {
     version: "gbrt-rs-0.2.0".to_string(),
@@ -131,13 +142,20 @@ pub async fn train_model(conn: &Connection, config: TrainConfig) -> Result<Train
   fs::write(&location.metadata_path, payload)?;
   clear_model_cache();
 
-  let accuracy = evaluate_model(&model, val_set, phase_config.as_ref())?;
+  let metrics = evaluate_model(
+    &model,
+    val_set,
+    phase_config.as_ref(),
+    eval_history_window,
+    config.negatives_per_pos,
+  )?;
   let model_path = location.model_path;
 
   Ok(TrainReport {
     samples: features.len(),
     pairs,
-    validation_accuracy: accuracy,
+    validation_accuracy: metrics.pairwise_accuracy,
+    validation_top1: metrics.top1_accuracy,
     model_path,
   })
 }
@@ -312,11 +330,17 @@ fn update_repo_stat(
 
 fn sample_negatives(
   stats: &TrainingStats,
+  context: &ContextWindow,
   head: &str,
   session_id: i64,
+  positive_command: &str,
   limit: usize,
   rng: &mut impl rand::Rng,
 ) -> Vec<String> {
+  if limit == 0 {
+    return Vec::new();
+  }
+
   let mut candidates = Vec::new();
   if let Some(list) = stats.head_to_commands.get(head) {
     candidates.extend(list.iter().cloned());
@@ -324,28 +348,74 @@ fn sample_negatives(
   if let Some(session_list) = stats.session_commands.get(&session_id) {
     candidates.extend(session_list.iter().cloned());
   }
-  if candidates.len() < limit {
-    let mut global = stats.commands_seen.clone();
-    global.shuffle(rng);
-    candidates.extend(global.into_iter().take(limit));
+
+  let desired_pool = limit.saturating_mul(2);
+  if candidates.len() < desired_pool {
+    let sample_target = limit.saturating_mul(4).max(limit);
+    let sample_size = sample_target.min(stats.commands_seen.len());
+    if sample_size > 0 {
+      candidates.extend(
+        stats
+          .commands_seen
+          .choose_multiple(rng, sample_size)
+          .cloned(),
+      );
+    }
   }
-  candidates.shuffle(rng);
-  candidates.truncate(limit);
-  candidates
+
+  candidates.retain(|cmd| cmd != positive_command);
+  candidates.sort();
+  candidates.dedup();
+
+  if candidates.len() <= limit {
+    candidates.shuffle(rng);
+    candidates.truncate(limit);
+    return candidates;
+  }
+
+  let mut scored: Vec<(f64, String)> = candidates
+    .into_iter()
+    .map(|cmd| (tier1_score_from_stats(&cmd, context, stats), cmd))
+    .collect();
+  scored.sort_by(|a, b| b.0.total_cmp(&a.0));
+
+  let hard_count = limit.div_ceil(2).min(scored.len());
+  let mut selected: Vec<String> = scored
+    .iter()
+    .take(hard_count)
+    .map(|(_, cmd)| cmd.clone())
+    .collect();
+  let mut remainder: Vec<String> = scored
+    .into_iter()
+    .skip(hard_count)
+    .map(|(_, cmd)| cmd)
+    .collect();
+  remainder.shuffle(rng);
+  selected.extend(remainder.into_iter().take(limit - selected.len()));
+  selected
+}
+
+struct ValidationMetrics {
+  pairwise_accuracy: f64,
+  top1_accuracy: f64,
 }
 
 fn evaluate_model(
   model: &GBRTModel,
   val_set: &[Invocation],
   phase_config: Option<&crate::phase::PhaseConfig>,
-) -> Result<f64> {
+  history_window: usize,
+  negatives_per_pos: usize,
+) -> Result<ValidationMetrics> {
   let mut stats = TrainingStats::default();
   let mut recent = VecDeque::new();
-  let mut correct = 0usize;
-  let mut total = 0usize;
+  let mut pairwise_correct = 0usize;
+  let mut pairwise_total = 0usize;
+  let mut top1_correct = 0usize;
+  let mut top1_total = 0usize;
 
   for invocation in val_set {
-    if recent.len() < 6 {
+    if recent.len() < history_window {
       update_training_stats(&mut stats, invocation, None, None);
       recent.push_back(invocation.clone());
       continue;
@@ -365,13 +435,25 @@ fn evaluate_model(
     };
 
     let pos_score = predict_single(model, &pos.values)?;
-    let negatives = sample_negatives(&stats, &pos.head, invocation.session_id, 4, &mut rng());
+    let negatives = sample_negatives(
+      &stats,
+      &context,
+      &pos.head,
+      invocation.session_id,
+      invocation_command(invocation),
+      negatives_per_pos,
+      &mut rng(),
+    );
     let mut best = pos_score;
     let mut best_is_pos = true;
 
     for neg_cmd in negatives {
       if let Some(neg) = build_feature_vector(&neg_cmd, &context, &stats) {
         let score = predict_single(model, &neg.values)?;
+        pairwise_total += 1;
+        if pos_score >= score {
+          pairwise_correct += 1;
+        }
         if score > best {
           best = score;
           best_is_pos = false;
@@ -380,9 +462,9 @@ fn evaluate_model(
     }
 
     if best_is_pos {
-      correct += 1;
+      top1_correct += 1;
     }
-    total += 1;
+    top1_total += 1;
 
     update_training_stats(
       &mut stats,
@@ -394,10 +476,20 @@ fn evaluate_model(
     recent.push_back(invocation.clone());
   }
 
-  Ok(if total == 0 {
+  let top1_accuracy = if top1_total == 0 {
     0.0
   } else {
-    (correct as f64) / (total as f64)
+    (top1_correct as f64) / (top1_total as f64)
+  };
+  let pairwise_accuracy = if pairwise_total == 0 {
+    top1_accuracy
+  } else {
+    (pairwise_correct as f64) / (pairwise_total as f64)
+  };
+
+  Ok(ValidationMetrics {
+    pairwise_accuracy,
+    top1_accuracy,
   })
 }
 
@@ -406,6 +498,8 @@ fn calibrate_model(
   val_set: &[Invocation],
   stats: &mut TrainingStats,
   phase_config: Option<&crate::phase::PhaseConfig>,
+  history_window: usize,
+  negatives_per_pos: usize,
 ) -> Result<Option<CalibrationParams>> {
   let mut recent = VecDeque::new();
   let mut feature_vectors: Vec<Vec<f64>> = Vec::new();
@@ -413,7 +507,7 @@ fn calibrate_model(
   let mut labels: Vec<f64> = Vec::new();
 
   for invocation in val_set {
-    if recent.len() < 6 {
+    if recent.len() < history_window {
       update_training_stats(stats, invocation, None, None);
       recent.push_back(invocation.clone());
       continue;
@@ -424,9 +518,11 @@ fn calibrate_model(
     samples.push((invocation_command(invocation).to_string(), 1.0));
     let negatives = sample_negatives(
       stats,
+      &context,
       &command_head(invocation_command(invocation)),
       invocation.session_id,
-      4,
+      invocation_command(invocation),
+      negatives_per_pos,
       &mut rng(),
     );
     for neg in negatives {

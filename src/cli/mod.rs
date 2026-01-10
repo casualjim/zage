@@ -149,7 +149,7 @@ pub enum Commands {
   /// Train the lightweight reranker model
   Train {
     /// Number of training epochs
-    #[arg(long, default_value = "3")]
+    #[arg(long, default_value = "150")]
     epochs: usize,
     /// Number of negatives per positive example
     #[arg(long, default_value = "6")]

@@ -75,10 +75,11 @@ async fn run_embedded(
   )
   .await?;
   eprintln!(
-    "Trained reranker: samples={}, pairs={}, validation_accuracy={:.2}, model={}",
+    "Trained reranker: samples={}, pairs={}, validation_accuracy={:.2}, validation_top1={:.2}, model={}",
     report.samples,
     report.pairs,
     report.validation_accuracy,
+    report.validation_top1,
     report.model_path.display()
   );
   Ok(())

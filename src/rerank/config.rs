@@ -29,6 +29,7 @@ pub struct TrainReport {
   pub samples: usize,
   pub pairs: usize,
   pub validation_accuracy: f64,
+  pub validation_top1: f64,
   pub model_path: PathBuf,
 }
 
