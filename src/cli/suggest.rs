@@ -1,4 +1,5 @@
 use std::collections::HashSet;
+use std::env;
 
 use color_eyre::eyre::{Result, eyre};
 
@@ -29,6 +30,12 @@ pub async fn run(backend: Backend<'_>, args: SuggestArgs) -> Result<()> {
       .ok()
       .and_then(|p| p.to_str().map(|s| s.to_string())),
   };
+
+  let session_id = session_id.or_else(|| {
+    env::var("ZAGE_SESSION_ID")
+      .ok()
+      .and_then(|val| val.parse::<i64>().ok())
+  });
 
   let hostname = hostname.or_else(|| Some(get_hostname()));
   let username =

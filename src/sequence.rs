@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 
 use libsql::Connection;
 use serde_json;
@@ -21,7 +21,7 @@ impl Default for SequenceConfig {
       min_support: 2,
       min_confidence: 0.0,
       min_lift: 1.0,
-      max_len: 3,
+      max_len: 5,
     }
   }
 }
@@ -75,9 +75,11 @@ pub async fn analyze_sequences(
   config: SequenceConfig,
 ) -> Result<SequenceReport> {
   let mut total: usize = 0;
+  let max_len = config.max_len.max(2);
   let mut unigram_counts: HashMap<String, usize> = HashMap::new();
-  let mut bigram_counts: HashMap<(String, String), usize> = HashMap::new();
-  let mut trigram_counts: HashMap<(String, String, String), usize> = HashMap::new();
+  let mut ngram_counts: Vec<HashMap<Vec<String>, usize>> = (0..max_len.saturating_sub(1))
+    .map(|_| HashMap::new())
+    .collect();
 
   let mut rows = conn
     .query(
@@ -85,8 +87,7 @@ pub async fn analyze_sequences(
       (),
     )
     .await?;
-  let mut prev1: Option<String> = None;
-  let mut prev2: Option<String> = None;
+  let mut window: VecDeque<String> = VecDeque::with_capacity(max_len);
   let progress_interval = 50_000usize;
 
   while let Some(row) = rows.next().await? {
@@ -95,22 +96,18 @@ pub async fn analyze_sequences(
     total += 1;
     *unigram_counts.entry(cmd.clone()).or_insert(0) += 1;
 
-    if let Some(prev) = &prev1 {
-      *bigram_counts
-        .entry((prev.clone(), cmd.clone()))
-        .or_insert(0) += 1;
+    window.push_back(cmd);
+    if window.len() > max_len {
+      window.pop_front();
     }
-
-    if config.max_len >= 3
-      && let (Some(p2), Some(p1)) = (&prev2, &prev1)
-    {
-      *trigram_counts
-        .entry((p2.clone(), p1.clone(), cmd.clone()))
-        .or_insert(0) += 1;
+    for n in 2..=max_len {
+      if window.len() < n {
+        continue;
+      }
+      let start = window.len() - n;
+      let seq = window.iter().skip(start).cloned().collect::<Vec<_>>();
+      *ngram_counts[n - 2].entry(seq).or_insert(0) += 1;
     }
-
-    prev2 = prev1.take();
-    prev1 = Some(cmd);
 
     if total.is_multiple_of(progress_interval) {
       info!("Scanned {} commands for sequences so far", total);
@@ -135,67 +132,53 @@ pub async fn analyze_sequences(
     let mut trigrams = 0usize;
     conn.execute("DELETE FROM sequence_stats", ()).await?;
 
-    for ((a, b), count) in &bigram_counts {
-      let support = *count;
-      if support < config.min_support {
-        continue;
+    for (idx, counts) in ngram_counts.iter().enumerate() {
+      let n = idx + 2;
+      for (sequence, count) in counts {
+        if sequence.is_empty() {
+          continue;
+        }
+        let support = *count;
+        if support < config.min_support {
+          continue;
+        }
+        let prefix = if n == 2 {
+          *unigram_counts.get(&sequence[0]).unwrap_or(&0)
+        } else {
+          let prefix_seq = sequence[..n - 1].to_vec();
+          *ngram_counts
+            .get(idx - 1)
+            .and_then(|prefix_map| prefix_map.get(&prefix_seq))
+            .unwrap_or(&0)
+        };
+        if prefix == 0 {
+          continue;
+        }
+        let confidence = support as f64 / prefix as f64;
+        let last = &sequence[sequence.len() - 1];
+        let base = *unigram_counts.get(last).unwrap_or(&0) as f64 / total_f;
+        if base <= 0.0 {
+          continue;
+        }
+        let lift = confidence / base;
+        if confidence < config.min_confidence || lift < config.min_lift {
+          continue;
+        }
+        let sequence_json = serde_json::to_string(sequence)?;
+        conn
+          .execute(
+            "INSERT INTO sequence_stats (sequence_json, support, confidence, lift, context_json)
+             VALUES (?, ?, ?, ?, NULL)",
+            (sequence_json, support as i64, confidence, lift),
+          )
+          .await?;
+        inserted += 1;
+        if n == 2 {
+          bigrams += 1;
+        } else if n == 3 {
+          trigrams += 1;
+        }
       }
-      let prefix = *unigram_counts.get(a).unwrap_or(&0);
-      if prefix == 0 {
-        continue;
-      }
-      let confidence = support as f64 / prefix as f64;
-      let base = *unigram_counts.get(b).unwrap_or(&0) as f64 / total_f;
-      if base <= 0.0 {
-        continue;
-      }
-      let lift = confidence / base;
-      if confidence < config.min_confidence || lift < config.min_lift {
-        continue;
-      }
-      let sequence_json = serde_json::to_string(&vec![a, b])?;
-      conn
-        .execute(
-          "INSERT INTO sequence_stats (sequence_json, support, confidence, lift, context_json)
-           VALUES (?, ?, ?, ?, NULL)",
-          (sequence_json, support as i64, confidence, lift),
-        )
-        .await?;
-      inserted += 1;
-      bigrams += 1;
-    }
-
-    for ((a, b, c), count) in &trigram_counts {
-      let support = *count;
-      if support < config.min_support {
-        continue;
-      }
-      let prefix = bigram_counts
-        .get(&(a.clone(), b.clone()))
-        .copied()
-        .unwrap_or(0);
-      if prefix == 0 {
-        continue;
-      }
-      let confidence = support as f64 / prefix as f64;
-      let base = *unigram_counts.get(c).unwrap_or(&0) as f64 / total_f;
-      if base <= 0.0 {
-        continue;
-      }
-      let lift = confidence / base;
-      if confidence < config.min_confidence || lift < config.min_lift {
-        continue;
-      }
-      let sequence_json = serde_json::to_string(&vec![a, b, c])?;
-      conn
-        .execute(
-          "INSERT INTO sequence_stats (sequence_json, support, confidence, lift, context_json)
-           VALUES (?, ?, ?, ?, NULL)",
-          (sequence_json, support as i64, confidence, lift),
-        )
-        .await?;
-      inserted += 1;
-      trigrams += 1;
     }
 
     Ok((inserted, bigrams, trigrams))
@@ -224,9 +207,11 @@ pub async fn analyze_token_sequences(
   config: SequenceConfig,
 ) -> Result<TokenSequenceReport> {
   let mut total: usize = 0;
+  let max_len = config.max_len.max(2);
   let mut unigram_counts: HashMap<String, usize> = HashMap::new();
-  let mut bigram_counts: HashMap<(String, String), usize> = HashMap::new();
-  let mut trigram_counts: HashMap<(String, String, String), usize> = HashMap::new();
+  let mut ngram_counts: Vec<HashMap<Vec<String>, usize>> = (0..max_len.saturating_sub(1))
+    .map(|_| HashMap::new())
+    .collect();
 
   let mut rows = conn
     .query(
@@ -250,15 +235,13 @@ pub async fn analyze_token_sequences(
       *unigram_counts.entry(tok.clone()).or_insert(0) += 1;
     }
 
-    for win in normalized.windows(2) {
-      let key = (win[0].clone(), win[1].clone());
-      *bigram_counts.entry(key).or_insert(0) += 1;
-    }
-
-    if config.max_len >= 3 {
-      for win in normalized.windows(3) {
-        let key = (win[0].clone(), win[1].clone(), win[2].clone());
-        *trigram_counts.entry(key).or_insert(0) += 1;
+    for n in 2..=max_len {
+      if normalized.len() < n {
+        continue;
+      }
+      for win in normalized.windows(n) {
+        let seq = win.to_vec();
+        *ngram_counts[n - 2].entry(seq).or_insert(0) += 1;
       }
     }
 
@@ -284,67 +267,53 @@ pub async fn analyze_token_sequences(
     let mut trigrams = 0usize;
     conn.execute("DELETE FROM token_sequence_stats", ()).await?;
 
-    for ((a, b), count) in &bigram_counts {
-      let support = *count;
-      if support < config.min_support {
-        continue;
+    for (idx, counts) in ngram_counts.iter().enumerate() {
+      let n = idx + 2;
+      for (sequence, count) in counts {
+        if sequence.is_empty() {
+          continue;
+        }
+        let support = *count;
+        if support < config.min_support {
+          continue;
+        }
+        let prefix = if n == 2 {
+          *unigram_counts.get(&sequence[0]).unwrap_or(&0)
+        } else {
+          let prefix_seq = sequence[..n - 1].to_vec();
+          *ngram_counts
+            .get(idx - 1)
+            .and_then(|prefix_map| prefix_map.get(&prefix_seq))
+            .unwrap_or(&0)
+        };
+        if prefix == 0 {
+          continue;
+        }
+        let confidence = support as f64 / prefix as f64;
+        let last = &sequence[sequence.len() - 1];
+        let base = *unigram_counts.get(last).unwrap_or(&0) as f64 / total_f;
+        if base <= 0.0 {
+          continue;
+        }
+        let lift = confidence / base;
+        if confidence < config.min_confidence || lift < config.min_lift {
+          continue;
+        }
+        let sequence_json = serde_json::to_string(sequence)?;
+        conn
+          .execute(
+            "INSERT INTO token_sequence_stats (sequence_json, support, confidence, lift, prefix_len)
+             VALUES (?, ?, ?, ?, ?)",
+            (sequence_json, support as i64, confidence, lift, (n - 1) as i64),
+          )
+          .await?;
+        inserted += 1;
+        if n == 2 {
+          bigrams += 1;
+        } else if n == 3 {
+          trigrams += 1;
+        }
       }
-      let prefix = *unigram_counts.get(a).unwrap_or(&0);
-      if prefix == 0 {
-        continue;
-      }
-      let confidence = support as f64 / prefix as f64;
-      let base = *unigram_counts.get(b).unwrap_or(&0) as f64 / total_f;
-      if base <= 0.0 {
-        continue;
-      }
-      let lift = confidence / base;
-      if confidence < config.min_confidence || lift < config.min_lift {
-        continue;
-      }
-      let sequence_json = serde_json::to_string(&vec![a, b])?;
-      conn
-        .execute(
-          "INSERT INTO token_sequence_stats (sequence_json, support, confidence, lift, prefix_len)
-           VALUES (?, ?, ?, ?, 1)",
-          (sequence_json, support as i64, confidence, lift),
-        )
-        .await?;
-      inserted += 1;
-      bigrams += 1;
-    }
-
-    for ((a, b, c), count) in &trigram_counts {
-      let support = *count;
-      if support < config.min_support {
-        continue;
-      }
-      let prefix = bigram_counts
-        .get(&(a.clone(), b.clone()))
-        .copied()
-        .unwrap_or(0);
-      if prefix == 0 {
-        continue;
-      }
-      let confidence = support as f64 / prefix as f64;
-      let base = *unigram_counts.get(c).unwrap_or(&0) as f64 / total_f;
-      if base <= 0.0 {
-        continue;
-      }
-      let lift = confidence / base;
-      if confidence < config.min_confidence || lift < config.min_lift {
-        continue;
-      }
-      let sequence_json = serde_json::to_string(&vec![a, b, c])?;
-      conn
-        .execute(
-          "INSERT INTO token_sequence_stats (sequence_json, support, confidence, lift, prefix_len)
-           VALUES (?, ?, ?, ?, 2)",
-          (sequence_json, support as i64, confidence, lift),
-        )
-        .await?;
-      inserted += 1;
-      trigrams += 1;
     }
 
     Ok((inserted, bigrams, trigrams))

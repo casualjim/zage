@@ -2,7 +2,7 @@
 
 > **Important:** Prefer the `mise` tasks for installs, builds, tests, and formatting. Only use raw toolchain commands when no `mise` wrapper exists, and call that out explicitly.
 >
-> **CRITICAL: Use the Rust LSP for rust code navigation!** Only use grep/find/rg or manual file browsing when the Rust LSP failed for rust code - the Rust LSP provides accurate, fast, type-aware navigation. See the "Code Navigation (Use Rust LSP!)" section for detailed commands.
+> **CRITICAL: Prefer the Rust LSP for Rust code navigation.** The Rust LSP is the primary tool for Rust files because it is accurate, fast, and type-aware. That said, other tools (rg/find/manual browsing) are still acceptable when they are faster for the task, the LSP is unavailable, or you're working outside Rust code. See the "Code Navigation (Use Rust LSP!)" section for detailed commands.
 >
 > **CRITICAL: Do NOT run git mutations without explicit approval from the user** Do NOT ever run git checkout/revert/restore/reset without EXPLICIT APPROVAL from the USER
 
@@ -10,7 +10,7 @@
 ## Build, Test, and Development Commands
 Always default to the `mise` tasks below; only run direct toolchain commands if no `mise` wrapper exists and note the deviation.
 
-**For code navigation and understanding, use the Rust LSP!** See the "Code Navigation (Use Rust LSP!)" section above for detailed commands.
+**For Rust code navigation and understanding, use the Rust LSP first.** For non-Rust code or quick searches, it is fine to use rg/find/manual browsing when it is more appropriate.
 
 - `mise install`: Install pinned Rust, Bun, Wrangler, etc.
 - `mise build:debug`: Build Rust
@@ -18,14 +18,14 @@ Always default to the `mise` tasks below; only run direct toolchain commands if 
 
 ## Code Navigation (Use Rust LSP!)
 
-**IMPORTANT: Always use the Rust LSP for rust code navigation!** The Rust LSP should be your primary tool for:
+**IMPORTANT: Prefer the Rust LSP for Rust code navigation.** The Rust LSP should be your primary tool for:
 - Finding symbols and definitions
 - Navigating to references
 - Getting function signatures and documentation
 - Understanding code structure
 - Finding implementations and usages
 
-**Prefer Rust LSP over:** grep/find/rg, manual file browsing, or any other navigation method!
+**Prefer Rust LSP over:** grep/find/rg, manual file browsing, or any other navigation method **for Rust files**. Use other tools when they are faster for the task, the LSP is unavailable, or the code is not Rust.
 
 ### Rust LSP Commands Available
 
@@ -81,7 +81,7 @@ mcp__rust-lsp__completion "crates/slipstreamd/src/routes.rs" 42 20
 - **Complete**: Shows parameters, return types, documentation
 - **IDE-quality**: Same experience as modern IDEs
 
-**Remember: When you need to understand or navigate code, reach for the Rust LSP first!**
+**Remember: For Rust code, reach for the Rust LSP first; for everything else, use the best tool for the job.**
 
 
 > REMINDER:

@@ -80,6 +80,20 @@ _zage_zle_line_init() {
       fi
       print -r -- "[zage-hook line-init] fired has_fetch=$has_fetch buffer_len=${#BUFFER}" >> "$ZAGE_ZSH_DEBUG"
     fi
+    if [[ -z "$BUFFER" ]] && (( ${+functions[_zsh_autosuggest_strategy_zage]} )); then
+      _zsh_autosuggest_strategy_zage
+      if [[ -n "$suggestion" ]]; then
+        POSTDISPLAY="$suggestion"
+        if (( ${+functions[_zsh_autosuggest_highlight_reset]} )); then
+          _zsh_autosuggest_highlight_reset
+        fi
+        if (( ${+functions[_zsh_autosuggest_highlight_apply]} )); then
+          _zsh_autosuggest_highlight_apply
+        fi
+        zle -R
+        return
+      fi
+    fi
     if (( ${+functions[_zsh_autosuggest_fetch]} )); then
       _zsh_autosuggest_fetch
       if (( ${+functions[_zsh_autosuggest_display]} )); then

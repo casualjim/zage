@@ -129,8 +129,8 @@ pub enum Commands {
     /// Minimum lift threshold
     #[arg(long, default_value = "1.2")]
     min_lift: f64,
-    /// Maximum sequence length (2 or 3)
-    #[arg(long, default_value = "3")]
+    /// Maximum sequence length (2-5)
+    #[arg(long, default_value = "5")]
     max_len: usize,
     /// Use the embedded SQLite database
     #[arg(long)]

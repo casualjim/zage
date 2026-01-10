@@ -135,7 +135,6 @@ pub(crate) async fn suggest_with_runtime(
     .as_deref()
     .and_then(find_repo_root)
     .unwrap_or_default();
-
   let mut candidates: HashMap<String, Candidate> = HashMap::new();
 
   if let Some(last) = &last_command {
@@ -194,16 +193,19 @@ pub(crate) async fn suggest_with_runtime(
   } else {
     HashMap::new()
   };
-
-  if !session_stats.is_empty() {
-    for (cmd, (freq, last_seen)) in session_stats {
+  let apply_session_stats = |candidates: &mut HashMap<String, Candidate>| {
+    for (cmd, (freq, last_seen)) in &session_stats {
       let entry = candidates
         .entry(cmd.clone())
-        .or_insert_with(|| Candidate::new(&cmd));
-      entry.session_freq = entry.session_freq.max(freq);
-      entry.session_last_seen = entry.session_last_seen.max(last_seen);
-      entry.last_seen = entry.last_seen.max(last_seen);
+        .or_insert_with(|| Candidate::new(cmd));
+      entry.session_freq = entry.session_freq.max(*freq);
+      entry.session_last_seen = entry.session_last_seen.max(*last_seen);
+      entry.last_seen = entry.last_seen.max(*last_seen);
     }
+  };
+
+  if !session_stats.is_empty() {
+    apply_session_stats(&mut candidates);
   }
 
   if !candidates.is_empty() {
@@ -212,6 +214,9 @@ pub(crate) async fn suggest_with_runtime(
 
   if !aliases.is_empty() {
     add_alias_candidates(aliases, &mut candidates);
+    if !session_stats.is_empty() {
+      apply_session_stats(&mut candidates);
+    }
   }
 
   let mut scored = score_candidates(&ScoreContext {
@@ -255,16 +260,6 @@ pub(crate) async fn suggest_with_runtime(
     }
   }
 
-  let shellname = detect_shellname();
-  let context = rerank::runtime_context(
-    &repo_root,
-    &recent_heads,
-    session_tokens,
-    session_phase.as_ref().map(|phase| phase.phase.as_str()),
-    &shellname,
-  );
-  let _ = rerank::rerank_suggestions(&mut scored, &candidates, &context, &rerank_config);
-
   let transition_only = runtime.weights.transition > 0.0
     && runtime.weights.recency.abs() <= f64::EPSILON
     && runtime.weights.frequency.abs() <= f64::EPSILON
@@ -277,6 +272,16 @@ pub(crate) async fn suggest_with_runtime(
       scored.retain(|s| s.breakdown.transition > 0.0);
     }
   }
+
+  let shellname = detect_shellname();
+  let context = rerank::runtime_context(
+    &repo_root,
+    &recent_heads,
+    session_tokens,
+    session_phase.as_ref().map(|phase| phase.phase.as_str()),
+    &shellname,
+  );
+  let _ = rerank::rerank_suggestions(&mut scored, &candidates, &context, &rerank_config);
 
   scored.truncate(config.max_results);
   Ok(scored)
@@ -329,11 +334,7 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
     });
     context_score += phase_match_boost(context.session_phase, candidate_phase);
     let sequence = if candidate.sequence_confidence > 0.0 {
-      let order_weight = if candidate.sequence_prefix_len >= 2 {
-        1.0
-      } else {
-        0.7
-      };
+      let order_weight = 0.8 + 0.1 * (candidate.sequence_prefix_len as f64).min(4.0);
       candidate.sequence_confidence * candidate.sequence_lift.max(1.0) * order_weight
     } else {
       0.0
