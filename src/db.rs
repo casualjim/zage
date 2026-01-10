@@ -1,4 +1,5 @@
 use libsql::{Builder, Connection, Database};
+use std::fs;
 use std::path::Path;
 
 use crate::repo::find_repo_root;
@@ -13,10 +14,15 @@ pub struct Db {
 }
 
 pub async fn open_db<P: AsRef<Path>>(db_path: P) -> Result<Db> {
-  let path = db_path.as_ref().to_string_lossy().to_string();
+  let path_ref = db_path.as_ref();
+  if let Some(parent) = path_ref.parent() {
+    fs::create_dir_all(parent)?;
+  }
+  let path = path_ref.to_string_lossy().to_string();
   let db = Builder::new_local(path).build().await?;
 
   let conn = db.connect()?;
+  init(&conn).await?;
   Ok(Db { db, conn })
 }
 
@@ -552,6 +558,30 @@ mod tests {
     let mut rows = db
       .conn
       .query("SELECT COUNT(*) FROM shell_history", ())
+      .await?;
+    let row = rows.next().await?.expect("expected row");
+    let count = row.get::<i64>(0)?;
+    assert_eq!(count, 1);
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn test_open_db_creates_parent_and_schema() -> Result<()> {
+    let temp = tempfile::tempdir()?;
+    let db_path = temp.path().join("nested/dir/zage.db");
+    let parent = db_path.parent().expect("expected parent path");
+    assert!(!parent.exists());
+
+    let db = open_db(&db_path).await?;
+    assert!(parent.exists());
+    assert!(db_path.exists());
+
+    let mut rows = db
+      .conn
+      .query(
+        "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='shell_history'",
+        (),
+      )
       .await?;
     let row = rows.next().await?.expect("expected row");
     let count = row.get::<i64>(0)?;
