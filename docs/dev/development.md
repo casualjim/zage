@@ -239,7 +239,7 @@ Replace previous model commands with:
   - Build/refresh stats tables and token cache.
 - `zage suggest`:
   - Generate predictions for current context.
-- `zage analyze-sequences` (optional manual refresh)
+- `zage sequences analyze` (optional manual refresh)
 
 Import/record remain unchanged.
 

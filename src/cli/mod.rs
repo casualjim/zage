@@ -4,20 +4,25 @@ use std::path::PathBuf;
 use clap::{CommandFactory, Parser, Subcommand};
 use color_eyre::eyre::{Result, eyre};
 use human_panic::setup_panic;
+use humantime::Duration as HumanDuration;
 use tracing::{debug, info};
 use tracing_subscriber::{EnvFilter, fmt};
 
-use crate::db::{Db, init, open_db};
+use crate::config::{AppConfig, DbConfig};
+use crate::db::{Db, open_db_with_config};
 use crate::shell_history::Shell;
 
 mod import;
 mod index;
+#[cfg(feature = "pprof")]
+mod pprof;
 mod record;
 mod sequences;
 mod server;
 mod service;
 mod suggest;
 mod train;
+mod yank;
 
 /// CLI for Zage
 #[derive(Parser)]
@@ -68,6 +73,47 @@ pub enum Commands {
     embedded_db: bool,
   },
 
+  /// (Internal) Record a single command invocation (used by shell hooks)
+  Record {
+    /// The command string that was executed
+    #[arg(long)]
+    command: String,
+    /// The working directory where the command was executed
+    #[arg(long)]
+    working_directory: String,
+    /// The exit status of the command
+    #[arg(long)]
+    exit_status: i64,
+    /// The timestamp when the command started (Unix epoch seconds)
+    #[arg(long)]
+    start_timestamp: i64,
+    /// The timestamp when the command finished (Unix epoch seconds)
+    #[arg(long)]
+    end_timestamp: i64,
+    /// The shell session ID
+    #[arg(long)]
+    session_id: Option<i64>, // Optional for now
+    /// Use the embedded SQLite database
+    #[arg(long)]
+    embedded_db: bool,
+  },
+
+  /// Remove matching commands from history
+  Yank {
+    /// Command line to remove (exact match)
+    #[arg(value_name = "COMMAND")]
+    command: String,
+    /// Also match expanded_command entries
+    #[arg(long)]
+    match_expanded: bool,
+    /// Skip recomputing sequence statistics
+    #[arg(long)]
+    no_sequences: bool,
+    /// Use the embedded SQLite database
+    #[arg(long)]
+    embedded_db: bool,
+  },
+
   /// Suggest next command
   Suggest {
     /// Number of suggestions to return
@@ -113,13 +159,58 @@ pub enum Commands {
     /// Return full-line suggestions for autosuggest backends
     #[arg(long)]
     autosuggest: bool,
+
+    /// Request timeout for suggestions when using the server (e.g. 2s, 500ms)
+    #[arg(long, env = "ZAGE_SUGGEST_TIMEOUT")]
+    timeout: Option<HumanDuration>,
     /// Use the embedded SQLite database
     #[arg(long)]
     embedded_db: bool,
   },
 
+  /// Sequence analysis and stats
+  Sequences {
+    #[command(subcommand)]
+    action: SequencesAction,
+  },
+
+  /// Train and manage the reranker model
+  Model {
+    #[command(subcommand)]
+    action: ModelAction,
+  },
+
+  /// Run the suggestion server (foreground)
+  Server {},
+
+  /// Install or uninstall the background suggestion service
+  Service {
+    #[command(subcommand)]
+    action: ServiceAction,
+  },
+
+  /// Capture a CPU profile using pprof
+  #[cfg(feature = "pprof")]
+  Pprof {
+    /// Duration to sample (e.g. 30s, 2m)
+    #[arg(long, default_value = "30s")]
+    duration: HumanDuration,
+    /// Sampling frequency in Hz
+    #[arg(long, default_value = "100")]
+    frequency: u32,
+    /// Output file path for the profile
+    #[arg(long, default_value = "zage.pprof")]
+    output: PathBuf,
+    /// Use the embedded SQLite database
+    #[arg(long)]
+    embedded_db: bool,
+  },
+}
+
+#[derive(Subcommand, Debug)]
+pub enum SequencesAction {
   /// Analyze and store frequent command sequences
-  AnalyzeSequences {
+  Analyze {
     /// Minimum support count
     #[arg(long, default_value = "2")]
     min_support: usize,
@@ -136,16 +227,10 @@ pub enum Commands {
     #[arg(long)]
     embedded_db: bool,
   },
+}
 
-  /// Run the suggestion server (foreground)
-  Server {},
-
-  /// Install or uninstall the background suggestion service
-  Service {
-    #[command(subcommand)]
-    action: ServiceAction,
-  },
-
+#[derive(Subcommand, Debug)]
+pub enum ModelAction {
   /// Train the lightweight reranker model
   Train {
     /// Number of training epochs
@@ -154,51 +239,29 @@ pub enum Commands {
     /// Number of negatives per positive example
     #[arg(long, default_value = "6")]
     negatives: usize,
-    /// Minimum history size required to train
-    #[arg(long, default_value = "1000")]
+    /// Minimum history size required to train (0 = auto)
+    #[arg(long, default_value = "0")]
     min_history: usize,
-    /// Maximum number of history entries to use
-    #[arg(long, default_value = "25000")]
+    /// Maximum number of history entries to use (0 = no limit)
+    #[arg(long, default_value = "0")]
     max_samples: usize,
+    /// Request timeout for training when using the server (e.g. 5m, 30s)
+    #[arg(long)]
+    timeout: Option<HumanDuration>,
     /// Use the embedded SQLite database
     #[arg(long)]
     embedded_db: bool,
   },
 
   /// Show reranker model status
-  ModelStatus {
+  Status {
     /// Use the embedded SQLite database
     #[arg(long)]
     embedded_db: bool,
   },
 
   /// Reset (delete) the reranker model
-  ModelReset {
-    /// Use the embedded SQLite database
-    #[arg(long)]
-    embedded_db: bool,
-  },
-
-  /// (Internal) Record a single command invocation (used by shell hooks)
-  Record {
-    /// The command string that was executed
-    #[arg(long)]
-    command: String,
-    /// The working directory where the command was executed
-    #[arg(long)]
-    working_directory: String,
-    /// The exit status of the command
-    #[arg(long)]
-    exit_status: i64,
-    /// The timestamp when the command started (Unix epoch seconds)
-    #[arg(long)]
-    start_timestamp: i64,
-    /// The timestamp when the command finished (Unix epoch seconds)
-    #[arg(long)]
-    end_timestamp: i64,
-    /// The shell session ID
-    #[arg(long)]
-    session_id: Option<i64>, // Optional for now
+  Reset {
     /// Use the embedded SQLite database
     #[arg(long)]
     embedded_db: bool,
@@ -218,11 +281,26 @@ pub struct SuggestArgs {
   pub completion_format: CompletionFormat,
   pub show_scores: bool,
   pub autosuggest: bool,
+  pub timeout: Option<HumanDuration>,
 }
 
-pub enum Backend<'a> {
+pub enum Backend {
+  Server,
+  Embedded(Box<Db>),
+}
+
+pub enum BackendRef<'a> {
   Server,
   Embedded(&'a Db),
+}
+
+impl Backend {
+  pub fn as_ref(&self) -> BackendRef<'_> {
+    match self {
+      Self::Server => BackendRef::Server,
+      Self::Embedded(db) => BackendRef::Embedded(db.as_ref()),
+    }
+  }
 }
 
 #[derive(Subcommand, Debug, Clone, Copy)]
@@ -254,6 +332,10 @@ pub async fn run(cli: Cli) -> Result<()> {
     histfile, shell
   );
   info!("Starting application");
+  let app_config = AppConfig::load()?;
+  let db_config = app_config.db.with_cli_path(cli.db_path.as_ref());
+
+  let backend = resolve_backend(&app_config, &db_config, cli.command.as_ref()).await?;
 
   match cli.command {
     Some(Commands::Import {
@@ -262,36 +344,48 @@ pub async fn run(cli: Cli) -> Result<()> {
       username,
       shell,
       no_index,
-      embedded_db,
+      embedded_db: _,
     }) => {
-      if embedded_db {
-        let db_path = resolve_db_path(&cli.db_path)?;
-        let db = open_db_for_cli(&db_path).await?;
-        import::run(
-          Backend::Embedded(&db),
-          file,
-          hostname,
-          username,
-          shell,
-          no_index,
-        )
-        .await?;
-      } else {
-        import::run(Backend::Server, file, hostname, username, shell, no_index).await?;
-      }
+      let backend = require_backend(backend.as_ref())?;
+      import::run(backend, file, hostname, username, shell, no_index).await?;
     }
     Some(Commands::Index {
       max_commands,
       with_sequences,
-      embedded_db,
+      embedded_db: _,
     }) => {
-      if embedded_db {
-        let db_path = resolve_db_path(&cli.db_path)?;
-        let db = open_db_for_cli(&db_path).await?;
-        index::run(Backend::Embedded(&db), max_commands, with_sequences).await?;
-      } else {
-        index::run(Backend::Server, max_commands, with_sequences).await?;
-      }
+      let backend = require_backend(backend.as_ref())?;
+      index::run(backend, max_commands, with_sequences).await?;
+    }
+    Some(Commands::Record {
+      command,
+      working_directory,
+      exit_status,
+      start_timestamp,
+      end_timestamp,
+      session_id,
+      embedded_db: _,
+    }) => {
+      let backend = require_backend(backend.as_ref())?;
+      record::run(
+        backend,
+        command,
+        working_directory,
+        exit_status,
+        start_timestamp,
+        end_timestamp,
+        session_id,
+      )
+      .await?;
+    }
+    Some(Commands::Yank {
+      command,
+      match_expanded,
+      no_sequences,
+      embedded_db: _,
+    }) => {
+      let backend = require_backend(backend.as_ref())?;
+      yank::run(backend, command, match_expanded, no_sequences).await?;
     }
     Some(Commands::Suggest {
       count,
@@ -305,7 +399,8 @@ pub async fn run(cli: Cli) -> Result<()> {
       completion_format,
       show_scores,
       autosuggest,
-      embedded_db,
+      timeout,
+      embedded_db: _,
     }) => {
       let args = SuggestArgs {
         count,
@@ -319,125 +414,67 @@ pub async fn run(cli: Cli) -> Result<()> {
         completion_format,
         show_scores,
         autosuggest,
+        timeout,
       };
-      if embedded_db {
-        let db_path = resolve_db_path(&cli.db_path)?;
-        let db = open_db_for_cli(&db_path).await?;
-        suggest::run(Backend::Embedded(&db), args).await?;
-      } else {
-        suggest::run(Backend::Server, args).await?;
-      }
+      let backend = require_backend(backend.as_ref())?;
+      suggest::run(backend, args).await?;
     }
-    Some(Commands::AnalyzeSequences {
-      min_support,
-      min_confidence,
-      min_lift,
-      max_len,
-      embedded_db,
-    }) => {
-      if embedded_db {
-        let db_path = resolve_db_path(&cli.db_path)?;
-        let db = open_db_for_cli(&db_path).await?;
-        sequences::run(
-          Backend::Embedded(&db),
-          min_support,
-          min_confidence,
-          min_lift,
-          max_len,
-        )
-        .await?;
-      } else {
-        sequences::run(
-          Backend::Server,
-          min_support,
-          min_confidence,
-          min_lift,
-          max_len,
-        )
-        .await?;
+    Some(Commands::Sequences { action }) => match action {
+      SequencesAction::Analyze {
+        min_support,
+        min_confidence,
+        min_lift,
+        max_len,
+        embedded_db: _,
+      } => {
+        let backend = require_backend(backend.as_ref())?;
+        sequences::run(backend, min_support, min_confidence, min_lift, max_len).await?;
       }
-    }
-    Some(Commands::Train {
-      epochs,
-      negatives,
-      min_history,
-      max_samples,
-      embedded_db,
-    }) => {
-      if embedded_db {
-        let db_path = resolve_db_path(&cli.db_path)?;
-        let db = open_db_for_cli(&db_path).await?;
+    },
+    Some(Commands::Model { action }) => match action {
+      ModelAction::Train {
+        epochs,
+        negatives,
+        min_history,
+        max_samples,
+        timeout,
+        embedded_db: _,
+      } => {
+        let backend = require_backend(backend.as_ref())?;
         train::run(
-          Backend::Embedded(&db),
+          backend,
           epochs,
           negatives,
           min_history,
           max_samples,
+          timeout,
         )
         .await?;
-      } else {
-        train::run(Backend::Server, epochs, negatives, min_history, max_samples).await?;
       }
-    }
-    Some(Commands::ModelStatus { embedded_db }) => {
-      if embedded_db {
-        let db_path = resolve_db_path(&cli.db_path)?;
-        let db = open_db_for_cli(&db_path).await?;
-        train::model_status(Backend::Embedded(&db)).await?;
-      } else {
-        train::model_status(Backend::Server).await?;
+      ModelAction::Status { embedded_db: _ } => {
+        let backend = require_backend(backend.as_ref())?;
+        train::model_status(backend).await?;
       }
-    }
-    Some(Commands::ModelReset { embedded_db }) => {
-      if embedded_db {
-        let db_path = resolve_db_path(&cli.db_path)?;
-        let db = open_db_for_cli(&db_path).await?;
-        train::model_reset(Backend::Embedded(&db)).await?;
-      } else {
-        train::model_reset(Backend::Server).await?;
+      ModelAction::Reset { embedded_db: _ } => {
+        let backend = require_backend(backend.as_ref())?;
+        train::model_reset(backend).await?;
       }
-    }
+    },
     Some(Commands::Server {}) => {
-      let db_path = resolve_db_path(&cli.db_path)?;
-      server::run(&db_path).await?;
+      server::run(&db_config).await?;
     }
     Some(Commands::Service { action }) => {
       service::run(action)?;
     }
-    Some(Commands::Record {
-      command,
-      working_directory,
-      exit_status,
-      start_timestamp,
-      end_timestamp,
-      session_id,
-      embedded_db,
+    #[cfg(feature = "pprof")]
+    Some(Commands::Pprof {
+      duration,
+      frequency,
+      output,
+      embedded_db: _,
     }) => {
-      if embedded_db {
-        let db_path = resolve_db_path(&cli.db_path)?;
-        let db = open_db_for_cli(&db_path).await?;
-        record::run(
-          Backend::Embedded(&db),
-          command,
-          working_directory,
-          exit_status,
-          start_timestamp,
-          end_timestamp,
-          session_id,
-        )
-        .await?;
-      } else {
-        record::run(
-          Backend::Server,
-          command,
-          working_directory,
-          exit_status,
-          start_timestamp,
-          end_timestamp,
-          session_id,
-        )
-        .await?;
-      }
+      let backend = require_backend(backend.as_ref())?;
+      pprof::run(backend, duration, frequency, output).await?;
     }
     None => {
       let mut cmd = Cli::command();
@@ -449,24 +486,73 @@ pub async fn run(cli: Cli) -> Result<()> {
   Ok(())
 }
 
-fn resolve_db_path(cli_db_path: &Option<PathBuf>) -> Result<PathBuf> {
-  if let Some(path) = cli_db_path {
-    Ok(path.clone())
-  } else if let Ok(env_path) = env::var("ZAGE_DB_PATH") {
-    Ok(PathBuf::from(env_path))
-  } else {
-    dirs::data_dir()
-      .map(|v| v.join("zage/zage.db"))
-      .ok_or_else(|| eyre!("Could not determine data directory"))
+async fn open_db_for_cli(db_config: &DbConfig) -> Result<Db> {
+  match db_config.kind {
+    crate::config::DbKind::Local => {
+      debug!("Initializing db at {}", db_config.path.display());
+    }
+    crate::config::DbKind::Remote => {
+      debug!("Initializing remote db");
+    }
+    crate::config::DbKind::RemoteReplica => {
+      debug!(
+        "Initializing remote replica db at {}",
+        db_config.path.display()
+      );
+    }
+  }
+  open_db_with_config(db_config)
+    .await
+    .map_err(|err| eyre!(err))
+}
+
+fn command_uses_backend(command: &Commands) -> bool {
+  !matches!(command, Commands::Server { .. } | Commands::Service { .. })
+}
+
+fn command_embedded_override(command: &Commands) -> bool {
+  match command {
+    Commands::Import { embedded_db, .. }
+    | Commands::Index { embedded_db, .. }
+    | Commands::Record { embedded_db, .. }
+    | Commands::Yank { embedded_db, .. } => *embedded_db,
+    Commands::Suggest { embedded_db, .. } => *embedded_db,
+    Commands::Sequences { action } => match action {
+      SequencesAction::Analyze { embedded_db, .. } => *embedded_db,
+    },
+    Commands::Model { action } => match action {
+      ModelAction::Train { embedded_db, .. }
+      | ModelAction::Status { embedded_db, .. }
+      | ModelAction::Reset { embedded_db, .. } => *embedded_db,
+    },
+    #[cfg(feature = "pprof")]
+    Commands::Pprof { embedded_db, .. } => *embedded_db,
+    Commands::Server { .. } | Commands::Service { .. } => false,
   }
 }
 
-async fn open_db_for_cli(db_path: &PathBuf) -> Result<Db> {
-  debug!("Initializing db at {}", db_path.display());
-  if let Some(parent) = db_path.parent() {
-    std::fs::create_dir_all(parent)?;
+async fn resolve_backend(
+  app_config: &AppConfig,
+  db_config: &DbConfig,
+  command: Option<&Commands>,
+) -> Result<Option<Backend>> {
+  let Some(command) = command else {
+    return Ok(None);
+  };
+  if !command_uses_backend(command) {
+    return Ok(None);
   }
-  let db = open_db(db_path).await?;
-  init(&db.conn).await?;
-  Ok(db)
+  let use_embedded = command_embedded_override(command) || app_config.backend.is_embedded();
+  if use_embedded {
+    let db = open_db_for_cli(db_config).await?;
+    Ok(Some(Backend::Embedded(Box::new(db))))
+  } else {
+    Ok(Some(Backend::Server))
+  }
+}
+
+fn require_backend(backend: Option<&Backend>) -> Result<BackendRef<'_>> {
+  backend
+    .map(|value| value.as_ref())
+    .ok_or_else(|| eyre!("Backend unavailable"))
 }

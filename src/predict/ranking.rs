@@ -4,7 +4,7 @@ use libsql::Connection;
 use serde_json;
 
 use crate::Result;
-use crate::tokenize::token_strings;
+use crate::tokenize::normalized_tokens;
 
 use super::sql::query_prepared;
 use crate::rerank_config::RerankConfig;
@@ -45,8 +45,7 @@ pub(crate) async fn load_normalized_tokens(
     return Ok(tokens);
   }
 
-  let (_raw_tokens, norm_tokens) = token_strings(command);
-  Ok(norm_tokens)
+  Ok(normalized_tokens(command))
 }
 
 pub(crate) fn low_confidence(scored: &[super::Suggestion], config: &RerankConfig) -> bool {

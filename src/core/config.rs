@@ -40,11 +40,11 @@ pub struct RankingWeights {
 impl Default for RankingWeights {
   fn default() -> Self {
     Self {
-      recency: 0.25,
-      frequency: 0.25,
-      transition: 0.2,
-      context: 0.15,
-      sequence: 0.1,
+      recency: 0.05,
+      frequency: 0.15,
+      transition: 0.25,
+      context: 0.25,
+      sequence: 0.25,
       similarity: 0.05,
     }
   }

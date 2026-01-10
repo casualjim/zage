@@ -1,6 +1,6 @@
 pub(crate) const MODEL_NAME: &str = "rerank";
 pub(crate) const HASH_FEATURES: usize = 64;
-pub(crate) const BASE_FEATURES: usize = 13;
+pub(crate) const BASE_FEATURES: usize = 18;
 pub(crate) const FEATURE_COUNT: usize = BASE_FEATURES + HASH_FEATURES;
 
 mod calibration;
@@ -91,6 +91,12 @@ mod tests {
       shellname: "sh".to_string(),
       branch: None,
       time_bucket: 0,
+      working_directory: None,
+      hostname: None,
+      username: None,
+      session_id: None,
+      prev_exit_status: None,
+      now: 0,
     };
 
     let recent_heads: HashSet<String> = context.recent_heads.iter().cloned().collect();

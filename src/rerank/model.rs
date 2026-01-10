@@ -268,19 +268,26 @@ pub(crate) fn load_model() -> Result<Option<GradientBooster>> {
   Ok(Some(booster))
 }
 
+#[allow(clippy::too_many_arguments)]
 pub fn runtime_context(
   repo_root: &str,
   recent_heads: &[String],
   session_tokens: Vec<String>,
   session_phase: Option<&str>,
   shellname: &str,
+  working_directory: Option<&str>,
+  hostname: Option<&str>,
+  username: Option<&str>,
+  session_id: Option<i64>,
+  prev_exit_status: Option<i64>,
+  now: i64,
 ) -> RerankContext {
   let branch = if repo_root.is_empty() {
     None
   } else {
     read_git_branch(repo_root).ok().flatten()
   };
-  let time_bucket = timestamp_bucket(unix_now());
+  let time_bucket = timestamp_bucket(now);
   RerankContext {
     repo_root: repo_root.to_string(),
     recent_heads: recent_heads.to_vec(),
@@ -289,6 +296,12 @@ pub fn runtime_context(
     shellname: shellname.to_string(),
     branch,
     time_bucket,
+    working_directory: working_directory.map(|value| value.to_string()),
+    hostname: hostname.map(|value| value.to_string()),
+    username: username.map(|value| value.to_string()),
+    session_id,
+    prev_exit_status,
+    now,
   }
 }
 

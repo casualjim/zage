@@ -3,6 +3,7 @@ use std::time::Duration;
 use tempfile::tempdir;
 use zage::db::{init, open_db};
 use zage::server::{Request, Response};
+use zage::{DbConfig, DbKind};
 
 #[tokio::test]
 async fn daemon_roundtrip_ping_record_suggest() -> zage::Result<()> {
@@ -16,7 +17,18 @@ async fn daemon_roundtrip_ping_record_suggest() -> zage::Result<()> {
   let db = open_db(&db_path).await?;
   init(&db.conn).await?;
 
-  let server_handle = tokio::spawn(async move { zage::server::run_server(&db_path).await });
+  let db_config = DbConfig {
+    kind: DbKind::Local,
+    path: db_path,
+    url: None,
+    auth_token: None,
+    encryption_key: None,
+    encryption_cipher: None,
+    remote_encryption_key: None,
+    sync_interval_ms: None,
+  };
+
+  let server_handle = tokio::spawn(async move { zage::server::run_server(&db_config).await });
 
   let mut ready = false;
   for _ in 0..20 {
@@ -45,11 +57,16 @@ async fn daemon_roundtrip_ping_record_suggest() -> zage::Result<()> {
   tokio::time::sleep(Duration::from_millis(300)).await;
 
   let suggest = Request::Suggest {
-    current_line: "git ".to_string(),
-    working_directory: "/tmp".to_string(),
-    session_id: 42,
+    current_line: Some("git ".to_string()),
+    working_directory: Some("/tmp".to_string()),
+    hostname: None,
+    username: None,
+    session_id: Some(42),
     limit: 5,
+    recent_limit: 10,
+    use_sequences: true,
     prefer_full_line: false,
+    timeout_ms: None,
   };
   match zage::server::try_request(suggest).await? {
     Some(Response::Suggestions { .. }) => {}

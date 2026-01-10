@@ -9,6 +9,8 @@ pub mod db;
 pub mod indexer;
 pub mod phase;
 pub mod predict;
+#[cfg(feature = "pprof")]
+mod profile;
 pub mod repo;
 pub mod rerank;
 pub mod rerank_config;
@@ -17,6 +19,9 @@ pub mod server;
 pub mod service;
 pub mod shell_history;
 pub mod tokenize;
+
+#[cfg(feature = "pprof")]
+pub(crate) use profile::capture_profile;
 
 #[cfg(test)]
 mod corpus_tests;

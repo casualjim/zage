@@ -32,11 +32,11 @@ score = w_recency    × recency
 ```
 
 Default weights (from `RankingWeights::default()`):
-- `w_recency = 0.25`
-- `w_frequency = 0.25`
-- `w_transition = 0.20`
-- `w_context = 0.15`
-- `w_sequence = 0.10`
+- `w_recency = 0.05`
+- `w_frequency = 0.15`
+- `w_transition = 0.25`
+- `w_context = 0.25`
+- `w_sequence = 0.25`
 - `w_similarity = 0.05`
 
 Additionally, `session_recency` has a hardcoded weight of `0.1` (not configurable via `RankingWeights`).
@@ -74,7 +74,7 @@ tags = ["recency", "transition", "anti-hallucination"]  # Optional categorizatio
 now = "2024-06-15T12:00:00Z"
 
 # Override ranking weights (omit to use defaults from RankingWeights::default())
-# Defaults: recency=0.25, frequency=0.25, transition=0.20, context=0.15, sequence=0.10, similarity=0.05
+# Defaults: recency=0.05, frequency=0.15, transition=0.25, context=0.25, sequence=0.25, similarity=0.05
 w_recency = 1.0
 w_frequency = 0.0
 w_transition = 0.0
@@ -2168,8 +2168,8 @@ value = 1.5
 
 ```rust
 /// Ranking weights - mirrors src/predict.rs RankingWeights
-/// Default values: recency=0.25, frequency=0.25, transition=0.20,
-///                 context=0.15, sequence=0.10, similarity=0.05
+/// Default values: recency=0.05, frequency=0.15, transition=0.25,
+///                 context=0.25, sequence=0.25, similarity=0.05
 /// Note: session_recency has hardcoded weight of 0.1 in score_candidates()
 pub struct RankingWeights {
     pub recency: f64,

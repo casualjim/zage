@@ -187,7 +187,7 @@ Source: local `shell_history` table (user’s own data) plus optional public cor
 
 ## CLI & Config
 Add new commands:
-- `zage train --backend wgpu --epochs N`
+- `zage model train --backend wgpu --epochs N`
 - `zage model status`
 - `zage model reset`
 

@@ -1,7 +1,10 @@
-use libsql::{Builder, Connection, Database};
+use libsql::{
+  Builder, Cipher, Connection, Database, EncryptionConfig, EncryptionContext, EncryptionKey,
+};
 use std::fs;
 use std::path::Path;
 
+use crate::config::{DbConfig, DbKind};
 use crate::repo::find_repo_root;
 use crate::tokenize::{extract_command_parts, normalize_token, tokenize_index};
 use crate::{Result, shell_history::Invocation};
@@ -24,6 +27,77 @@ pub async fn open_db<P: AsRef<Path>>(db_path: P) -> Result<Db> {
   let conn = db.connect()?;
   init(&conn).await?;
   Ok(Db { db, conn })
+}
+
+pub async fn open_db_with_config(config: &DbConfig) -> Result<Db> {
+  match config.kind {
+    DbKind::Local => {
+      let path_ref = config.path.as_path();
+      if let Some(parent) = path_ref.parent() {
+        fs::create_dir_all(parent)?;
+      }
+      let mut builder = Builder::new_local(path_ref);
+      if let Some(key) = config.resolved_encryption_key() {
+        let cipher = config.resolved_cipher()?.unwrap_or(Cipher::Aes256Cbc);
+        builder = builder.encryption_config(EncryptionConfig {
+          cipher,
+          encryption_key: key.into(),
+        });
+      }
+      let db = builder.build().await?;
+      let conn = db.connect()?;
+      init(&conn).await?;
+      Ok(Db { db, conn })
+    }
+    DbKind::Remote => {
+      let url = config
+        .url
+        .clone()
+        .ok_or_else(|| crate::ZageError::ConfigError("Missing remote db url".to_string()))?;
+      let auth_token = config.resolved_auth_token().unwrap_or_default();
+      let mut builder = Builder::new_remote(url, auth_token);
+      if let Some(key) = config.resolved_remote_encryption_key() {
+        builder = builder.remote_encryption(EncryptionContext {
+          key: EncryptionKey::Base64Encoded(key),
+        });
+      }
+      let db = builder.build().await?;
+      let conn = db.connect()?;
+      init(&conn).await?;
+      Ok(Db { db, conn })
+    }
+    DbKind::RemoteReplica => {
+      let url = config
+        .url
+        .clone()
+        .ok_or_else(|| crate::ZageError::ConfigError("Missing remote db url".to_string()))?;
+      let auth_token = config.resolved_auth_token().unwrap_or_default();
+      let path_ref = config.path.as_path();
+      if let Some(parent) = path_ref.parent() {
+        fs::create_dir_all(parent)?;
+      }
+      let mut builder = Builder::new_remote_replica(path_ref, url, auth_token);
+      if let Some(key) = config.resolved_encryption_key() {
+        let cipher = config.resolved_cipher()?.unwrap_or(Cipher::Aes256Cbc);
+        builder = builder.encryption_config(EncryptionConfig {
+          cipher,
+          encryption_key: key.into(),
+        });
+      }
+      if let Some(key) = config.resolved_remote_encryption_key() {
+        builder = builder.remote_encryption(EncryptionContext {
+          key: EncryptionKey::Base64Encoded(key),
+        });
+      }
+      if let Some(interval) = config.resolved_sync_interval_ms() {
+        builder = builder.sync_interval(std::time::Duration::from_millis(interval));
+      }
+      let db = builder.build().await?;
+      let conn = db.connect()?;
+      init(&conn).await?;
+      Ok(Db { db, conn })
+    }
+  }
 }
 
 pub async fn init(conn: &Connection) -> Result<()> {
@@ -88,6 +162,29 @@ where
     processed, inserted
   );
   Ok(())
+}
+
+pub async fn delete_history_by_command(
+  conn: &Connection,
+  command: &str,
+  match_expanded: bool,
+) -> Result<u64> {
+  let affected = if match_expanded {
+    conn
+      .execute(
+        "DELETE FROM shell_history WHERE command = ? OR expanded_command = ?",
+        libsql::params![command.to_string(), command.to_string()],
+      )
+      .await?
+  } else {
+    conn
+      .execute(
+        "DELETE FROM shell_history WHERE command = ?",
+        libsql::params![command.to_string()],
+      )
+      .await?
+  };
+  Ok(affected)
 }
 
 pub async fn get_recent_invocations(conn: &Connection, limit: usize) -> Result<Vec<Invocation>> {

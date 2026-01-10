@@ -1,15 +1,16 @@
 use std::collections::HashSet;
 use std::env;
+use std::time::Duration;
 
 use color_eyre::eyre::{Result, eyre};
 
-use crate::cli::{Backend, CompletionFormat, SuggestArgs};
+use crate::cli::{BackendRef, CompletionFormat, SuggestArgs};
 use crate::predict::{ScoreBreakdown, SuggestConfig, Suggestion, suggest};
 use crate::server::{self, Request, Response};
 use crate::shell_history::get_hostname;
 use crate::tokenize::tokenize;
 
-pub async fn run(backend: Backend<'_>, args: SuggestArgs) -> Result<()> {
+pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
   let SuggestArgs {
     count,
     current_line,
@@ -22,6 +23,7 @@ pub async fn run(backend: Backend<'_>, args: SuggestArgs) -> Result<()> {
     completion_format,
     show_scores,
     autosuggest,
+    timeout,
   } = args;
 
   let cwd = match cwd {
@@ -46,14 +48,23 @@ pub async fn run(backend: Backend<'_>, args: SuggestArgs) -> Result<()> {
     .map(|s| !s.is_empty())
     .unwrap_or(false);
 
+  let prefix = current_line.as_ref().filter(|value| !value.is_empty());
   let server_suggestions = match &backend {
-    Backend::Server => {
+    BackendRef::Server => {
+      let timeout_ms = timeout
+        .map(|duration| Duration::from(duration).as_millis())
+        .map(|millis| u64::try_from(millis).unwrap_or(u64::MAX));
       let request = Request::Suggest {
-        current_line: current_line.clone().unwrap_or_default(),
-        working_directory: cwd.clone().unwrap_or_else(|| "".to_string()),
-        session_id: session_id.unwrap_or_default() as u64,
+        current_line: prefix.cloned(),
+        working_directory: cwd.clone(),
+        hostname: hostname.clone(),
+        username: username.clone(),
+        session_id,
         limit: count as u32,
+        recent_limit,
+        use_sequences: !no_sequences,
         prefer_full_line: autosuggest,
+        timeout_ms,
       };
       match server::try_request(request).await? {
         Some(Response::Suggestions { items }) => Some(map_server_suggestions(items)),
@@ -62,17 +73,19 @@ pub async fn run(backend: Backend<'_>, args: SuggestArgs) -> Result<()> {
         None => return Err(eyre!("Suggest server unavailable")),
       }
     }
-    Backend::Embedded(_) => None,
+    BackendRef::Embedded(_) => None,
   };
 
   if has_prefix {
     let completions = match backend {
-      Backend::Server => server_suggestions.ok_or_else(|| eyre!("Suggest server unavailable"))?,
-      Backend::Embedded(db) => {
+      BackendRef::Server => {
+        server_suggestions.ok_or_else(|| eyre!("Suggest server unavailable"))?
+      }
+      BackendRef::Embedded(db) => {
         let base_config = SuggestConfig {
           max_results: count,
           recent_limit,
-          prefix: current_line.clone(),
+          prefix: prefix.cloned(),
           cwd: cwd.clone(),
           hostname: hostname.clone(),
           username: username.clone(),
@@ -136,8 +149,10 @@ pub async fn run(backend: Backend<'_>, args: SuggestArgs) -> Result<()> {
     }
   } else {
     let suggestions = match backend {
-      Backend::Server => server_suggestions.ok_or_else(|| eyre!("Suggest server unavailable"))?,
-      Backend::Embedded(db) => {
+      BackendRef::Server => {
+        server_suggestions.ok_or_else(|| eyre!("Suggest server unavailable"))?
+      }
+      BackendRef::Embedded(db) => {
         let config = SuggestConfig {
           max_results: count,
           recent_limit,

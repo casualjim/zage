@@ -1,14 +1,14 @@
 use color_eyre::eyre::{Result, eyre};
 use tracing::{debug, info};
 
-use crate::cli::Backend;
+use crate::cli::BackendRef;
 use crate::db::{insert_invocation, update_stats_for_invocation};
 use crate::predict::aliases::{expand_alias, load_aliases};
 use crate::server::{self, Request, Response};
 use crate::shell_history::{Invocation, detect_shellname, get_hostname};
 
 pub async fn run(
-  backend: Backend<'_>,
+  backend: BackendRef<'_>,
   command: String,
   working_directory: String,
   exit_status: i64,
@@ -30,13 +30,13 @@ pub async fn run(
     session_id: session_id.unwrap_or_else(|| std::process::id() as i64) as u64,
   };
   match backend {
-    Backend::Server => match server::try_request(server_req).await? {
+    BackendRef::Server => match server::try_request(server_req).await? {
       Some(Response::Ack) => Ok(()),
       Some(Response::Error { message }) => Err(eyre!(message)),
       Some(_) => Err(eyre!("Unexpected response from server")),
       None => Err(eyre!("Record server unavailable")),
     },
-    Backend::Embedded(db) => {
+    BackendRef::Embedded(db) => {
       let hostname = get_hostname();
       let username = uzers::get_current_username()
         .map(|v| v.to_string_lossy().into_owned())

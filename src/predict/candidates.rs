@@ -19,22 +19,28 @@ pub(crate) async fn add_transition_candidates(
   if !repo_root.is_empty() {
     let found = fetch_transition_candidates(
       conn,
-      "repo_transition_stats",
-      Some(repo_root),
-      last_command,
-      last_exit_status,
-      true,
+      TransitionQuery::new(
+        "repo_transition_stats",
+        Some(repo_root),
+        last_command,
+        last_exit_status,
+        true,
+        last_exit_status.is_some(),
+      ),
       candidates,
     )
     .await?;
     if !found {
       let _ = fetch_transition_candidates(
         conn,
-        "repo_transition_stats",
-        Some(repo_root),
-        last_command,
-        None,
-        true,
+        TransitionQuery::new(
+          "repo_transition_stats",
+          Some(repo_root),
+          last_command,
+          None,
+          true,
+          false,
+        ),
         candidates,
       )
       .await?;
@@ -43,22 +49,21 @@ pub(crate) async fn add_transition_candidates(
 
   let found = fetch_transition_candidates(
     conn,
-    "transition_stats",
-    None,
-    last_command,
-    last_exit_status,
-    false,
+    TransitionQuery::new(
+      "transition_stats",
+      None,
+      last_command,
+      last_exit_status,
+      false,
+      last_exit_status.is_some(),
+    ),
     candidates,
   )
   .await?;
   if !found {
     let _ = fetch_transition_candidates(
       conn,
-      "transition_stats",
-      None,
-      last_command,
-      None,
-      false,
+      TransitionQuery::new("transition_stats", None, last_command, None, false, false),
       candidates,
     )
     .await?;
@@ -66,26 +71,51 @@ pub(crate) async fn add_transition_candidates(
   Ok(())
 }
 
-async fn fetch_transition_candidates(
-  conn: &Connection,
-  table: &str,
-  repo_root: Option<&str>,
-  last_command: &str,
+struct TransitionQuery<'a> {
+  table: &'a str,
+  repo_root: Option<&'a str>,
+  last_command: &'a str,
   last_exit_status: Option<i64>,
   is_repo: bool,
+  status_specific: bool,
+}
+
+impl<'a> TransitionQuery<'a> {
+  fn new(
+    table: &'a str,
+    repo_root: Option<&'a str>,
+    last_command: &'a str,
+    last_exit_status: Option<i64>,
+    is_repo: bool,
+    status_specific: bool,
+  ) -> Self {
+    Self {
+      table,
+      repo_root,
+      last_command,
+      last_exit_status,
+      is_repo,
+      status_specific,
+    }
+  }
+}
+
+async fn fetch_transition_candidates(
+  conn: &Connection,
+  query: TransitionQuery<'_>,
   candidates: &mut HashMap<String, Candidate>,
 ) -> Result<bool> {
   let mut sql = format!(
     "SELECT next_command, freq FROM {} WHERE prev_command = ?",
-    table
+    query.table
   );
-  let mut params: Vec<Value> = vec![Value::from(last_command.to_string())];
+  let mut params: Vec<Value> = vec![Value::from(query.last_command.to_string())];
 
-  if let Some(status) = last_exit_status {
+  if let Some(status) = query.last_exit_status {
     sql.push_str(" AND prev_exit_status = ?");
     params.push(Value::from(status));
   }
-  if let Some(repo_root) = repo_root {
+  if let Some(repo_root) = query.repo_root {
     sql.push_str(" AND repo_root = ?");
     params.push(Value::from(repo_root.to_string()));
   }
@@ -101,10 +131,13 @@ async fn fetch_transition_candidates(
     let entry = candidates
       .entry(cmd.clone())
       .or_insert_with(|| Candidate::new(&cmd));
-    if is_repo {
+    if query.is_repo {
       entry.repo_transition_freq = entry.repo_transition_freq.max(freq);
     } else {
       entry.transition_freq = entry.transition_freq.max(freq);
+    }
+    if query.status_specific {
+      entry.transition_exit_status_match = true;
     }
   }
   Ok(found)
@@ -146,6 +179,9 @@ async fn fetch_context_candidates(
       .entry(cmd.clone())
       .or_insert_with(|| Candidate::new(&cmd));
     entry.context_freq = entry.context_freq.max(freq);
+    entry.context_cwd_match |= cwd.is_some();
+    entry.context_host_match |= hostname.is_some();
+    entry.context_user_match |= username.is_some();
     entry.last_seen = entry.last_seen.max(last_seen);
   }
   Ok(found)

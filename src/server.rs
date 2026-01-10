@@ -1,19 +1,26 @@
 use std::os::unix::io::FromRawFd;
 use std::os::unix::net::UnixListener as StdUnixListener;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 
-use deadpool_libsql::{Manager, Pool};
+use deadpool::managed::{Manager as DeadpoolManager, Object, Pool, RecycleError, RecycleResult};
 use libsql::{Connection, Database};
 use rkyv::{Archive, Deserialize, Serialize};
+use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
-use crate::db::{import_history, insert_invocation, open_db, update_stats_for_invocation};
+#[cfg(feature = "pprof")]
+use crate::capture_profile;
+use crate::config::DbConfig;
+use crate::db::{
+  delete_history_by_command, import_history, insert_invocation, open_db_with_config,
+  update_stats_for_invocation,
+};
 use crate::indexer::rebuild_stats;
 use crate::predict::aliases::{expand_alias, load_aliases};
 use crate::predict::{SuggestConfig, Suggestion as InternalSuggestion, suggest};
@@ -29,10 +36,14 @@ const LONG_TIMEOUT_MS: u64 = 300_000;
 
 fn response_timeout_ms(request: &Request) -> u64 {
   match request {
-    Request::Train { .. }
-    | Request::Import { .. }
-    | Request::Index { .. }
-    | Request::AnalyzeSequences { .. } => LONG_TIMEOUT_MS,
+    Request::Train { timeout_ms, .. } => timeout_ms.unwrap_or(LONG_TIMEOUT_MS),
+    Request::Suggest { timeout_ms, .. } => timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
+    Request::Yank { .. } => LONG_TIMEOUT_MS,
+    #[cfg(feature = "pprof")]
+    Request::Pprof { duration_ms, .. } => duration_ms.saturating_add(5_000),
+    Request::Import { .. } | Request::Index { .. } | Request::AnalyzeSequences { .. } => {
+      LONG_TIMEOUT_MS
+    }
     _ => DEFAULT_TIMEOUT_MS,
   }
 }
@@ -50,14 +61,20 @@ pub enum Request {
     session_id: u64,
   },
   Suggest {
-    current_line: String,
-    working_directory: String,
-    session_id: u64,
+    current_line: Option<String>,
+    working_directory: Option<String>,
+    hostname: Option<String>,
+    username: Option<String>,
+    session_id: Option<i64>,
     limit: u32,
+    recent_limit: usize,
+    use_sequences: bool,
     prefer_full_line: bool,
+    timeout_ms: Option<u64>,
   },
   Import {
     file: Option<String>,
+    base_dir: Option<String>,
     hostname: Option<String>,
     username: Option<String>,
     shell: String,
@@ -73,12 +90,24 @@ pub enum Request {
     min_lift: f64,
     max_len: usize,
   },
+  Yank {
+    command: String,
+    match_expanded: bool,
+    with_sequences: bool,
+  },
   Ping,
   Train {
     epochs: usize,
     negatives: usize,
     min_history: usize,
     max_samples: usize,
+    timeout_ms: Option<u64>,
+  },
+  #[cfg(feature = "pprof")]
+  Pprof {
+    duration_ms: u64,
+    frequency: u32,
+    output: String,
   },
   ModelStatus,
   ModelReset,
@@ -126,13 +155,68 @@ pub enum SuggestionSource {
   Reranker,
 }
 
+struct DbManager {
+  db: Arc<Database>,
+  test_query_count: AtomicU64,
+}
+
+impl DbManager {
+  fn new(db: Arc<Database>) -> Self {
+    Self {
+      db,
+      test_query_count: AtomicU64::new(0),
+    }
+  }
+
+  async fn run_test_query(&self, conn: &libsql::Connection) -> Result<(), libsql::Error> {
+    let test_query_count = self.test_query_count.fetch_add(1, Ordering::Relaxed);
+    let mut rows = conn.query("SELECT ?", [test_query_count]).await?;
+    let row = rows.next().await?.ok_or_else(|| {
+      libsql::Error::ConnectionFailed("No rows returned from database for test query".into())
+    })?;
+    let value: u64 = row.get(0)?;
+    if value == test_query_count {
+      Ok(())
+    } else {
+      Err(libsql::Error::ConnectionFailed(
+        "Unexpected value returned for test query".into(),
+      ))
+    }
+  }
+}
+
+impl DeadpoolManager for DbManager {
+  type Type = libsql::Connection;
+  type Error = libsql::Error;
+
+  async fn create(&self) -> Result<Self::Type, Self::Error> {
+    let conn = self.db.connect()?;
+    self.run_test_query(&conn).await?;
+    Ok(conn)
+  }
+
+  async fn recycle(
+    &self,
+    conn: &mut Self::Type,
+    _: &deadpool::managed::Metrics,
+  ) -> RecycleResult<Self::Error> {
+    self
+      .run_test_query(conn)
+      .await
+      .map_err(RecycleError::Backend)
+  }
+}
+
 struct ConnectionPool {
-  pool: Pool,
+  pool: Pool<DbManager>,
+  db: Arc<Database>,
+  sync_enabled: bool,
 }
 
 impl ConnectionPool {
-  fn new(db: Database) -> Result<Self> {
-    let manager = Manager::from_libsql_database(db);
+  fn new(db: Database, sync_enabled: bool) -> Result<Self> {
+    let db = Arc::new(db);
+    let manager = DbManager::new(db.clone());
     let default_size = 30;
     let max_size = std::env::var("ZAGE_DB_POOL_SIZE")
       .ok()
@@ -142,10 +226,14 @@ impl ConnectionPool {
       .max_size(max_size)
       .build()
       .map_err(|err| ZageError::ConfigError(err.to_string()))?;
-    Ok(Self { pool })
+    Ok(Self {
+      pool,
+      db,
+      sync_enabled,
+    })
   }
 
-  async fn get(&self) -> Result<deadpool_libsql::Object> {
+  async fn get(&self) -> Result<Object<DbManager>> {
     let conn = self
       .pool
       .get()
@@ -154,18 +242,40 @@ impl ConnectionPool {
     let _ = apply_pragma(&conn, "PRAGMA busy_timeout=5000").await;
     Ok(conn)
   }
+
+  async fn sync(&self) {
+    if !self.sync_enabled {
+      return;
+    }
+    if let Err(err) = self.db.sync().await {
+      warn!("db sync failed: {}", err);
+    }
+  }
 }
 
-pub async fn run_server(db_path: &Path) -> Result<()> {
-  let db = open_db(db_path).await?;
+pub async fn run_server(db_config: &DbConfig) -> Result<()> {
+  let db = open_db_with_config(db_config).await?;
   if let Err(err) = apply_pragma(&db.conn, "PRAGMA journal_mode=WAL").await {
     warn!("failed to enable WAL: {}", err);
   }
   if let Err(err) = apply_pragma(&db.conn, "PRAGMA busy_timeout=5000").await {
     warn!("failed to set busy_timeout: {}", err);
   }
-  let pool = Arc::new(ConnectionPool::new(db.db)?);
+  let sync_enabled = matches!(db_config.kind, crate::config::DbKind::RemoteReplica);
+  let pool = Arc::new(ConnectionPool::new(db.db, sync_enabled)?);
   let _ = warm_model_cache();
+
+  if sync_enabled {
+    let pool = pool.clone();
+    let interval_ms = db_config.resolved_sync_interval_ms().unwrap_or(1_000);
+    tokio::spawn(async move {
+      let mut tick = tokio::time::interval(Duration::from_millis(interval_ms));
+      loop {
+        tick.tick().await;
+        pool.sync().await;
+      }
+    });
+  }
 
   let (record_tx, mut record_rx) = mpsc::channel::<Invocation>(128);
   let conn_writer = pool.clone();
@@ -421,11 +531,14 @@ fn request_kind(request: &Request) -> &'static str {
     Request::Suggest { .. } => "suggest",
     Request::Import { .. } => "import",
     Request::Index { .. } => "index",
-    Request::AnalyzeSequences { .. } => "analyze-sequences",
+    Request::AnalyzeSequences { .. } => "sequences analyze",
+    Request::Yank { .. } => "yank",
     Request::Ping => "ping",
     Request::Train { .. } => "train",
-    Request::ModelStatus => "model-status",
-    Request::ModelReset => "model-reset",
+    #[cfg(feature = "pprof")]
+    Request::Pprof { .. } => "pprof",
+    Request::ModelStatus => "model status",
+    Request::ModelReset => "model reset",
     Request::Status => "status",
     Request::Shutdown => "shutdown",
   }
@@ -444,6 +557,7 @@ async fn handle_request(
       negatives,
       min_history,
       max_samples,
+      timeout_ms: _,
     } => match pool.get().await {
       Ok(conn) => {
         let result = train_model(
@@ -476,6 +590,22 @@ async fn handle_request(
         message: err.to_string(),
       },
     },
+    #[cfg(feature = "pprof")]
+    Request::Pprof {
+      duration_ms,
+      frequency,
+      output,
+    } => {
+      let output_path = PathBuf::from(output);
+      match capture_profile(Duration::from_millis(duration_ms), frequency, &output_path).await {
+        Ok(()) => Response::Text {
+          lines: vec![format!("Wrote profile to {}", output_path.display())],
+        },
+        Err(err) => Response::Error {
+          message: err.to_string(),
+        },
+      }
+    }
     Request::ModelStatus => match model_status() {
       Ok(model) => Response::Text {
         lines: vec![match model {
@@ -504,17 +634,20 @@ async fn handle_request(
     },
     Request::Import {
       file,
+      base_dir,
       hostname,
       username,
       shell,
       no_index,
     } => match pool.get().await {
-      Ok(conn) => match handle_import(&conn, file, hostname, username, shell, no_index).await {
-        Ok(lines) => Response::Text { lines },
-        Err(err) => Response::Error {
-          message: err.to_string(),
-        },
-      },
+      Ok(conn) => {
+        match handle_import(&conn, file, base_dir, hostname, username, shell, no_index).await {
+          Ok(lines) => Response::Text { lines },
+          Err(err) => Response::Error {
+            message: err.to_string(),
+          },
+        }
+      }
       Err(err) => Response::Error {
         message: err.to_string(),
       },
@@ -547,6 +680,21 @@ async fn handle_request(
           },
         }
       }
+      Err(err) => Response::Error {
+        message: err.to_string(),
+      },
+    },
+    Request::Yank {
+      command,
+      match_expanded,
+      with_sequences,
+    } => match pool.get().await {
+      Ok(conn) => match handle_yank(&conn, command, match_expanded, with_sequences).await {
+        Ok(lines) => Response::Text { lines },
+        Err(err) => Response::Error {
+          message: err.to_string(),
+        },
+      },
       Err(err) => Response::Error {
         message: err.to_string(),
       },
@@ -595,19 +743,24 @@ async fn handle_request(
     Request::Suggest {
       current_line,
       working_directory,
+      hostname,
+      username,
       session_id,
       limit,
+      recent_limit,
+      use_sequences,
       prefer_full_line,
+      timeout_ms: _,
     } => {
       let config = SuggestConfig {
-        prefix: Some(current_line),
-        cwd: Some(working_directory),
-        hostname: None,
-        username: None,
-        session_id: Some(session_id as i64),
+        prefix: current_line,
+        cwd: working_directory,
+        hostname,
+        username,
+        session_id,
         max_results: limit as usize,
-        use_sequences: true,
-        recent_limit: 100,
+        use_sequences,
+        recent_limit,
         prefer_full_line,
       };
       match pool.get().await {
@@ -630,13 +783,23 @@ async fn handle_request(
 async fn handle_import(
   conn: &Connection,
   file: Option<String>,
+  base_dir: Option<String>,
   hostname: Option<String>,
   username: Option<String>,
   shell: String,
   no_index: bool,
 ) -> Result<Vec<String>> {
   let history_file = if let Some(path) = file {
-    PathBuf::from(path)
+    let path = PathBuf::from(path);
+    if path.is_relative() {
+      if let Some(base) = base_dir {
+        PathBuf::from(base).join(path)
+      } else {
+        std::env::current_dir()?.join(path)
+      }
+    } else {
+      path
+    }
   } else {
     default_history_path(&shell)?
   };
@@ -731,6 +894,52 @@ async fn handle_sequences(
       token_report.sequences, token_report.bigrams, token_report.trigrams
     ),
   ])
+}
+
+async fn handle_yank(
+  conn: &Connection,
+  command: String,
+  match_expanded: bool,
+  with_sequences: bool,
+) -> Result<Vec<String>> {
+  let removed = delete_history_by_command(conn, &command, match_expanded).await?;
+  if removed == 0 {
+    return Ok(vec![format!("No history entries matched {command:?}")]);
+  }
+
+  let mut lines = Vec::new();
+  if match_expanded {
+    lines.push(format!(
+      "Removed {} history entries matching command or expanded_command: {:?}",
+      removed, command
+    ));
+  } else {
+    lines.push(format!(
+      "Removed {} history entries matching command: {:?}",
+      removed, command
+    ));
+  }
+
+  let report = rebuild_stats(conn, None).await?;
+  lines.push(format!(
+    "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}, phase_stats={}",
+    report.commands, report.transitions, report.contexts, report.token_cache, report.phase_stats
+  ));
+
+  if with_sequences {
+    let seq_report = analyze_sequences(conn, SequenceConfig::default()).await?;
+    lines.push(format!(
+      "Command sequence stats: sequences={}, bigrams={}, trigrams={}",
+      seq_report.sequences, seq_report.bigrams, seq_report.trigrams
+    ));
+    let token_report = analyze_token_sequences(conn, SequenceConfig::default()).await?;
+    lines.push(format!(
+      "Token sequence stats: sequences={}, bigrams={}, trigrams={}",
+      token_report.sequences, token_report.bigrams, token_report.trigrams
+    ));
+  }
+
+  Ok(lines)
 }
 
 fn parse_shell(shell: &str) -> Result<Shell> {
@@ -838,5 +1047,6 @@ async fn flush_records(pool: &Arc<ConnectionPool>, buffer: &mut Vec<Invocation>)
       }
     }
   }
+  pool.sync().await;
   debug!("flushed ingestion batch");
 }

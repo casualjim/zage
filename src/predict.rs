@@ -53,6 +53,15 @@ const GLOBAL_CANDIDATE_LIMIT_FALLBACK: usize = 200;
 const RECENT_CANDIDATE_LIMIT: usize = 200;
 const RECENT_CANDIDATE_LIMIT_FALLBACK: usize = 500;
 const FULL_LINE_POOL_LIMIT: usize = 50;
+const CONTEXT_REPO_WEIGHT: f64 = 1.4;
+const CONTEXT_CWD_WEIGHT: f64 = 1.1;
+const CONTEXT_EXIT_WEIGHT: f64 = 0.9;
+const CONTEXT_HOST_WEIGHT: f64 = 0.3;
+const CONTEXT_USER_WEIGHT: f64 = 0.2;
+const CONTEXT_TIME_WEIGHT: f64 = 0.05;
+const CONTEXT_SESSION_WEIGHT: f64 = 0.03;
+const CONTEXT_SESSION_MISS_PENALTY: f64 = 0.6;
+const CONTEXT_SESSION_BOOST: f64 = 0.5;
 
 #[cfg(test)]
 pub(crate) fn candidate_for_test(command: &str) -> Candidate {
@@ -224,11 +233,13 @@ pub(crate) async fn suggest_with_runtime(
     candidates: &candidates,
     prefix_norm: &prefix_norm,
     session_phase: session_phase.as_ref(),
+    session_id: config.session_id,
     recent_heads: &recent_heads,
     weights: &runtime.weights,
     now: runtime.now,
     recency_half_life: runtime.recency_half_life,
     phase_config: phase_config.as_ref(),
+    repo_root: &repo_root,
   })
   .await?;
 
@@ -250,11 +261,13 @@ pub(crate) async fn suggest_with_runtime(
         candidates: &candidates,
         prefix_norm: &prefix_norm,
         session_phase: session_phase.as_ref(),
+        session_id: config.session_id,
         recent_heads: &recent_heads,
         weights: &runtime.weights,
         now: runtime.now,
         recency_half_life: runtime.recency_half_life,
         phase_config: phase_config.as_ref(),
+        repo_root: &repo_root,
       })
       .await?;
     }
@@ -280,6 +293,12 @@ pub(crate) async fn suggest_with_runtime(
     session_tokens,
     session_phase.as_ref().map(|phase| phase.phase.as_str()),
     &shellname,
+    config.cwd.as_deref(),
+    config.hostname.as_deref(),
+    config.username.as_deref(),
+    config.session_id,
+    last_exit_status,
+    runtime.now,
   );
   let _ = rerank::rerank_suggestions(&mut scored, &candidates, &context, &rerank_config);
 
@@ -292,11 +311,26 @@ struct ScoreContext<'a> {
   candidates: &'a HashMap<String, Candidate>,
   prefix_norm: &'a [String],
   session_phase: Option<&'a PhaseSignal>,
+  session_id: Option<i64>,
   recent_heads: &'a [String],
   weights: &'a RankingWeights,
   now: i64,
   recency_half_life: f64,
   phase_config: Option<&'a PhaseConfig>,
+  repo_root: &'a str,
+}
+
+fn time_bucket(ts: i64) -> u8 {
+  if ts <= 0 {
+    return 0;
+  }
+  let hour = ((ts / 3600) % 24) as u8;
+  match hour {
+    0..=5 => 1,
+    6..=11 => 2,
+    12..=17 => 3,
+    _ => 4,
+  }
 }
 
 async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>> {
@@ -313,11 +347,56 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
   let mut scored: Vec<Suggestion> = Vec::new();
   for candidate in context.candidates.values() {
     let recency = recency_score(context.now, candidate.last_seen, context.recency_half_life);
-    let frequency = (candidate.freq as f64).ln_1p() + 0.5 * (candidate.repo_freq as f64).ln_1p();
-    let transition = (candidate.transition_freq as f64).ln_1p()
+    let repo_weight = if !context.repo_root.is_empty() {
+      1.0
+    } else {
+      0.5
+    };
+    let frequency =
+      (candidate.freq as f64).ln_1p() + repo_weight * (candidate.repo_freq as f64).ln_1p();
+    let mut transition = (candidate.transition_freq as f64).ln_1p()
       + 0.7 * (candidate.repo_transition_freq as f64).ln_1p();
-    let mut context_score =
-      (candidate.context_freq as f64).ln_1p() + 0.8 * (candidate.session_freq as f64).ln_1p();
+    if candidate.transition_exit_status_match {
+      transition *= 1.3;
+    }
+    let repo_context = (candidate.repo_freq as f64).ln_1p();
+    let cwd_context = if candidate.context_cwd_match {
+      (candidate.context_freq as f64).ln_1p()
+    } else {
+      0.0
+    };
+    let exit_context = if candidate.transition_exit_status_match {
+      1.0
+    } else {
+      0.0
+    };
+    let host_context = if candidate.context_host_match {
+      1.0
+    } else {
+      0.0
+    };
+    let user_context = if candidate.context_user_match {
+      1.0
+    } else {
+      0.0
+    };
+    let time_context = if time_bucket(candidate.last_seen) == time_bucket(context.now) {
+      1.0
+    } else {
+      0.0
+    };
+    let session_context = (candidate.session_freq as f64).ln_1p();
+
+    let mut context_score = CONTEXT_REPO_WEIGHT * repo_context
+      + CONTEXT_CWD_WEIGHT * cwd_context
+      + CONTEXT_EXIT_WEIGHT * exit_context
+      + CONTEXT_HOST_WEIGHT * host_context
+      + CONTEXT_USER_WEIGHT * user_context
+      + CONTEXT_TIME_WEIGHT * time_context
+      + CONTEXT_SESSION_WEIGHT * session_context;
+    let head_phase = candidate_heads
+      .get(&candidate.command)
+      .and_then(|head| phase_for_head.get(head));
     let pattern_phase = context.phase_config.and_then(|config| {
       config
         .match_label(&candidate.command)
@@ -327,18 +406,24 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
           confidence: 1.0,
         })
     });
-    let candidate_phase = pattern_phase.as_ref().or_else(|| {
-      candidate_heads
-        .get(&candidate.command)
-        .and_then(|head| phase_for_head.get(head))
-    });
+    let candidate_phase = pattern_phase.as_ref().or(head_phase);
     context_score += phase_match_boost(context.session_phase, candidate_phase);
-    let sequence = if candidate.sequence_confidence > 0.0 {
+    if context.session_id.is_some() {
+      if candidate.session_freq > 0 {
+        context_score += CONTEXT_SESSION_BOOST;
+      } else {
+        context_score *= CONTEXT_SESSION_MISS_PENALTY;
+      }
+    }
+    let mut sequence = if candidate.sequence_confidence > 0.0 {
       let order_weight = 0.8 + 0.1 * (candidate.sequence_prefix_len as f64).min(4.0);
       candidate.sequence_confidence * candidate.sequence_lift.max(1.0) * order_weight
     } else {
       0.0
     };
+    if !context.repo_root.is_empty() && candidate.repo_freq == 0 {
+      sequence *= 0.5;
+    }
     let similarity = if context.prefix_norm.is_empty() {
       0.0
     } else {

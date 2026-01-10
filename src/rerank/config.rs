@@ -2,8 +2,8 @@ use std::path::PathBuf;
 
 pub(crate) const DEFAULT_EPOCHS: usize = 150;
 pub(crate) const DEFAULT_NEGATIVES: usize = 6;
-pub(crate) const DEFAULT_MIN_HISTORY: usize = 1000;
-pub(crate) const DEFAULT_MAX_SAMPLES: usize = 25_000;
+pub(crate) const DEFAULT_MIN_HISTORY: usize = 0;
+pub(crate) const DEFAULT_MAX_SAMPLES: usize = 0;
 
 #[derive(Debug, Clone)]
 pub struct TrainConfig {
@@ -42,4 +42,10 @@ pub struct RerankContext {
   pub shellname: String,
   pub branch: Option<String>,
   pub time_bucket: u8,
+  pub working_directory: Option<String>,
+  pub hostname: Option<String>,
+  pub username: Option<String>,
+  pub session_id: Option<i64>,
+  pub prev_exit_status: Option<i64>,
+  pub now: i64,
 }

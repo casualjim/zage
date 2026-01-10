@@ -61,6 +61,62 @@ fn test_import() -> Result<()> {
 }
 
 #[test]
+fn test_yank_command() -> Result<()> {
+  let (temp_dir, db_path, hist_file) = setup_test_environment()?;
+  let socket_path = temp_dir.path().join("zage.sock");
+
+  let mut import_cmd = Command::new(assert_cmd::cargo::cargo_bin!("zage"));
+  import_cmd
+    .env("RUST_LOG", "info")
+    .env("ZAGE_SOCKET_PATH", &socket_path)
+    .arg("--db-path")
+    .arg(&db_path)
+    .arg("import")
+    .arg("--embedded-db")
+    .arg("--no-index")
+    .arg("--shell")
+    .arg("zsh")
+    .arg(hist_file.to_str().unwrap());
+  import_cmd
+    .assert()
+    .success()
+    .stderr(predicate::str::contains("Imported history"));
+
+  let mut yank_cmd = Command::new(assert_cmd::cargo::cargo_bin!("zage"));
+  yank_cmd
+    .env("RUST_LOG", "info")
+    .env("ZAGE_SOCKET_PATH", &socket_path)
+    .arg("--db-path")
+    .arg(&db_path)
+    .arg("yank")
+    .arg("--embedded-db")
+    .arg("--no-sequences")
+    .arg("ls");
+  yank_cmd
+    .assert()
+    .success()
+    .stderr(predicate::str::contains("Removed"));
+
+  let rt = tokio::runtime::Runtime::new()?;
+  let remaining = rt.block_on(async {
+    let db = open_db(&db_path).await?;
+    init(&db.conn).await?;
+    let mut rows = db
+      .conn
+      .query(
+        "SELECT COUNT(*) FROM shell_history WHERE command = ?",
+        libsql::params!["ls".to_string()],
+      )
+      .await?;
+    let row = rows.next().await?.expect("expected row");
+    Ok::<_, zage::ZageError>(row.get::<i64>(0)?)
+  })?;
+
+  assert_eq!(remaining, 0);
+  Ok(())
+}
+
+#[test]
 fn test_record_command() -> Result<()> {
   let (temp_dir, db_path, _) = setup_test_environment()?;
   let socket_path = temp_dir.path().join("zage.sock");

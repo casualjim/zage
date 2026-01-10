@@ -1,10 +1,11 @@
+use std::env;
 use std::path::PathBuf;
 
 use color_eyre::eyre::{Result, eyre};
 use dirs::home_dir;
 use tracing::{debug, info};
 
-use crate::cli::Backend;
+use crate::cli::BackendRef;
 use crate::db::{Db, import_history};
 use crate::indexer::rebuild_stats;
 use crate::predict::aliases::{expand_alias, load_aliases};
@@ -13,7 +14,7 @@ use crate::server::{self, Request, Response};
 use crate::shell_history::{Shell, parse_bash_history, parse_zsh_history};
 
 pub async fn run(
-  backend: Backend<'_>,
+  backend: BackendRef<'_>,
   file: Option<PathBuf>,
   hostname: Option<String>,
   username: Option<String>,
@@ -21,8 +22,17 @@ pub async fn run(
   no_index: bool,
 ) -> Result<()> {
   match backend {
-    Backend::Server => run_server(file, hostname, username, shell, no_index).await,
-    Backend::Embedded(db) => run_embedded(db, file, hostname, username, shell, no_index).await,
+    BackendRef::Server => run_server(file, hostname, username, shell, no_index).await,
+    BackendRef::Embedded(db) => run_embedded(db, file, hostname, username, shell, no_index).await,
+  }
+}
+
+fn normalize_input_path(path: PathBuf) -> Result<PathBuf> {
+  if path.is_relative() {
+    let cwd = env::current_dir()?;
+    Ok(cwd.join(path))
+  } else {
+    Ok(path)
   }
 }
 
@@ -33,6 +43,9 @@ async fn run_server(
   shell: Shell,
   no_index: bool,
 ) -> Result<()> {
+  let base_dir = std::env::current_dir()
+    .ok()
+    .map(|path| path.to_string_lossy().into_owned());
   let shell_name = match shell {
     Shell::Zsh => "zsh".to_string(),
     Shell::Bash => "bash".to_string(),
@@ -40,6 +53,7 @@ async fn run_server(
 
   let request = Request::Import {
     file: file.map(|p| p.to_string_lossy().into_owned()),
+    base_dir,
     hostname,
     username,
     shell: shell_name,
@@ -69,7 +83,7 @@ async fn run_embedded(
   debug!("File argument value: {:?}", file);
 
   let history_file = if let Some(path) = file {
-    path
+    normalize_input_path(path)?
   } else {
     debug!("No file specified, falling back to default path");
     let mut path = home_dir().ok_or_else(|| eyre!("Cannot find home directory"))?;

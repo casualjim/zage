@@ -30,14 +30,25 @@ fn invocation_command(invocation: &Invocation) -> &str {
   }
 }
 
+fn auto_min_history(train_len: usize) -> usize {
+  if train_len < 2 {
+    return 1;
+  }
+  let base = (train_len / 10).clamp(200, 2_000);
+  base.min(train_len.saturating_sub(1)).max(1)
+}
+
 pub async fn train_model(conn: &Connection, config: TrainConfig) -> Result<TrainReport> {
-  let invocations = load_invocations(conn, Some(config.max_samples)).await?;
-  if invocations.len() < config.min_history {
-    return Err(ZageError::ConfigError(format!(
-      "need at least {} history entries to train (have {})",
-      config.min_history,
-      invocations.len()
-    )));
+  let max_samples = if config.max_samples == 0 {
+    None
+  } else {
+    Some(config.max_samples)
+  };
+  let invocations = load_invocations(conn, max_samples).await?;
+  if invocations.len() < 2 {
+    return Err(ZageError::ConfigError(
+      "need at least 2 history entries to train".to_string(),
+    ));
   }
 
   let split_idx = ((invocations.len() as f64) * 0.9).round() as usize;
@@ -51,7 +62,16 @@ pub async fn train_model(conn: &Connection, config: TrainConfig) -> Result<Train
   let mut labels: Vec<f64> = Vec::new();
   let mut pairs = 0usize;
 
-  let history_window = config.min_history.max(1);
+  let train_len = train_set.len();
+  let mut history_window = if config.min_history == 0 {
+    auto_min_history(train_len)
+  } else {
+    config.min_history.max(1)
+  };
+  let max_window = train_len.saturating_sub(1).max(1);
+  if history_window > max_window {
+    history_window = max_window;
+  }
 
   for invocation in train_set {
     if recent.len() < history_window {
@@ -588,34 +608,48 @@ fn predict_single(model: &GBRTModel, features: &[f64]) -> Result<f64> {
 }
 
 async fn load_invocations(conn: &Connection, limit: Option<usize>) -> Result<Vec<Invocation>> {
-  let mut sql = String::from(
-    "SELECT command, expanded_command, shellname, working_directory, hostname, username, exit_status, start_unix_timestamp, end_unix_timestamp, session_id
-     FROM shell_history
-     ORDER BY COALESCE(start_unix_timestamp, 0) ASC, id ASC",
-  );
-  if limit.is_some() {
-    sql.push_str(" LIMIT ?");
-  }
-
   let mut rows = if let Some(limit) = limit {
-    conn.query(&sql, libsql::params![limit as i64]).await?
+    conn
+      .query(
+        "WITH recent AS (
+           SELECT id, command, expanded_command, shellname, working_directory, hostname, username,
+                  exit_status, start_unix_timestamp, end_unix_timestamp, session_id
+           FROM shell_history
+           ORDER BY COALESCE(start_unix_timestamp, 0) DESC, id DESC
+           LIMIT ?
+         )
+         SELECT id, command, expanded_command, shellname, working_directory, hostname, username,
+                exit_status, start_unix_timestamp, end_unix_timestamp, session_id
+         FROM recent
+         ORDER BY COALESCE(start_unix_timestamp, 0) ASC, id ASC",
+        libsql::params![limit as i64],
+      )
+      .await?
   } else {
-    conn.query(&sql, ()).await?
+    conn
+      .query(
+        "SELECT id, command, expanded_command, shellname, working_directory, hostname, username,
+                exit_status, start_unix_timestamp, end_unix_timestamp, session_id
+         FROM shell_history
+         ORDER BY COALESCE(start_unix_timestamp, 0) ASC, id ASC",
+        (),
+      )
+      .await?
   };
 
   let mut invocations = Vec::new();
   while let Some(row) = rows.next().await? {
     invocations.push(Invocation {
-      command: row.get(0)?,
-      expanded_command: row.get(1)?,
-      shellname: row.get(2)?,
-      working_directory: row.get(3)?,
-      hostname: row.get(4)?,
-      username: row.get(5)?,
-      exit_status: row.get(6)?,
-      start_unix_timestamp: row.get(7)?,
-      end_unix_timestamp: row.get(8)?,
-      session_id: row.get::<Option<i64>>(9)?.unwrap_or(0),
+      command: row.get(1)?,
+      expanded_command: row.get(2)?,
+      shellname: row.get(3)?,
+      working_directory: row.get(4)?,
+      hostname: row.get(5)?,
+      username: row.get(6)?,
+      exit_status: row.get(7)?,
+      start_unix_timestamp: row.get(8)?,
+      end_unix_timestamp: row.get(9)?,
+      session_id: row.get::<Option<i64>>(10)?.unwrap_or(0),
     });
   }
 

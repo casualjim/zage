@@ -1,34 +1,38 @@
-use color_eyre::eyre::{Result, eyre};
+use std::time::Duration;
 
-use crate::cli::Backend;
+use color_eyre::eyre::{Result, eyre};
+use humantime::Duration as HumanDuration;
+
+use crate::cli::BackendRef;
 use crate::db::Db;
 use crate::rerank::{TrainConfig, model_status as rerank_model_status, reset_model, train_model};
 use crate::server::{self, Request, Response};
 
 pub async fn run(
-  backend: Backend<'_>,
+  backend: BackendRef<'_>,
   epochs: usize,
   negatives: usize,
   min_history: usize,
   max_samples: usize,
+  timeout: Option<HumanDuration>,
 ) -> Result<()> {
   match backend {
-    Backend::Server => run_server(epochs, negatives, min_history, max_samples).await,
-    Backend::Embedded(db) => run_embedded(db, epochs, negatives, min_history, max_samples).await,
+    BackendRef::Server => run_server(epochs, negatives, min_history, max_samples, timeout).await,
+    BackendRef::Embedded(db) => run_embedded(db, epochs, negatives, min_history, max_samples).await,
   }
 }
 
-pub async fn model_status(backend: Backend<'_>) -> Result<()> {
+pub async fn model_status(backend: BackendRef<'_>) -> Result<()> {
   match backend {
-    Backend::Server => model_status_server().await,
-    Backend::Embedded(_) => model_status_embedded(),
+    BackendRef::Server => model_status_server().await,
+    BackendRef::Embedded(_) => model_status_embedded(),
   }
 }
 
-pub async fn model_reset(backend: Backend<'_>) -> Result<()> {
+pub async fn model_reset(backend: BackendRef<'_>) -> Result<()> {
   match backend {
-    Backend::Server => model_reset_server().await,
-    Backend::Embedded(_) => model_reset_embedded(),
+    BackendRef::Server => model_reset_server().await,
+    BackendRef::Embedded(_) => model_reset_embedded(),
   }
 }
 
@@ -37,12 +41,17 @@ async fn run_server(
   negatives: usize,
   min_history: usize,
   max_samples: usize,
+  timeout: Option<HumanDuration>,
 ) -> Result<()> {
+  let timeout_ms = timeout
+    .map(|duration| Duration::from(duration).as_millis())
+    .map(|millis| u64::try_from(millis).unwrap_or(u64::MAX));
   let request = Request::Train {
     epochs,
     negatives,
     min_history,
     max_samples,
+    timeout_ms,
   };
   match server::try_request(request).await? {
     Some(Response::Text { lines }) => {

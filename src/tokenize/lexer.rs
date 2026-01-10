@@ -38,15 +38,23 @@ pub fn tokenize(input: &str) -> Vec<Token> {
 
 pub fn token_strings(input: &str) -> (Vec<String>, Vec<String>) {
   let tokens = tokenize(input);
-  let raw = tokens.iter().map(|t| t.raw.clone()).collect();
-  let normalized = tokens.iter().map(|t| t.normalized.clone()).collect();
+  let mut raw = Vec::with_capacity(tokens.len());
+  let mut normalized = Vec::with_capacity(tokens.len());
+  for token in tokens {
+    raw.push(token.raw);
+    normalized.push(token.normalized);
+  }
   (raw, normalized)
 }
 
 pub fn token_strings_index(shellname: &str, input: &str) -> (Vec<String>, Vec<String>) {
   let tokens = tokenize_index(shellname, input);
-  let raw = tokens.iter().map(|t| t.raw.clone()).collect();
-  let normalized = tokens.iter().map(|t| t.normalized.clone()).collect();
+  let mut raw = Vec::with_capacity(tokens.len());
+  let mut normalized = Vec::with_capacity(tokens.len());
+  for token in tokens {
+    raw.push(token.raw);
+    normalized.push(token.normalized);
+  }
   (raw, normalized)
 }
 
@@ -138,7 +146,7 @@ fn parse_redirect(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Optio
     }
   }
 
-  for _ in 0..buf.chars().count() {
+  for _ in 0..buf.len() {
     chars.next();
   }
 
@@ -178,7 +186,12 @@ fn parse_quoted(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Token {
 fn parse_word(chars: &mut std::iter::Peekable<std::str::Chars<'_>>) -> Token {
   let mut buf = String::new();
   while let Some(ch) = chars.peek().copied() {
-    if ch.is_whitespace() || is_operator_start(ch) || is_redirect_start(chars) {
+    if ch.is_whitespace() || is_operator_start(ch) {
+      break;
+    }
+    if (ch == '>' || ch == '<' || (buf.is_empty() && ch.is_ascii_digit()))
+      && is_redirect_start(chars)
+    {
       if (ch == '>' || ch == '<') && buf.ends_with('=') {
         chars.next();
         buf.push(ch);

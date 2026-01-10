@@ -27,6 +27,13 @@ struct Stat {
 }
 
 #[derive(Debug, Default)]
+struct ArgStat {
+  freq: i64,
+  last_seen: i64,
+  arg_norm: String,
+}
+
+#[derive(Debug, Default)]
 struct PhaseStat {
   freq: i64,
   last_seen: i64,
@@ -42,8 +49,8 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
   let mut repo_transition_stats: HashMap<(String, String, Option<i64>, String), Stat> =
     HashMap::new();
   let mut context_stats: HashMap<ContextKey, Stat> = HashMap::new();
-  let mut arg_stats: HashMap<(String, String, String, i64, String, String), Stat> = HashMap::new();
-  let mut arg_stats_any: HashMap<(String, String, String, String, String), Stat> = HashMap::new();
+  let mut arg_stats: HashMap<(String, String, String, i64, String), ArgStat> = HashMap::new();
+  let mut arg_stats_any: HashMap<(String, String, String, String), ArgStat> = HashMap::new();
   let mut flag_stats: HashMap<(String, String, String, String), Stat> = HashMap::new();
   let mut env_stats: HashMap<(String, String, String, String, String), Stat> = HashMap::new();
   let mut token_cache: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
@@ -194,7 +201,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
         );
       }
       for (idx, arg) in parts.args.iter().enumerate() {
-        update_stat_key(
+        update_arg_stat(
           &mut arg_stats,
           (
             repo_root.clone(),
@@ -202,19 +209,19 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
             flags_json.clone(),
             idx as i64,
             arg.raw.clone(),
-            arg.normalized.clone(),
           ),
+          &arg.normalized,
           ts,
         );
-        update_stat_key(
+        update_arg_stat(
           &mut arg_stats_any,
           (
             repo_root.clone(),
             parts.head.clone(),
             flags_json.clone(),
             arg.raw.clone(),
-            arg.normalized.clone(),
           ),
+          &arg.normalized,
           ts,
         );
       }
@@ -358,7 +365,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
         .await?;
     }
 
-    for ((repo_root, head, flags_json, arg_index, arg_raw, arg_norm), stat) in &arg_stats {
+    for ((repo_root, head, flags_json, arg_index, arg_raw), stat) in &arg_stats {
       conn
         .execute(
           "INSERT INTO arg_stats (repo_root, command_head, flags_json, arg_index, arg_raw, arg_norm, freq, last_seen)
@@ -369,7 +376,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
             flags_json.clone(),
             *arg_index,
             arg_raw.clone(),
-            arg_norm.clone(),
+            stat.arg_norm.clone(),
             stat.freq,
             stat.last_seen,
           ),
@@ -377,7 +384,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
         .await?;
     }
 
-    for ((repo_root, head, flags_json, arg_raw, arg_norm), stat) in &arg_stats_any {
+    for ((repo_root, head, flags_json, arg_raw), stat) in &arg_stats_any {
       conn
         .execute(
           "INSERT INTO arg_stats_any (repo_root, command_head, flags_json, arg_raw, arg_norm, freq, last_seen)
@@ -387,7 +394,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
             head.clone(),
             flags_json.clone(),
             arg_raw.clone(),
-            arg_norm.clone(),
+            stat.arg_norm.clone(),
             stat.freq,
             stat.last_seen,
           ),
@@ -495,5 +502,21 @@ fn update_stat_key<K: std::hash::Hash + Eq>(map: &mut HashMap<K, Stat>, key: K, 
   entry.freq += 1;
   if ts > entry.last_seen {
     entry.last_seen = ts;
+  }
+}
+
+fn update_arg_stat<K: std::hash::Hash + Eq>(
+  map: &mut HashMap<K, ArgStat>,
+  key: K,
+  arg_norm: &str,
+  ts: i64,
+) {
+  let entry = map.entry(key).or_default();
+  entry.freq += 1;
+  if ts > entry.last_seen {
+    entry.last_seen = ts;
+  }
+  if entry.arg_norm != arg_norm {
+    entry.arg_norm = arg_norm.to_string();
   }
 }

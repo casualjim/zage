@@ -1,20 +1,22 @@
 use color_eyre::eyre::{Result, eyre};
 
-use crate::cli::Backend;
+use crate::cli::BackendRef;
 use crate::db::Db;
 use crate::sequence::{SequenceConfig, analyze_sequences, analyze_token_sequences};
 use crate::server::{self, Request, Response};
 
 pub async fn run(
-  backend: Backend<'_>,
+  backend: BackendRef<'_>,
   min_support: usize,
   min_confidence: f64,
   min_lift: f64,
   max_len: usize,
 ) -> Result<()> {
   match backend {
-    Backend::Server => run_server(min_support, min_confidence, min_lift, max_len).await,
-    Backend::Embedded(db) => run_embedded(db, min_support, min_confidence, min_lift, max_len).await,
+    BackendRef::Server => run_server(min_support, min_confidence, min_lift, max_len).await,
+    BackendRef::Embedded(db) => {
+      run_embedded(db, min_support, min_confidence, min_lift, max_len).await
+    }
   }
 }
 

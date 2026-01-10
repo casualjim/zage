@@ -8,6 +8,15 @@ use crate::tokenize::{extract_command_parts, normalized_tokens, tokenize, tokeni
 use super::config::RerankContext;
 use super::{BASE_FEATURES, FEATURE_COUNT, HASH_FEATURES};
 
+// Keep in sync with context weights in predict.rs.
+const CONTEXT_REPO_WEIGHT: f64 = 1.4;
+const CONTEXT_CWD_WEIGHT: f64 = 1.1;
+const CONTEXT_EXIT_WEIGHT: f64 = 0.9;
+const CONTEXT_HOST_WEIGHT: f64 = 0.3;
+const CONTEXT_USER_WEIGHT: f64 = 0.2;
+const CONTEXT_TIME_WEIGHT: f64 = 0.05;
+const CONTEXT_SESSION_WEIGHT: f64 = 0.03;
+
 #[derive(Debug, Clone)]
 pub(crate) struct FeatureVector {
   pub(crate) values: Vec<f64>,
@@ -70,7 +79,7 @@ pub(crate) fn features_from_suggestion(
     return None;
   }
 
-  let time_bucket = context.time_bucket;
+  let context_bucket = context.time_bucket;
   let recency = suggestion.breakdown.recency;
   let frequency = suggestion.breakdown.frequency;
   let transition = suggestion.breakdown.transition;
@@ -82,6 +91,31 @@ pub(crate) fn features_from_suggestion(
   let tier1_score = recency + frequency + transition + context_score + sequence_score + similarity;
 
   let repo_match = if candidate.repo_freq > 0 { 1.0 } else { 0.0 };
+  let cwd_match = if candidate.context_cwd_match {
+    1.0
+  } else {
+    0.0
+  };
+  let exit_match = if candidate.transition_exit_status_match {
+    1.0
+  } else {
+    0.0
+  };
+  let host_match = if candidate.context_host_match {
+    1.0
+  } else {
+    0.0
+  };
+  let user_match = if candidate.context_user_match {
+    1.0
+  } else {
+    0.0
+  };
+  let time_match = if time_bucket(candidate.last_seen) == context_bucket {
+    1.0
+  } else {
+    0.0
+  };
   let session_match = if candidate.session_freq > 0 { 1.0 } else { 0.0 };
   let head_recent = if recent_heads.contains(&head) {
     1.0
@@ -97,18 +131,26 @@ pub(crate) fn features_from_suggestion(
   values[4] = context_score;
   values[5] = similarity;
   values[6] = repo_match;
-  values[7] = session_match;
-  values[8] = head_recent;
-  values[9] = sequence_score;
-  values[10] = candidate.sequence_confidence;
-  values[11] = candidate.sequence_lift;
-  values[12] = candidate.sequence_prefix_len as f64;
+  values[7] = cwd_match;
+  values[8] = exit_match;
+  values[9] = host_match;
+  values[10] = user_match;
+  values[11] = time_match;
+  values[12] = session_match;
+  values[13] = head_recent;
+  values[14] = sequence_score;
+  values[15] = candidate.sequence_confidence;
+  values[16] = candidate.sequence_lift;
+  values[17] = candidate.sequence_prefix_len as f64;
 
   add_hash(&mut values, format!("head:{head}").as_str());
   if let Some(branch) = context.branch.as_ref() {
     add_hash(&mut values, format!("branch:{branch}:{head}").as_str());
   }
-  add_hash(&mut values, format!("time:{time_bucket}:{head}").as_str());
+  add_hash(
+    &mut values,
+    format!("time:{context_bucket}:{head}").as_str(),
+  );
   if let Some(phase) = context.session_phase.as_ref() {
     add_hash(&mut values, format!("phase:{phase}:{head}").as_str());
   }
@@ -126,7 +168,7 @@ pub(crate) fn build_feature_vector(
     return None;
   }
 
-  let time_bucket = context.time_bucket;
+  let context_bucket = context.time_bucket;
   let stat = stats.command_stats.get(command);
   let freq = stat.map(|s| s.freq).unwrap_or(0);
   let last_seen = stat.map(|s| s.last_seen).unwrap_or(0);
@@ -172,7 +214,41 @@ pub(crate) fn build_feature_vector(
   let recency = recency_score(context.now, last_seen, DEFAULT_RECENCY_HALF_LIFE_SECONDS);
   let frequency = (freq as f64).ln_1p() + 0.5 * (repo_freq as f64).ln_1p();
   let transition = (transition_freq as f64).ln_1p();
-  let context_score = (context_freq as f64).ln_1p() + 0.8 * (session_freq as f64).ln_1p();
+  let repo_context = (repo_freq as f64).ln_1p();
+  let cwd_context = if context.working_directory.is_some() {
+    (context_freq as f64).ln_1p()
+  } else {
+    0.0
+  };
+  let exit_context = if context.prev_exit_status.is_some() && transition_freq > 0 {
+    1.0
+  } else {
+    0.0
+  };
+  let host_context = if context.hostname.is_some() && context_freq > 0 {
+    1.0
+  } else {
+    0.0
+  };
+  let user_context = if context.username.is_some() && context_freq > 0 {
+    1.0
+  } else {
+    0.0
+  };
+  let time_context = if time_bucket(last_seen) == context_bucket {
+    1.0
+  } else {
+    0.0
+  };
+  let session_context = (session_freq as f64).ln_1p();
+
+  let context_score = CONTEXT_REPO_WEIGHT * repo_context
+    + CONTEXT_CWD_WEIGHT * cwd_context
+    + CONTEXT_EXIT_WEIGHT * exit_context
+    + CONTEXT_HOST_WEIGHT * host_context
+    + CONTEXT_USER_WEIGHT * user_context
+    + CONTEXT_TIME_WEIGHT * time_context
+    + CONTEXT_SESSION_WEIGHT * session_context;
 
   let candidate_tokens = normalized_tokens(command);
   let similarity = token_similarity(&context.session_tokens, &candidate_tokens);
@@ -181,6 +257,11 @@ pub(crate) fn build_feature_vector(
     sequence_features(command, context, stats);
   let tier1_score = recency + frequency + transition + context_score + sequence_score + similarity;
   let repo_match = if repo_freq > 0 { 1.0 } else { 0.0 };
+  let cwd_match = context.working_directory.is_some() && context_freq > 0;
+  let exit_match = context.prev_exit_status.is_some() && transition_freq > 0;
+  let host_match = context.hostname.is_some() && context_freq > 0;
+  let user_match = context.username.is_some() && context_freq > 0;
+  let time_match = time_bucket(last_seen) == context.time_bucket;
   let session_match = if session_freq > 0 { 1.0 } else { 0.0 };
   let head_recent = if context.recent_heads.iter().any(|h| h == &head) {
     1.0
@@ -196,18 +277,26 @@ pub(crate) fn build_feature_vector(
   values[4] = context_score;
   values[5] = similarity;
   values[6] = repo_match;
-  values[7] = session_match;
-  values[8] = head_recent;
-  values[9] = sequence_score;
-  values[10] = sequence_confidence;
-  values[11] = sequence_lift;
-  values[12] = sequence_prefix_len;
+  values[7] = if cwd_match { 1.0 } else { 0.0 };
+  values[8] = if exit_match { 1.0 } else { 0.0 };
+  values[9] = if host_match { 1.0 } else { 0.0 };
+  values[10] = if user_match { 1.0 } else { 0.0 };
+  values[11] = if time_match { 1.0 } else { 0.0 };
+  values[12] = session_match;
+  values[13] = head_recent;
+  values[14] = sequence_score;
+  values[15] = sequence_confidence;
+  values[16] = sequence_lift;
+  values[17] = sequence_prefix_len;
 
   add_hash(&mut values, format!("head:{head}").as_str());
   if let Some(branch) = context.branch.as_ref() {
     add_hash(&mut values, format!("branch:{branch}:{head}").as_str());
   }
-  add_hash(&mut values, format!("time:{time_bucket}:{head}").as_str());
+  add_hash(
+    &mut values,
+    format!("time:{context_bucket}:{head}").as_str(),
+  );
   if let Some(phase) = context.session_phase.as_ref() {
     add_hash(&mut values, format!("phase:{phase}:{head}").as_str());
   }
@@ -377,6 +466,19 @@ pub(crate) fn build_feature_matrix(vectors: &[Vec<f64>]) -> crate::Result<gbrt_r
     }
   }
   gbrt_rs::FeatureMatrix::new(data).map_err(|err| crate::ZageError::GenericError(Box::new(err)))
+}
+
+fn time_bucket(ts: i64) -> u8 {
+  if ts <= 0 {
+    return 0;
+  }
+  let hour = ((ts / 3600) % 24) as u8;
+  match hour {
+    0..=5 => 1,
+    6..=11 => 2,
+    12..=17 => 3,
+    _ => 4,
+  }
 }
 
 pub(crate) fn feature_names() -> Vec<String> {

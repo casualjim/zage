@@ -1,15 +1,19 @@
 # Zage - The Intelligent Shell Sage
 
-Zage (derived from "Z Shell" and "Sage") is a Rust CLI that predicts the next command you're likely to run based on your shell history, working directory, and command context.
+Zage ("Z Shell" + "Sage") is a Rust CLI that predicts the next command you're likely to run based
+on your shell history, working directory, and command context. It can run fully embedded or as a
+background server and integrates with zsh-autosuggestions.
 
 ## Features
 
-- 🔮 **Command Prediction**: Predicts the most likely next command based on your history
-- 🧠 **Context Awareness**: Uses working directory, hostname, username, and session signals
-- 📊 **Sequence Learning**: Mines frequent bigrams/trigrams from your history
-- 🤖 **ML-Powered Reranking**: Optional GBRT model learns from your behavior patterns
-- 🔎 **Token Similarity**: Tree-sitter-based parsing for accurate command analysis
-- 🪄 **Sensible Defaults**: Works out of the box, but fully configurable
+- 🔮 **Command prediction** from your history
+- 🧠 **Context-aware**: working directory, hostname, username, session
+- 📊 **Sequence learning**: frequent bigrams/trigrams and token sequences
+- 🤖 **ML reranker** (optional) trained from your own usage
+- 🔎 **Accurate parsing** via tree-sitter (bash + zsh)
+- 🖥️ **Shell integration**: zsh autosuggest backend + hooks
+- 🧰 **Flexible storage**: local, remote (Turso/libsql), or remote replica
+- 🔐 **Encryption support** for private history data
 
 ## Installation
 
@@ -21,7 +25,7 @@ cd zage
 cargo build --release
 ```
 
-For development, use the pinned toolchain and tasks:
+Development setup:
 
 ```bash
 mise install
@@ -30,82 +34,37 @@ mise build:debug
 
 ## Quick Start
 
-1. Import shell history:
-   ```bash
-   zage import --shell zsh
-   ```
-2. Build stats (and optional sequences):
-   ```bash
-   zage index --with-sequences
-   ```
-3. Ask for suggestions:
-   ```bash
-   zage suggest --current-line "git " --count 5
-   ```
-4. (Optional) Train the ML model after accumulating 1000+ commands:
-   ```bash
-   zage train
-   ```
-
-## Usage
-
-Import your shell history:
+1) Import history:
 
 ```bash
-# zsh (defaults to ~/.zsh_history if no file passed)
 zage import --shell zsh
-
-# bash (defaults to ~/.bash_history if no file passed)
-zage import --shell bash
 ```
 
-Build the stats tables:
+2) Build stats (and optional sequences):
 
 ```bash
 zage index --with-sequences
 ```
 
-Ask for suggestions:
+3) Ask for suggestions:
 
 ```bash
 zage suggest --current-line "git " --count 5
 ```
 
-### Training the ML Model (Optional)
-
-Once you have 1000+ commands in your history, train the reranking model:
+4) (Optional) Train the ML model:
 
 ```bash
-# Train with default settings (150 epochs, 6 negatives per positive)
-zage train
-
-# Or customize training parameters
-zage train --epochs 200 --negatives 8 --min-history 1000 --max-samples 30000
+zage model train
 ```
 
-Check model status:
+## Shell Integration
+
+### Zsh (autosuggestions + recording)
 
 ```bash
-zage model-status
-```
-
-Reset (delete) the model:
-
-```bash
-zage model-reset
-```
-
-The model will automatically be used for reranking when available. It learns from your actual command execution patterns to improve suggestion quality.
-
-Zsh autosuggestions (ghost text):
-
-```bash
-# 1) Install zsh-autosuggestions with your plugin manager
-# 2) Source Zage's zsh integration after your plugins
+# source after zsh-autosuggestions
 source /path/to/zage/src/shell_integration/zsh.zsh
-
-# Optional: disable zage's autosuggest backend
-# export ZAGE_AUTOSUGGEST_DISABLE=1
 ```
 
 Antidote users:
@@ -115,20 +74,215 @@ Antidote users:
 casualjim/zage
 ```
 
-Completion tuning (optional):
+Zsh options:
+
+- `ZAGE_AUTOSUGGEST_DISABLE=1` disables zage autosuggestions
+- `ZAGE_AUTOSUGGEST_ONLY=1` makes zage the only autosuggest strategy
+- `ZAGE_ZSH_DEBUG=/path/to/log` writes debug logs
+
+### Bash (requires bash-preexec)
 
 ```bash
-# Provide session id for session-aware completions
-export ZAGE_SESSION_ID=$$
-
-# Aliases are auto-captured when you load the shell integration.
-# You can still override manually if needed:
-export ZAGE_ALIASES="gst=git status;gco=git checkout"
-# or put alias lines in a file:
-export ZAGE_ALIAS_FILE="$HOME/.config/zage/aliases"
+# load bash-preexec first
+source /path/to/bash-preexec.sh
+source /path/to/zage/src/shell_integration/bash.sh
 ```
 
-Phase configuration (optional):
+## Command Reference
+
+- `zage import --shell {zsh|bash} [FILE] [--no-index] [--embedded-db]`
+  - Defaults to `$HISTFILE` when set, otherwise `~/.zsh_history` / `~/.bash_history`.
+- `zage index [--with-sequences] [--max-commands N] [--embedded-db]`
+- `zage sequences analyze [--min-support N] [--min-confidence F] [--min-lift F] [--max-len N]`
+- `zage yank "command" [--match-expanded] [--no-sequences] [--embedded-db]`
+  - Removes matching history entries, then rebuilds stats (and sequences unless `--no-sequences`).
+- `zage suggest [--current-line "prefix"] [--count N] [--recent-limit N]
+  [--no-sequences] [--autosuggest] [--completion-format plain|zsh] [--show-scores] [--timeout 2s]`
+  - With `--current-line`, Zage returns token completions for the active token.
+  - Without it, Zage returns full command suggestions.
+  - `--autosuggest` forces full-line output for autosuggest backends.
+  - `--timeout` accepts human durations like `500ms`, `2s`, `1m` (server mode only).
+- `zage model train [--epochs N] [--negatives N] [--min-history N] [--max-samples N] [--timeout 30m]`
+  - `--timeout` accepts human durations like `30s`, `10m`, `2h` (server mode only).
+- `zage pprof [--duration 30s] [--frequency 100] [--output zage.pprof]`
+  - Requires the `pprof` feature at build time: `cargo build --features pprof`
+- `zage model status`
+- `zage model reset`
+- `zage server` (foreground server)
+- `zage service install|uninstall` (systemd/launchd)
+- `zage record ...` (internal; used by shell hooks)
+
+## Embedded vs Server Mode
+
+Zage can run embedded (default) or via a background server.
+
+- Embedded: direct DB access; easiest to start.
+- Server: uses a Unix socket; best for low-latency suggestions and shared state.
+
+Config or force it per command:
+
+- Config: `backend = "embedded"` or `backend = "server"`
+- Override: `--embedded-db` on commands
+
+Server details:
+
+- Socket path:
+  - `ZAGE_SOCKET_PATH=/custom/zage.sock`
+  - Defaults: `/tmp/zage.sock` (macOS), `$XDG_RUNTIME_DIR/zage.sock` or `/tmp/zage.sock` (Linux)
+- Pool size: `ZAGE_DB_POOL_SIZE=30` (default 30)
+- Logs: `ZAGE_LOG=info|debug|trace`
+
+## Configuration
+
+Zage can read a config file to set the default backend and database connection.
+
+Load order:
+
+- `ZAGE_CONFIG=/path/to/zage.toml`
+- `config/zage.toml` (repo-local)
+- `~/.config/zage/config.toml`
+
+Example:
+
+```toml
+backend = "embedded" # or "server"
+
+[db]
+type = "local"       # or "remote" or "remote_replica"
+path = "/path/to/zage.db" # local/replica only
+
+# Remote libsql/sqld connection (optional for local)
+# url = "libsql://your-host"
+# auth_token = "your-token" # or set ZAGE_DB_AUTH_TOKEN
+
+# Local at-rest encryption (requires libsql encryption feature)
+# encryption_key = "super-secret"
+# encryption_cipher = "aes256cbc"
+
+# Remote encryption context (base64 key sent to server)
+# remote_encryption_key = "base64-encoded-key" # or set ZAGE_DB_REMOTE_ENCRYPTION_KEY
+
+# Remote replica sync tuning (remote_replica only)
+# sync_interval_ms = 1000
+```
+
+Environment overrides:
+
+- `ZAGE_DB_PATH` (local DB path)
+- `ZAGE_DB_AUTH_TOKEN`
+- `ZAGE_DB_ENCRYPTION_KEY`
+- `ZAGE_DB_REMOTE_ENCRYPTION_KEY`
+- `ZAGE_DB_SYNC_INTERVAL_MS`
+- `ZAGE_SESSION_ID`
+- `ZAGE_COMPLETION_FORMAT=plain|zsh`
+- `ZAGE_ALIASES` or `ZAGE_ALIAS_FILE`
+- `ZAGE_HOSTNAME`
+- `ZAGE_MODEL_PATH` (reranker model location)
+- `ZAGE_SUGGEST_TIMEOUT` (human duration, server mode only)
+
+## Database and Encryption
+
+Default local path (Linux): `~/.local/share/zage/zage.db`
+
+- Local at-rest encryption: set `encryption_key` (and optionally `encryption_cipher`).
+- Remote encryption: set `remote_encryption_key` (base64 key).
+
+## Multi-machine sync with Turso (recommended)
+
+If you use multiple machines, point Zage at a Turso (libsql) database. Your shell history is
+private by nature, so **enable encryption** whenever you use a remote database.
+
+Pick a mode:
+
+- `remote`: connect to Turso directly (no local replica).
+- `remote_replica`: keep a local replica and sync changes to the remote.
+  This keeps reads fast and still shares history across machines.
+
+Example: remote (no local replica)
+
+```toml
+backend = "embedded"
+
+[db]
+type = "remote"
+url = "libsql://your-host"
+auth_token = "your-token"
+
+# Required for remote encryption
+remote_encryption_key = "base64-encoded-key"
+```
+
+Example: remote replica (recommended for laptops/desktops)
+
+```toml
+backend = "embedded"
+
+[db]
+type = "remote_replica"
+path = "/path/to/zage.db"
+url = "libsql://your-host"
+auth_token = "your-token"
+sync_interval_ms = 1000
+
+# Encrypt the local replica at rest
+encryption_key = "local-secret"
+encryption_cipher = "aes256cbc"
+
+# Encrypt remote traffic and server-side storage
+remote_encryption_key = "base64-encoded-key"
+```
+
+Key generation tip (base64, 32 bytes):
+
+```bash
+openssl rand -base64 32
+```
+
+## How It Works
+
+Zage ranks possible next commands in two phases:
+
+1) **Tier‑1 candidate generation**
+   - Parses commands with tree‑sitter (bash/zsh).
+   - Tracks recency, frequency, transitions (what follows what), context (cwd/host/user),
+     and sequences (bigrams/trigrams).
+   - Produces a ranked candidate list with a score breakdown.
+
+2) **Optional ML reranking**
+   - If a trained model is present, it reorders candidates using learned features.
+   - The model is conservative: it only takes over when its confidence is high.
+
+This keeps suggestions fast and reliable while still learning your personal workflows.
+
+## Advanced Features
+
+### Rerank Configuration
+
+The reranker can be tuned via a TOML config file. Zage loads it in this order:
+
+- `ZAGE_RERANK_CONFIG=/path/to/rerank.toml`
+- `config/rerank.toml` (repo-local)
+- `~/.config/zage/rerank.toml`
+
+Example:
+
+```toml
+[low_confidence]
+# If top-1 score is below this, expand candidate pool.
+top = 0.15
+# If top-1 and top-2 are too close, expand candidate pool.
+margin = 0.02
+
+[rerank]
+# Minimum probability for reranker to accept reordering.
+min_prob = 0.30
+# Minimum margin between top-1 and top-2 for reranker to accept.
+min_margin = 0.02
+# Soft timeout for reranker inference; 0 disables the guard.
+timeout_ms = 50
+```
+
+### Phase Configuration
 
 Zage learns workflow phases (build/test/deploy/edit/etc.) from your history. You can seed those
 phases with a TOML file to make the learning fast and predictable.
@@ -136,7 +290,7 @@ phases with a TOML file to make the learning fast and predictable.
 Default config path:
 
 - `config/phases.toml` (repo-local)
-- or `~/.config/zage/phases.toml`
+- `~/.config/zage/phases.toml`
 
 Override with:
 
@@ -167,7 +321,16 @@ patterns = [
 ]
 ```
 
-Optional: record a single invocation (intended for future shell hooks):
+### Aliases
+
+Zage can learn from aliases and their expansions:
+
+- `ZAGE_ALIASES="gst=git status;gco=git checkout"`
+- `ZAGE_ALIAS_FILE="$HOME/.config/zage/aliases"`
+
+### Manual recording
+
+Shell hooks already call this, but you can record a single invocation manually:
 
 ```bash
 zage record \
@@ -179,50 +342,14 @@ zage record \
   --session-id 12345
 ```
 
-## Database
+## Troubleshooting
 
-Default local path:
-
-- `~/.local/share/zage/zage.db` (Linux)
-
-Override with:
-
-- `ZAGE_DB_PATH=/path/to/zage.db`
-
-## How It Works
-
-Zage uses a two-phase approach combining statistical ranking with machine learning:
-
-### Phase 1: Statistical Candidate Generation
-1. **History Collection**: Stores command history with rich contextual metadata (working directory, session, git repo, etc.)
-2. **Tree-Sitter Parsing**: Uses tree-sitter-bash and tree-sitter-zsh for accurate command tokenization
-3. **Stats Tables**: Maintains command, transition, and context frequencies with recency decay
-4. **Sequence Mining**: Computes bigram/trigram support, confidence, and lift from command patterns
-5. **Tier-1 Ranking**: Combines recency, frequency, transitions, context, sequence lift, and token similarity
-
-### Phase 2: ML-Powered Reranking (Optional)
-6. **Feature Extraction**: Extracts 77 features from candidates (13 base + 64 hash features)
-7. **GBRT Model**: Gradient Boosted Regression Trees trained on your actual command choices
-8. **Calibration**: Uses Platt scaling and stacking to produce well-calibrated probabilities
-9. **Adaptive Learning**: The model learns what you actually run, not just statistical patterns
-
-### Training the Model
-After you have 1000+ commands in your history, train the model:
-```bash
-zage train
-```
-
-The model uses pairwise learning: for each command you ran, it samples negative examples (commands you *didn't* run) and learns to distinguish them. It considers:
-- Your recent command sequence and workflow patterns
-- Session context and repository location
-- Time of day and git branch
-- Phase detection (build/test/deploy/etc.)
-
-The reranker automatically applies when available, with confidence thresholds and timeouts to ensure fast suggestions.
-
-## Contributing
-
-Contributions are welcome! Feel free to submit pull requests or open issues.
+- **"Suggest server unavailable"**: start the server (`zage server`) or install the service
+  (`zage service install`), or switch to embedded (`backend = "embedded"` or `--embedded-db`).
+- **No suggestions**: run `zage import` then `zage index --with-sequences`.
+- **Model not found**: run `zage model train`.
+- **Autosuggest not working**: ensure zsh-autosuggestions is loaded before the Zage script, and
+  `ZAGE_AUTOSUGGEST_DISABLE` is not set to `1`.
 
 ## License
 

@@ -5,30 +5,34 @@ edition = "2024"
 
 [features]
 tier1-tests = ["tempfile"]
+pprof = ["dep:pprof"]
 
 [dependencies]
-bstr = { version = "1.9.0", features = ["serde"] }
-clap = { version = "4.5.37", features = ["derive", "env", "string", "unicode"] }
+bstr = { version = "1.12.1", features = ["serde"] }
+clap = { version = "4.5.54", features = ["derive", "env", "string", "unicode"] }
 clap-config-file = "0.5.0"
 color-eyre = "0.6"
+deadpool = "0.12.3"
 deadpool-libsql = "0.1.0"
 dirs = "6.0.0"
 foldhash = "0.2.0"
 gbrt-rs = "0.2.0"
-hostname = "0.4.1"
+hostname = "0.4.2"
 human-panic = "2.0"
+humantime = "2.1"
 itertools = "0.14.0"
-jiff = "0.2.13"
+jiff = "0.2.18"
 libc = "0.2"
-libsql = { version = "0.9.29", features = ["remote", "core", "replication"] }
+libsql = { version = "0.9.29", features = ["remote", "core", "replication", "encryption"] }
 miette = { version = "7", features = ["fancy"] }
-ndarray = "0.17.0"
-rand = "0.9.1"
-rkyv = { version = "0.7.44", features = ["validation"] }
-serde = { version = "1.0.219", features = ["derive"] }
-serde_json = "1.0.140"
+ndarray = "0.17.1"
+pprof = { version = "0.13.0", features = ["prost-codec"], optional = true }
+rand = "0.9.2"
+rkyv = { version = "0.7.46", features = ["validation"] }
+serde = { version = "1.0.228", features = ["derive"] }
+serde_json = "1.0.149"
 serde_yaml = "0.9"
-tempfile = { version = "3.20.0", optional = true }
+tempfile = { version = "3.24.0", optional = true }
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 toml = "0.9"
@@ -37,7 +41,7 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tree-sitter = "0.26.3"
 tree-sitter-bash = "0.25.1"
 tree-sitter-zsh = "0.52.0"
-uuid = { version = "1.16.0", features = ["fast-rng", "std", "v7"] }
+uuid = { version = "1.19.0", features = ["fast-rng", "std", "v7"] }
 uzers = "0.12"
 
 # Force OpenSSL to use vendored version for Linux targets to avoid cross-compilation issues
@@ -46,12 +50,12 @@ openssl = { version = "0.10", features = ["vendored"] }
 
 [dev-dependencies]
 assert_cmd = "2"
-color-backtrace = "0.7.0"
-csv = "1.3"
+color-backtrace = "0.7.2"
+csv = "1.4"
 ctor = "0.4"
 libtest-mimic = "0.8.1"
 predicates = "3"
-tempfile = "3.20.0"
+tempfile = "3.24.0"
 xz2 = "0.1"
 
 # The profile that 'dist' will build with

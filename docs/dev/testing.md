@@ -37,7 +37,7 @@ _zsh_autosuggest_strategy_zage() {
 3. **Configuring zsh-autosuggestions** to use this strategy
 
 ```zsh
-ZSH_AUTOSUGGEST_STRATEGY=(zage history)
+ZSH_AUTOSUGGEST_STRATEGY=(zage)
 ```
 
 ## Testing Infrastructure Requirements
