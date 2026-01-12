@@ -183,35 +183,47 @@ pub async fn mean_embedding_for_commands(
     return Ok(None);
   }
 
-  let selected: Vec<&String> = commands.iter().rev().take(max_commands.max(1)).collect();
-  if selected.is_empty() {
+  if max_commands == 0 {
     return Ok(None);
   }
 
-  let mut sql = String::from("SELECT embedding FROM command_stats WHERE command IN (");
-  sql.push_str(&selected.iter().map(|_| "?").collect::<Vec<_>>().join(","));
+  let mut weights: std::collections::HashMap<&str, usize> = std::collections::HashMap::new();
+  for cmd in commands.iter().rev().take(max_commands) {
+    *weights.entry(cmd.as_str()).or_insert(0) += 1;
+  }
+  if weights.is_empty() {
+    return Ok(None);
+  }
+
+  let mut sql = String::from("SELECT command, embedding FROM command_stats WHERE command IN (");
+  sql.push_str(&weights.keys().map(|_| "?").collect::<Vec<_>>().join(","));
   sql.push(')');
 
-  let mut params: Vec<Value> = Vec::with_capacity(selected.len());
-  for cmd in selected {
-    params.push(Value::from(cmd.clone()));
+  let mut params: Vec<Value> = Vec::with_capacity(weights.len());
+  for cmd in weights.keys() {
+    params.push(Value::from((*cmd).to_string()));
   }
 
   let mut rows = conn.query(&sql, params).await?;
   let mut sum = vec![0.0f32; dim];
   let mut count = 0usize;
   while let Some(row) = rows.next().await? {
-    let raw = row.get::<Option<Vec<u8>>>(0)?;
+    let cmd = row.get::<String>(0)?;
+    let raw = row.get::<Option<Vec<u8>>>(1)?;
     let Some(raw) = raw else {
       continue;
     };
     let Some(embedding) = decode_f32_blob(&raw, dim) else {
       continue;
     };
-    for (dst, src) in sum.iter_mut().zip(embedding.iter()) {
-      *dst += *src;
+    let weight = *weights.get(cmd.as_str()).unwrap_or(&0);
+    if weight == 0 {
+      continue;
     }
-    count += 1;
+    for (dst, src) in sum.iter_mut().zip(embedding.iter()) {
+      *dst += *src * (weight as f32);
+    }
+    count += weight;
   }
 
   if count == 0 {
@@ -474,6 +486,99 @@ mod tests {
       .await?
       .expect("mean embedding");
     assert_eq!(mean, vec![2.0, 2.0, 2.0]);
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn mean_embedding_for_commands_counts_duplicates_in_window() -> Result<()> {
+    let tmp = NamedTempFile::new()?;
+    let db = db::open_db(tmp.path()).await?;
+
+    db.conn
+      .execute(
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        (),
+      )
+      .await?;
+    db.conn
+      .execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?)",
+        libsql::params![META_KEY_COMMAND_EMBEDDING_DIM.to_string(), "1".to_string()],
+      )
+      .await?;
+
+    db.conn
+      .execute("ALTER TABLE command_stats ADD COLUMN embedding BLOB", ())
+      .await?;
+
+    fn blob1(v: f32) -> Vec<u8> {
+      v.to_le_bytes().to_vec()
+    }
+
+    db.conn
+      .execute(
+        "INSERT INTO command_stats (command, freq, last_seen, embedding) VALUES (?, ?, ?, ?)",
+        libsql::params!["x".to_string(), 1i64, 10i64, Some(blob1(0.0))],
+      )
+      .await?;
+    db.conn
+      .execute(
+        "INSERT INTO command_stats (command, freq, last_seen, embedding) VALUES (?, ?, ?, ?)",
+        libsql::params!["y".to_string(), 1i64, 20i64, Some(blob1(3.0))],
+      )
+      .await?;
+
+    // Desired behavior: duplicates in the context window should contribute multiple times
+    // to the mean (x, x, y) => (0 + 0 + 3) / 3 = 1.0.
+    //
+    // Current implementation uses `IN (...)` which collapses duplicates, yielding (0 + 3) / 2 = 1.5.
+    let commands = vec!["x".to_string(), "x".to_string(), "y".to_string()];
+    let mean = mean_embedding_for_commands(&db.conn, &commands, 3)
+      .await?
+      .expect("mean embedding");
+    assert_eq!(mean, vec![1.0]);
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn mean_embedding_for_commands_zero_limit_returns_none() -> Result<()> {
+    let tmp = NamedTempFile::new()?;
+    let db = db::open_db(tmp.path()).await?;
+
+    db.conn
+      .execute(
+        "CREATE TABLE meta (key TEXT PRIMARY KEY, value TEXT NOT NULL)",
+        (),
+      )
+      .await?;
+    db.conn
+      .execute(
+        "INSERT INTO meta (key, value) VALUES (?, ?)",
+        libsql::params![META_KEY_COMMAND_EMBEDDING_DIM.to_string(), "1".to_string()],
+      )
+      .await?;
+
+    db.conn
+      .execute("ALTER TABLE command_stats ADD COLUMN embedding BLOB", ())
+      .await?;
+
+    db.conn
+      .execute(
+        "INSERT INTO command_stats (command, freq, last_seen, embedding) VALUES (?, ?, ?, ?)",
+        libsql::params![
+          "x".to_string(),
+          1i64,
+          10i64,
+          Some(0.0f32.to_le_bytes().to_vec())
+        ],
+      )
+      .await?;
+
+    // Desired behavior: max_commands=0 should mean "use zero commands", so return None.
+    // Current code forces a minimum of 1 via `max_commands.max(1)`.
+    let commands = vec!["x".to_string()];
+    let mean = mean_embedding_for_commands(&db.conn, &commands, 0).await?;
+    assert!(mean.is_none());
     Ok(())
   }
 }

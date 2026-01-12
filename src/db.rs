@@ -142,7 +142,7 @@ pub async fn insert_invocation(conn: &Connection, invocation: &Invocation) -> Re
         invocation.expanded_command.clone(),
         invocation.shellname.clone(),
         invocation.working_directory.clone(),
-        workspace_json,
+        workspace_json.clone(),
         invocation.hostname.clone(),
         invocation.username.clone(),
         invocation.exit_status,
@@ -152,7 +152,46 @@ pub async fn insert_invocation(conn: &Connection, invocation: &Invocation) -> Re
       ),
     )
     .await?;
-  Ok(changed > 0)
+  if changed > 0 {
+    return Ok(true);
+  }
+
+  // Keep INSERT/IGNORE semantics (avoid double-counting stats), but still backfill workspace_json
+  // when we learn it later (e.g. after improving workspace detection).
+  if let Some(workspace_json) = workspace_json {
+    conn
+      .execute(
+        "UPDATE shell_history
+         SET workspace_json = ?
+         WHERE command = ?
+           AND expanded_command = ?
+           AND shellname = ?
+           AND working_directory IS ?
+           AND hostname IS ?
+           AND username IS ?
+           AND exit_status IS ?
+           AND start_unix_timestamp IS ?
+           AND end_unix_timestamp IS ?
+           AND session_id = ?
+           AND workspace_json IS NULL",
+        (
+          workspace_json,
+          invocation.command.clone(),
+          invocation.expanded_command.clone(),
+          invocation.shellname.clone(),
+          invocation.working_directory.clone(),
+          invocation.hostname.clone(),
+          invocation.username.clone(),
+          invocation.exit_status,
+          invocation.start_unix_timestamp,
+          invocation.end_unix_timestamp,
+          invocation.session_id,
+        ),
+      )
+      .await?;
+  }
+
+  Ok(false)
 }
 
 pub async fn import_history<I>(conn: &Connection, invocations: I) -> Result<()>
@@ -642,6 +681,7 @@ async fn execute_batch(conn: &Connection, sql: &str) -> Result<()> {
 #[cfg(test)]
 mod tests {
   use super::*;
+  use crate::workspace::{WorkspaceInfo, WorkspaceKind};
 
   #[tokio::test]
   async fn test_init_table() -> Result<()> {
@@ -716,6 +756,53 @@ mod tests {
     let row = rows.next().await?.expect("expected row");
     let count = row.get::<i64>(0)?;
     assert_eq!(count, 1);
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn insert_invocation_should_update_workspace_json_on_duplicate() -> Result<()> {
+    let tmp = tempfile::NamedTempFile::new()?;
+    let db = open_db(tmp.path()).await?;
+    init(&db.conn).await?;
+
+    let mut inv = Invocation {
+      command: "echo hi".to_string(),
+      expanded_command: "echo hi".to_string(),
+      shellname: "zsh".to_string(),
+      working_directory: Some("/nonexistent/project".to_string()),
+      workspace: None,
+      hostname: Some("host".to_string()),
+      username: Some("user".to_string()),
+      exit_status: Some(0),
+      start_unix_timestamp: Some(10),
+      end_unix_timestamp: Some(11),
+      session_id: 1,
+    };
+
+    assert!(insert_invocation(&db.conn, &inv).await?);
+
+    // Same unique key but now with workspace populated.
+    inv.workspace = Some(WorkspaceInfo {
+      root: "/nonexistent/project".to_string(),
+      packages: vec![],
+      ecosystems: Default::default(),
+      kind: WorkspaceKind::SingleLanguageRepo,
+    });
+
+    // Desired behavior: second insert should update workspace_json (or otherwise persist the new data).
+    // Current behavior is INSERT OR IGNORE, so this will be ignored and the workspace_json remains NULL.
+    let _ = insert_invocation(&db.conn, &inv).await?;
+
+    let mut rows = db
+      .conn
+      .query(
+        "SELECT workspace_json FROM shell_history WHERE command = ? LIMIT 1",
+        libsql::params!["echo hi".to_string()],
+      )
+      .await?;
+    let row = rows.next().await?.expect("row");
+    let workspace_json: Option<String> = row.get(0)?;
+    assert!(workspace_json.is_some());
     Ok(())
   }
 }

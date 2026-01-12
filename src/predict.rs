@@ -632,6 +632,7 @@ async fn completion_candidates(
     .cwd
     .as_deref()
     .and_then(find_repo_root)
+    .or_else(|| config.cwd.clone())
     .map(|root| root.trim_end_matches('/').to_string());
   let project_like = project_root.as_ref().map(|root| format!("{root}/%"));
 
@@ -639,7 +640,10 @@ async fn completion_candidates(
     .cwd
     .as_deref()
     .and_then(find_repo_root)
-    .unwrap_or_default();
+    .or_else(|| config.cwd.clone())
+    .unwrap_or_default()
+    .trim_end_matches('/')
+    .to_string();
   let prefer_full_line = config.prefer_full_line;
   let pool_limit = if prefer_full_line {
     config.max_results.max(FULL_LINE_POOL_LIMIT)

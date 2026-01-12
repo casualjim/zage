@@ -68,19 +68,33 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
   let max_unlabeled = 10_000usize;
   let aliases = load_aliases();
 
-  let mut sql = String::from(
-    "SELECT command, expanded_command, shellname, working_directory, hostname, username, exit_status, start_unix_timestamp
-     FROM shell_history
-     ORDER BY COALESCE(start_unix_timestamp, 0) ASC, id ASC",
-  );
-  if max_commands.is_some() {
-    sql.push_str(" LIMIT ?");
-  }
-
   let mut rows = if let Some(limit) = max_commands {
-    conn.query(&sql, libsql::params![limit as i64]).await?
+    conn
+      .query(
+        "WITH recent AS (
+           SELECT id, command, expanded_command, shellname, working_directory, hostname, username,
+                  exit_status, start_unix_timestamp
+           FROM shell_history
+           ORDER BY COALESCE(start_unix_timestamp, 0) DESC, id DESC
+           LIMIT ?
+         )
+         SELECT command, expanded_command, shellname, working_directory, hostname, username,
+                exit_status, start_unix_timestamp
+         FROM recent
+         ORDER BY COALESCE(start_unix_timestamp, 0) ASC, id ASC",
+        libsql::params![limit as i64],
+      )
+      .await?
   } else {
-    conn.query(&sql, ()).await?
+    conn
+      .query(
+        "SELECT command, expanded_command, shellname, working_directory, hostname, username,
+                exit_status, start_unix_timestamp
+         FROM shell_history
+         ORDER BY COALESCE(start_unix_timestamp, 0) ASC, id ASC",
+        (),
+      )
+      .await?
   };
 
   while let Some(row) = rows.next().await? {
@@ -93,10 +107,11 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
     let exit_status = row.get::<Option<i64>>(6)?;
     let ts: Option<i64> = row.get(7)?;
     let ts = ts.unwrap_or(0);
-    let repo_root = working_directory
-      .as_deref()
-      .and_then(find_repo_root)
-      .unwrap_or_default();
+    let repo_root = if let Some(cwd) = working_directory.as_deref() {
+      find_repo_root(cwd).unwrap_or_else(|| cwd.to_string())
+    } else {
+      String::new()
+    };
 
     let stats_command = if !expanded_command.is_empty() {
       expanded_command
@@ -290,7 +305,6 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
 
   conn.execute("BEGIN", ()).await?;
   let write_result: Result<()> = async {
-    conn.execute("DELETE FROM command_stats", ()).await?;
     conn.execute("DELETE FROM transition_stats", ()).await?;
     conn.execute("DELETE FROM repo_command_stats", ()).await?;
     conn.execute("DELETE FROM repo_transition_stats", ()).await?;
@@ -302,14 +316,42 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
     conn.execute("DELETE FROM token_cache", ()).await?;
     conn.execute("DELETE FROM phase_stats", ()).await?;
 
+    // Preserve any extra columns on command_stats (e.g. embeddings) by updating freq/last_seen
+    // in-place and then deleting commands that are no longer present in the selected history.
+    conn
+      .execute(
+        "CREATE TEMP TABLE IF NOT EXISTS tmp_command_stats (command TEXT PRIMARY KEY)",
+        (),
+      )
+      .await?;
+    conn.execute("DELETE FROM tmp_command_stats", ()).await?;
+
     for (command, stat) in &command_stats {
       conn
         .execute(
-          "INSERT INTO command_stats (command, freq, last_seen) VALUES (?, ?, ?)",
+          "INSERT INTO tmp_command_stats (command) VALUES (?)",
+          libsql::params![command.clone()],
+        )
+        .await?;
+      conn
+        .execute(
+          "INSERT INTO command_stats (command, freq, last_seen)
+           VALUES (?, ?, ?)
+           ON CONFLICT(command) DO UPDATE SET
+             freq = excluded.freq,
+             last_seen = excluded.last_seen",
           (command.clone(), stat.freq, stat.last_seen),
         )
         .await?;
     }
+
+    conn
+      .execute(
+        "DELETE FROM command_stats
+         WHERE command NOT IN (SELECT command FROM tmp_command_stats)",
+        (),
+      )
+      .await?;
 
     for ((repo_root, command), stat) in &repo_command_stats {
       conn
@@ -518,5 +560,178 @@ fn update_arg_stat<K: std::hash::Hash + Eq>(
   }
   if entry.arg_norm != arg_norm {
     entry.arg_norm = arg_norm.to_string();
+  }
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+  use crate::db;
+  use crate::shell_history::Invocation;
+  use tempfile::NamedTempFile;
+
+  fn base_invocation(command: &str, ts: i64) -> Invocation {
+    Invocation {
+      command: command.to_string(),
+      expanded_command: command.to_string(),
+      shellname: "zsh".to_string(),
+      working_directory: Some("/nonexistent/project".to_string()),
+      workspace: None,
+      hostname: Some("host".to_string()),
+      username: Some("user".to_string()),
+      exit_status: Some(0),
+      start_unix_timestamp: Some(ts),
+      end_unix_timestamp: Some(ts + 1),
+      session_id: 1,
+    }
+  }
+
+  #[tokio::test]
+  async fn rebuild_stats_should_preserve_existing_command_embeddings() -> Result<()> {
+    let tmp = NamedTempFile::new()?;
+    let db = db::open_db(tmp.path()).await?;
+    db::init(&db.conn).await?;
+
+    db.conn
+      .execute("ALTER TABLE command_stats ADD COLUMN embedding BLOB", ())
+      .await?;
+    db.conn
+      .execute(
+        "ALTER TABLE command_stats ADD COLUMN embedding_updated_at INTEGER",
+        (),
+      )
+      .await?;
+
+    // Seed a precomputed embedding for a command we will still have in history.
+    db.conn
+      .execute(
+        "INSERT INTO command_stats (command, freq, last_seen, embedding, embedding_updated_at)
+         VALUES (?, ?, ?, ?, ?)",
+        libsql::params![
+          "echo hi".to_string(),
+          1i64,
+          10i64,
+          Some(vec![1u8, 2, 3, 4]),
+          Some(123i64)
+        ],
+      )
+      .await?;
+
+    db::insert_invocation(&db.conn, &base_invocation("echo hi", 10)).await?;
+    rebuild_stats(&db.conn, None).await?;
+
+    // Expected behavior: rebuilding frequency/transition stats must not destroy embeddings.
+    // Current behavior deletes `command_stats` rows and reinserts without copying embeddings.
+    let mut rows = db
+      .conn
+      .query(
+        "SELECT embedding FROM command_stats WHERE command = ?",
+        libsql::params!["echo hi".to_string()],
+      )
+      .await?;
+    let row = rows.next().await?.expect("row");
+    let embedding: Option<Vec<u8>> = row.get(0)?;
+    assert_eq!(embedding, Some(vec![1u8, 2, 3, 4]));
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn rebuild_stats_should_preserve_embedding_updated_at() -> Result<()> {
+    let tmp = NamedTempFile::new()?;
+    let db = db::open_db(tmp.path()).await?;
+    db::init(&db.conn).await?;
+
+    db.conn
+      .execute("ALTER TABLE command_stats ADD COLUMN embedding BLOB", ())
+      .await?;
+    db.conn
+      .execute(
+        "ALTER TABLE command_stats ADD COLUMN embedding_updated_at INTEGER",
+        (),
+      )
+      .await?;
+
+    db.conn
+      .execute(
+        "INSERT INTO command_stats (command, freq, last_seen, embedding, embedding_updated_at)
+         VALUES (?, ?, ?, ?, ?)",
+        libsql::params![
+          "echo hi".to_string(),
+          1i64,
+          10i64,
+          Some(vec![9u8, 9, 9, 9]),
+          Some(999i64)
+        ],
+      )
+      .await?;
+
+    db::insert_invocation(&db.conn, &base_invocation("echo hi", 10)).await?;
+    rebuild_stats(&db.conn, None).await?;
+
+    let mut rows = db
+      .conn
+      .query(
+        "SELECT embedding_updated_at FROM command_stats WHERE command = ?",
+        libsql::params!["echo hi".to_string()],
+      )
+      .await?;
+    let row = rows.next().await?.expect("row");
+    let updated_at: Option<i64> = row.get(0)?;
+    assert_eq!(updated_at, Some(999));
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn rebuild_stats_max_commands_should_take_most_recent_history() -> Result<()> {
+    let tmp = NamedTempFile::new()?;
+    let db = db::open_db(tmp.path()).await?;
+    db::init(&db.conn).await?;
+
+    db::insert_invocation(&db.conn, &base_invocation("cmd-1", 1)).await?;
+    db::insert_invocation(&db.conn, &base_invocation("cmd-2", 2)).await?;
+    db::insert_invocation(&db.conn, &base_invocation("cmd-3", 3)).await?;
+
+    // Desired behavior: limiting the index should keep the newest commands (for relevance).
+    // Current behavior orders ASC and LIMITs, keeping the oldest commands instead.
+    rebuild_stats(&db.conn, Some(2)).await?;
+
+    let mut rows = db
+      .conn
+      .query(
+        "SELECT command FROM command_stats ORDER BY last_seen ASC",
+        (),
+      )
+      .await?;
+    let mut cmds = Vec::new();
+    while let Some(row) = rows.next().await? {
+      cmds.push(row.get::<String>(0)?);
+    }
+    assert_eq!(cmds, vec!["cmd-2".to_string(), "cmd-3".to_string()]);
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn rebuild_stats_repo_root_should_fall_back_to_working_directory() -> Result<()> {
+    let tmp = NamedTempFile::new()?;
+    let db = db::open_db(tmp.path()).await?;
+    db::init(&db.conn).await?;
+
+    // This path will not exist during the test. We still want repo-scoped stats to be isolated
+    // by *something stable* (at minimum: the working directory string).
+    let inv = base_invocation("echo hi", 10);
+    db::insert_invocation(&db.conn, &inv).await?;
+    rebuild_stats(&db.conn, None).await?;
+
+    let mut rows = db
+      .conn
+      .query(
+        "SELECT repo_root FROM repo_command_stats WHERE command = ?",
+        libsql::params!["echo hi".to_string()],
+      )
+      .await?;
+    let row = rows.next().await?.expect("row");
+    let repo_root: String = row.get(0)?;
+    assert_eq!(repo_root, inv.working_directory.clone().unwrap());
+    Ok(())
   }
 }

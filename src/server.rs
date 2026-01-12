@@ -32,7 +32,7 @@ use crate::shell_history::{
 use crate::workspace::detect_workspace_for_cwd;
 use crate::{Result, ZageError};
 
-const DEFAULT_TIMEOUT_MS: u64 = 200;
+const DEFAULT_TIMEOUT_MS: u64 = 1_000;
 const LONG_TIMEOUT_MS: u64 = 300_000;
 
 fn response_timeout_ms(request: &Request) -> u64 {
@@ -1073,4 +1073,16 @@ async fn flush_records(pool: &Arc<ConnectionPool>, buffer: &mut Vec<Invocation>)
   }
   pool.sync().await;
   debug!("flushed ingestion batch");
+}
+
+#[cfg(test)]
+mod tests {
+  use super::DEFAULT_TIMEOUT_MS;
+
+  #[test]
+  fn suggest_default_timeout_should_be_human_reasonable() {
+    // 200ms is too small for non-trivial histories and results in user-visible failures.
+    let timeout = std::hint::black_box(DEFAULT_TIMEOUT_MS);
+    assert!(timeout >= 1_000);
+  }
 }

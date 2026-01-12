@@ -34,8 +34,7 @@ fn auto_min_history(train_len: usize) -> usize {
   if train_len < 2 {
     return 1;
   }
-  let base = (train_len / 10).clamp(200, 2_000);
-  base.min(train_len.saturating_sub(1)).max(1)
+  (train_len / 10).min(train_len.saturating_sub(1)).max(1)
 }
 
 pub async fn train_model(conn: &Connection, config: TrainConfig) -> Result<TrainReport> {
@@ -672,4 +671,28 @@ async fn load_invocations(conn: &Connection, limit: Option<usize>) -> Result<Vec
   }
 
   Ok(invocations)
+}
+
+#[cfg(test)]
+mod tests {
+  use super::auto_min_history;
+
+  #[test]
+  fn auto_min_history_should_not_clamp_low() {
+    // Desired behavior: min_history should scale with data size.
+    // For train_len=500, train_len/10=50.
+    //
+    // Current code clamps to a minimum of 200, which drowns out "recent" and makes training
+    // insensitive to smaller histories.
+    assert_eq!(auto_min_history(500), 50);
+  }
+
+  #[test]
+  fn auto_min_history_should_not_clamp_high() {
+    // Desired behavior: for large histories, allow larger windows than 2000 if needed.
+    // For train_len=50_000, train_len/10=5_000.
+    //
+    // Current code clamps to a maximum of 2_000.
+    assert_eq!(auto_min_history(50_000), 5_000);
+  }
 }
