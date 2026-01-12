@@ -4,5 +4,6 @@ crumbs.db.wal
 crumbs.db.shm
 crumbs.db-wal
 crumbs.db-shm
+crumbs.db-journal
 secrets.toml
 !.gitignore
