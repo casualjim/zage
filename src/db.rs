@@ -1,6 +1,7 @@
 use libsql::{
   Builder, Cipher, Connection, Database, EncryptionConfig, EncryptionContext, EncryptionKey,
 };
+use std::collections::HashSet;
 use std::fs;
 use std::path::Path;
 
@@ -102,21 +103,46 @@ pub async fn open_db_with_config(config: &DbConfig) -> Result<Db> {
 
 pub async fn init(conn: &Connection) -> Result<()> {
   execute_batch(conn, include_str!("db/schema-v0.sql")).await?;
+  ensure_shell_history_columns(conn).await?;
+  Ok(())
+}
+
+async fn ensure_shell_history_columns(conn: &Connection) -> Result<()> {
+  let mut rows = conn.query("PRAGMA table_info(shell_history)", ()).await?;
+  let mut columns = HashSet::new();
+  while let Some(row) = rows.next().await? {
+    let name: String = row.get(1)?;
+    columns.insert(name);
+  }
+  if !columns.contains("workspace_json") {
+    conn
+      .execute(
+        "ALTER TABLE shell_history ADD COLUMN workspace_json TEXT",
+        (),
+      )
+      .await?;
+  }
   Ok(())
 }
 
 pub async fn insert_invocation(conn: &Connection, invocation: &Invocation) -> Result<bool> {
   let id = uuid::Uuid::now_v7().to_string();
+  let workspace_json = invocation
+    .workspace
+    .as_ref()
+    .map(serde_json::to_string)
+    .transpose()?;
   let changed = conn
     .execute(
-      "INSERT OR IGNORE INTO shell_history (id, command, expanded_command, shellname, working_directory, hostname, username, exit_status, start_unix_timestamp, end_unix_timestamp, session_id)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+      "INSERT OR IGNORE INTO shell_history (id, command, expanded_command, shellname, working_directory, workspace_json, hostname, username, exit_status, start_unix_timestamp, end_unix_timestamp, session_id)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       (
         id,
         invocation.command.clone(),
         invocation.expanded_command.clone(),
         invocation.shellname.clone(),
         invocation.working_directory.clone(),
+        workspace_json,
         invocation.hostname.clone(),
         invocation.username.clone(),
         invocation.exit_status,
@@ -197,17 +223,23 @@ pub async fn get_recent_invocations(conn: &Connection, limit: usize) -> Result<V
 
   let mut invs = Vec::new();
   while let Some(row) = rows.next().await? {
+    let workspace_json = row.get::<Option<String>>(5)?;
+    let workspace = match workspace_json {
+      Some(raw) => Some(serde_json::from_str(&raw)?),
+      None => None,
+    };
     invs.push(Invocation {
       command: row.get::<String>(1)?,
       expanded_command: row.get::<String>(2)?,
       shellname: row.get::<String>(3)?,
       working_directory: row.get::<Option<String>>(4)?,
-      hostname: row.get::<Option<String>>(5)?,
-      username: row.get::<Option<String>>(6)?,
-      exit_status: row.get::<Option<i64>>(7)?,
-      start_unix_timestamp: row.get::<Option<i64>>(8)?,
-      end_unix_timestamp: row.get::<Option<i64>>(9)?,
-      session_id: row.get::<i64>(10)?,
+      workspace,
+      hostname: row.get::<Option<String>>(6)?,
+      username: row.get::<Option<String>>(7)?,
+      exit_status: row.get::<Option<i64>>(8)?,
+      start_unix_timestamp: row.get::<Option<i64>>(9)?,
+      end_unix_timestamp: row.get::<Option<i64>>(10)?,
+      session_id: row.get::<i64>(11)?,
     });
   }
   invs.reverse();
@@ -641,6 +673,7 @@ mod tests {
       expanded_command: "ls -la".to_string(),
       shellname: "zsh".to_string(),
       working_directory: Some("/tmp".to_string()),
+      workspace: None,
       hostname: Some("host".to_string()),
       username: Some("user".to_string()),
       exit_status: Some(0),

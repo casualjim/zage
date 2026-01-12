@@ -396,6 +396,7 @@ async fn seed_history(
         expanded_command: expanded.clone(),
         shellname: shellname.clone(),
         working_directory: working_directory.clone(),
+        workspace: None,
         hostname: hostname.clone(),
         username: username.clone(),
         exit_status: entry.exit.or(Some(0)),

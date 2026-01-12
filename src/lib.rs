@@ -6,6 +6,7 @@ pub use config::*;
 pub mod cli;
 pub mod core;
 pub mod db;
+pub mod embeddings;
 pub mod indexer;
 pub mod phase;
 pub mod predict;
@@ -19,6 +20,7 @@ pub mod server;
 pub mod service;
 pub mod shell_history;
 pub mod tokenize;
+pub mod workspace;
 
 #[cfg(feature = "pprof")]
 pub(crate) use profile::capture_profile;

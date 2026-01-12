@@ -414,6 +414,7 @@ mod tests {
       expanded_command: command.to_string(),
       shellname: "zsh".to_string(),
       working_directory: Some("/tmp".to_string()),
+      workspace: None,
       hostname: Some("host".to_string()),
       username: Some("user".to_string()),
       exit_status: Some(0),

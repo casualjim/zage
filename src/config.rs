@@ -3,6 +3,7 @@ use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
 
+use seasoning::{Embedding as SeasoningEmbedding, Reranker as SeasoningReranker};
 use serde::Deserialize;
 
 use crate::{Result, ZageError};
@@ -94,12 +95,16 @@ impl DbConfig {
 pub struct AppConfig {
   pub backend: BackendMode,
   pub db: DbConfig,
+  pub embedding: Option<SeasoningEmbedding>,
+  pub reranker: Option<SeasoningReranker>,
 }
 
 #[derive(Debug, Deserialize, Default)]
 struct AppConfigFile {
   backend: Option<BackendMode>,
   db: Option<DbConfigFile>,
+  embedding: Option<SeasoningEmbedding>,
+  reranker: Option<SeasoningReranker>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -173,6 +178,12 @@ impl AppConfig {
         config.db.sync_interval_ms = Some(interval);
       }
     }
+    if let Some(embedding) = parsed.embedding {
+      config.embedding = Some(embedding);
+    }
+    if let Some(reranker) = parsed.reranker {
+      config.reranker = Some(reranker);
+    }
     Ok(config)
   }
 
@@ -190,6 +201,8 @@ impl AppConfig {
         remote_encryption_key: None,
         sync_interval_ms: None,
       },
+      embedding: None,
+      reranker: None,
     })
   }
 }

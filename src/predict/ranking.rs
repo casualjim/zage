@@ -7,8 +7,6 @@ use crate::Result;
 use crate::tokenize::normalized_tokens;
 
 use super::sql::query_prepared;
-use crate::rerank_config::RerankConfig;
-
 pub(crate) const DEFAULT_RECENCY_HALF_LIFE_SECONDS: f64 = 60.0 * 60.0 * 24.0 * 7.0;
 
 pub(crate) fn recency_score(now: i64, last_seen: i64, half_life_seconds: f64) -> f64 {
@@ -46,17 +44,4 @@ pub(crate) async fn load_normalized_tokens(
   }
 
   Ok(normalized_tokens(command))
-}
-
-pub(crate) fn low_confidence(scored: &[super::Suggestion], config: &RerankConfig) -> bool {
-  if scored.is_empty() {
-    return true;
-  }
-  if scored.len() < 2 {
-    return scored[0].score < config.low_confidence_top;
-  }
-  let top = scored[0].score;
-  let second = scored[1].score;
-  let margin = top - second;
-  top < config.low_confidence_top || margin < config.low_confidence_margin
 }

@@ -102,6 +102,7 @@ pub fn parse_history_file(
       shellname: "zsh".to_string(),
       hostname: Some(hostname_s.clone()),
       username: Some(username_s.clone()),
+      workspace: None,
       start_unix_timestamp,
       end_unix_timestamp,
       session_id,

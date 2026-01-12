@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use crate::core::{Candidate, Suggestion};
 use crate::hash_util::stable_hash;
 use crate::predict::ranking::{DEFAULT_RECENCY_HALF_LIFE_SECONDS, recency_score, token_similarity};
-use crate::tokenize::{extract_command_parts, normalized_tokens, tokenize, tokenize_index};
+use crate::tokenize::{CommandParts, TokenKind, extract_command_parts, tokenize, tokenize_index};
 
 use super::config::RerankContext;
 use super::{BASE_FEATURES, FEATURE_COUNT, HASH_FEATURES};
@@ -37,6 +37,7 @@ pub(crate) struct TrainingStats {
   pub(crate) transition_stats: HashMap<(String, Option<i64>, String), i64>,
   pub(crate) context_stats: HashMap<ContextKey, i64>,
   pub(crate) repo_stats: HashMap<(String, String), Stat>,
+  pub(crate) repo_commands: HashMap<String, Vec<String>>,
   pub(crate) session_stats: HashMap<(i64, String), Stat>,
   pub(crate) session_commands: HashMap<i64, Vec<String>>,
   pub(crate) head_to_commands: HashMap<String, Vec<String>>,
@@ -74,7 +75,8 @@ pub(crate) fn features_from_suggestion(
   context: &RerankContext,
   recent_heads: &HashSet<String>,
 ) -> Option<FeatureVector> {
-  let head = command_head(&suggestion.command);
+  let shape = command_shape(&suggestion.command, &context.shellname);
+  let head = shape.head.clone();
   if head.is_empty() {
     return None;
   }
@@ -86,8 +88,8 @@ pub(crate) fn features_from_suggestion(
   let context_score = suggestion.breakdown.context;
   let sequence_score = suggestion.breakdown.sequence;
 
-  let candidate_tokens = normalized_tokens(&suggestion.command);
-  let similarity = token_similarity(&context.session_tokens, &candidate_tokens);
+  let similarity = token_similarity(&context.session_tokens, &shape.normalized_tokens);
+  let overlap_ratio = token_overlap_ratio(&context.session_tokens, &shape.normalized_tokens);
   let tier1_score = recency + frequency + transition + context_score + sequence_score + similarity;
 
   let repo_match = if candidate.repo_freq > 0 { 1.0 } else { 0.0 };
@@ -142,8 +144,25 @@ pub(crate) fn features_from_suggestion(
   values[15] = candidate.sequence_confidence;
   values[16] = candidate.sequence_lift;
   values[17] = candidate.sequence_prefix_len as f64;
+  values[18] = (shape.token_count as f64).ln_1p();
+  values[19] = (shape.flag_count as f64).ln_1p();
+  values[20] = (shape.arg_count as f64).ln_1p();
+  values[21] = if shape.has_path { 1.0 } else { 0.0 };
+  values[22] = if shape.has_redirect { 1.0 } else { 0.0 };
+  values[23] = if shape.has_assignment { 1.0 } else { 0.0 };
+  values[24] = if shape.has_variable { 1.0 } else { 0.0 };
+  values[25] = overlap_ratio;
 
   add_hash(&mut values, format!("head:{head}").as_str());
+  if let Some(signature) = shape.signature.as_ref() {
+    add_hash(&mut values, format!("sig:{signature}").as_str());
+  }
+  for flag in shape.flags.iter().take(4) {
+    add_hash(&mut values, format!("flag:{head}:{flag}").as_str());
+  }
+  for token in shape.normalized_tokens.iter().skip(1).take(6) {
+    add_hash(&mut values, format!("tok:{head}:{token}").as_str());
+  }
   if let Some(branch) = context.branch.as_ref() {
     add_hash(&mut values, format!("branch:{branch}:{head}").as_str());
   }
@@ -163,7 +182,8 @@ pub(crate) fn build_feature_vector(
   context: &ContextWindow,
   stats: &TrainingStats,
 ) -> Option<FeatureVector> {
-  let head = command_head(command);
+  let shape = command_shape(command, &context.shellname);
+  let head = shape.head.clone();
   if head.is_empty() {
     return None;
   }
@@ -250,8 +270,8 @@ pub(crate) fn build_feature_vector(
     + CONTEXT_TIME_WEIGHT * time_context
     + CONTEXT_SESSION_WEIGHT * session_context;
 
-  let candidate_tokens = normalized_tokens(command);
-  let similarity = token_similarity(&context.session_tokens, &candidate_tokens);
+  let similarity = token_similarity(&context.session_tokens, &shape.normalized_tokens);
+  let overlap_ratio = token_overlap_ratio(&context.session_tokens, &shape.normalized_tokens);
 
   let (sequence_score, sequence_confidence, sequence_lift, sequence_prefix_len) =
     sequence_features(command, context, stats);
@@ -288,8 +308,25 @@ pub(crate) fn build_feature_vector(
   values[15] = sequence_confidence;
   values[16] = sequence_lift;
   values[17] = sequence_prefix_len;
+  values[18] = (shape.token_count as f64).ln_1p();
+  values[19] = (shape.flag_count as f64).ln_1p();
+  values[20] = (shape.arg_count as f64).ln_1p();
+  values[21] = if shape.has_path { 1.0 } else { 0.0 };
+  values[22] = if shape.has_redirect { 1.0 } else { 0.0 };
+  values[23] = if shape.has_assignment { 1.0 } else { 0.0 };
+  values[24] = if shape.has_variable { 1.0 } else { 0.0 };
+  values[25] = overlap_ratio;
 
   add_hash(&mut values, format!("head:{head}").as_str());
+  if let Some(signature) = shape.signature.as_ref() {
+    add_hash(&mut values, format!("sig:{signature}").as_str());
+  }
+  for flag in shape.flags.iter().take(4) {
+    add_hash(&mut values, format!("flag:{head}:{flag}").as_str());
+  }
+  for token in shape.normalized_tokens.iter().skip(1).take(6) {
+    add_hash(&mut values, format!("tok:{head}:{token}").as_str());
+  }
   if let Some(branch) = context.branch.as_ref() {
     add_hash(&mut values, format!("branch:{branch}:{head}").as_str());
   }
@@ -496,10 +533,109 @@ pub(crate) fn command_head(command: &str) -> String {
     .unwrap_or_default()
 }
 
-pub(crate) fn command_signature(command: &str, shellname: &str) -> Option<String> {
+pub(crate) fn normalize_sequence_command(command: &str, shellname: &str) -> String {
+  command_signature(command, shellname).unwrap_or_else(|| command.to_string())
+}
+
+pub(crate) fn add_hash(values: &mut [f64], label: &str) {
+  let hash = stable_hash(label);
+  let idx = BASE_FEATURES + (hash as usize % HASH_FEATURES);
+  values[idx] += 1.0;
+}
+
+fn token_overlap_ratio(session_tokens: &[String], candidate_tokens: &[String]) -> f64 {
+  if session_tokens.is_empty() || candidate_tokens.is_empty() {
+    return 0.0;
+  }
+  let set_session: HashSet<&str> = session_tokens.iter().map(|s| s.as_str()).collect();
+  let set_candidate: HashSet<&str> = candidate_tokens.iter().map(|s| s.as_str()).collect();
+  let overlap = set_session.intersection(&set_candidate).count() as f64;
+  overlap / (set_candidate.len() as f64)
+}
+
+struct CommandShape {
+  head: String,
+  normalized_tokens: Vec<String>,
+  flags: Vec<String>,
+  signature: Option<String>,
+  token_count: usize,
+  flag_count: usize,
+  arg_count: usize,
+  has_path: bool,
+  has_redirect: bool,
+  has_assignment: bool,
+  has_variable: bool,
+}
+
+fn command_shape(command: &str, shellname: &str) -> CommandShape {
   let tokens = tokenize_index(shellname, command);
-  let parts = extract_command_parts(command, &tokens)?;
-  let mut signature = parts.head;
+  let normalized_tokens = tokens
+    .iter()
+    .map(|tok| tok.normalized.clone())
+    .collect::<Vec<_>>();
+  let token_count = tokens.len();
+  let has_path = tokens.iter().any(|tok| tok.normalized == "PATH");
+  let has_redirect = tokens
+    .iter()
+    .any(|tok| matches!(tok.kind, TokenKind::Redirect));
+  let has_assignment = tokens
+    .iter()
+    .any(|tok| matches!(tok.kind, TokenKind::Assignment));
+  let has_variable = tokens
+    .iter()
+    .any(|tok| matches!(tok.kind, TokenKind::Variable));
+
+  let (head, flags, arg_count, signature) =
+    if let Some(parts) = extract_command_parts(command, &tokens) {
+      (
+        parts.head.clone(),
+        parts.flags.clone(),
+        parts.args.len(),
+        signature_from_parts(&parts),
+      )
+    } else {
+      let flags = tokens
+        .iter()
+        .filter(|tok| tok.raw.starts_with('-'))
+        .map(|tok| tok.raw.clone())
+        .collect::<Vec<_>>();
+      let arg_count = if token_count > 0 {
+        token_count.saturating_sub(flags.len()).saturating_sub(1)
+      } else {
+        0
+      };
+      (
+        tokens
+          .first()
+          .map(|tok| tok.raw.clone())
+          .unwrap_or_default(),
+        flags,
+        arg_count,
+        None,
+      )
+    };
+  let flag_count = flags.len();
+
+  CommandShape {
+    head,
+    normalized_tokens,
+    flags,
+    signature,
+    token_count,
+    flag_count,
+    arg_count,
+    has_path,
+    has_redirect,
+    has_assignment,
+    has_variable,
+  }
+}
+
+fn signature_from_parts(parts: &CommandParts) -> Option<String> {
+  if parts.head.is_empty() {
+    return None;
+  }
+  let mut signature = parts.head.clone();
   for arg in parts.args.iter() {
     if let Some(spec) = arg.normalized.strip_prefix("ARG=") {
       signature.push(':');
@@ -515,12 +651,8 @@ pub(crate) fn command_signature(command: &str, shellname: &str) -> Option<String
   Some(signature)
 }
 
-pub(crate) fn normalize_sequence_command(command: &str, shellname: &str) -> String {
-  command_signature(command, shellname).unwrap_or_else(|| command.to_string())
-}
-
-pub(crate) fn add_hash(values: &mut [f64], label: &str) {
-  let hash = stable_hash(label);
-  let idx = BASE_FEATURES + (hash as usize % HASH_FEATURES);
-  values[idx] += 1.0;
+fn command_signature(command: &str, shellname: &str) -> Option<String> {
+  let tokens = tokenize_index(shellname, command);
+  let parts = extract_command_parts(command, &tokens)?;
+  signature_from_parts(&parts)
 }

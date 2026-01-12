@@ -24,6 +24,7 @@ async fn rerank_training_integrates_with_suggest() -> zage::Result<()> {
       expanded_command: cmd.to_string(),
       shellname: "zsh".to_string(),
       working_directory: Some("/tmp".to_string()),
+      workspace: None,
       hostname: Some("host".to_string()),
       username: Some("user".to_string()),
       exit_status: Some(0),

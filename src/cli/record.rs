@@ -6,6 +6,7 @@ use crate::db::{insert_invocation, update_stats_for_invocation};
 use crate::predict::aliases::{expand_alias, load_aliases};
 use crate::server::{self, Request, Response};
 use crate::shell_history::{Invocation, detect_shellname, get_hostname};
+use crate::workspace::detect_workspace_for_cwd;
 
 pub async fn run(
   backend: BackendRef<'_>,
@@ -42,12 +43,15 @@ pub async fn run(
         .map(|v| v.to_string_lossy().into_owned())
         .unwrap_or_else(|| "unknown".to_string());
       let session_id = session_id.unwrap_or_else(|| std::process::id() as i64);
+      let workspace =
+        detect_workspace_for_cwd(&working_directory).map_err(|err| eyre!(err.to_string()))?;
 
       let invocation = Invocation {
         command: command.clone(),
         expanded_command: expanded_command.clone(),
         shellname: detect_shellname(),
         working_directory: Some(working_directory.clone()),
+        workspace,
         hostname: Some(hostname.clone()),
         username: Some(username.clone()),
         exit_status: Some(exit_status),

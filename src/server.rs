@@ -29,6 +29,7 @@ use crate::sequence::{SequenceConfig, analyze_sequences, analyze_token_sequences
 use crate::shell_history::{
   Invocation, Shell, detect_shellname, parse_bash_history, parse_zsh_history,
 };
+use crate::workspace::detect_workspace_for_cwd;
 use crate::{Result, ZageError};
 
 const DEFAULT_TIMEOUT_MS: u64 = 200;
@@ -83,6 +84,7 @@ pub enum Request {
   Index {
     max_commands: Option<usize>,
     with_sequences: bool,
+    with_embeddings: bool,
   },
   AnalyzeSequences {
     min_support: usize,
@@ -655,8 +657,9 @@ async fn handle_request(
     Request::Index {
       max_commands,
       with_sequences,
+      with_embeddings,
     } => match pool.get().await {
-      Ok(conn) => match handle_index(&conn, max_commands, with_sequences).await {
+      Ok(conn) => match handle_index(&conn, max_commands, with_sequences, with_embeddings).await {
         Ok(lines) => Response::Text { lines },
         Err(err) => Response::Error {
           message: err.to_string(),
@@ -717,11 +720,20 @@ async fn handle_request(
       } else {
         expanded_command
       };
+      let workspace = match detect_workspace_for_cwd(&working_directory) {
+        Ok(value) => value,
+        Err(err) => {
+          return Response::Error {
+            message: err.to_string(),
+          };
+        }
+      };
       let invocation = Invocation {
         command,
         expanded_command,
         shellname: detect_shellname(),
         working_directory: Some(working_directory),
+        workspace,
         hostname: Some(crate::shell_history::get_hostname()),
         username: Some(
           uzers::get_current_username()
@@ -846,6 +858,7 @@ async fn handle_index(
   conn: &Connection,
   max_commands: Option<usize>,
   with_sequences: bool,
+  with_embeddings: bool,
 ) -> Result<Vec<String>> {
   let report = rebuild_stats(conn, max_commands).await?;
   let mut lines = vec![format!(
@@ -864,6 +877,17 @@ async fn handle_index(
       "Token sequence stats: sequences={}, bigrams={}, trigrams={}",
       token_report.sequences, token_report.bigrams, token_report.trigrams
     ));
+  }
+
+  if with_embeddings {
+    let app_config = crate::config::AppConfig::load()?;
+    let Some(embedding) = app_config.embedding.as_ref() else {
+      return Err(ZageError::ConfigError(
+        "embedding config missing; add an `[embedding]` section to your zage config".to_string(),
+      ));
+    };
+    let count = crate::embeddings::index_command_embeddings(conn, embedding, max_commands).await?;
+    lines.push(format!("Command embeddings: embedded={count}"));
   }
 
   Ok(lines)

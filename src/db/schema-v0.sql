@@ -4,6 +4,7 @@ CREATE TABLE IF NOT EXISTS shell_history (
   expanded_command TEXT NOT NULL,
   shellname TEXT NOT NULL,
   working_directory TEXT,
+  workspace_json TEXT,
   hostname TEXT,
   username TEXT,
   exit_status INTEGER,

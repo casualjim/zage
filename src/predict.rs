@@ -39,8 +39,7 @@ use phase_support::{
   load_phase_for_heads, phase_match_boost,
 };
 use ranking::{
-  DEFAULT_RECENCY_HALF_LIFE_SECONDS, load_normalized_tokens, low_confidence, recency_score,
-  token_similarity,
+  DEFAULT_RECENCY_HALF_LIFE_SECONDS, load_normalized_tokens, recency_score, token_similarity,
 };
 use runtime::SuggestRuntime;
 use sql::query_prepared;
@@ -49,9 +48,8 @@ use templates::{
 };
 
 const GLOBAL_CANDIDATE_LIMIT: usize = 50;
-const GLOBAL_CANDIDATE_LIMIT_FALLBACK: usize = 200;
 const RECENT_CANDIDATE_LIMIT: usize = 200;
-const RECENT_CANDIDATE_LIMIT_FALLBACK: usize = 500;
+const EMBEDDING_CANDIDATE_LIMIT: usize = 150;
 const FULL_LINE_POOL_LIMIT: usize = 50;
 const CONTEXT_REPO_WEIGHT: f64 = 1.4;
 const CONTEXT_CWD_WEIGHT: f64 = 1.1;
@@ -105,9 +103,83 @@ pub(crate) async fn suggest_with_runtime(
   }
 
   let aliases = &runtime.aliases;
+  let Some(context) =
+    build_pipeline_context(conn, &config, override_prev.as_ref(), aliases).await?
+  else {
+    return Ok(Vec::new());
+  };
+
+  let collected = collect_candidates(conn, &config, &context, aliases).await?;
+  let feature_args = FeatureMatrixArgs {
+    conn,
+    context: &context,
+    candidates: &collected.candidates,
+    prefix_norm: &prefix_norm,
+    weights: &runtime.weights,
+    now: runtime.now,
+    recency_half_life: runtime.recency_half_life,
+    session_id: config.session_id,
+  };
+  let feature_context = build_feature_matrix(&feature_args);
+  let mut scored = model_score(&feature_context).await?;
+
+  let rerank_config = RerankConfig::load()?;
+  let shellname = detect_shellname();
+  let rerank_context = rerank::runtime_context(
+    &context.repo_root,
+    &context.recent_heads,
+    context.session_tokens.clone(),
+    context
+      .session_phase
+      .as_ref()
+      .map(|phase| phase.phase.as_str()),
+    &shellname,
+    config.cwd.as_deref(),
+    config.hostname.as_deref(),
+    config.username.as_deref(),
+    config.session_id,
+    context.last_exit_status,
+    runtime.now,
+  );
+  let _ = rerank::rerank_suggestions(
+    &mut scored,
+    &collected.candidates,
+    &rerank_context,
+    &rerank_config,
+  );
+
+  Ok(final_filter(
+    scored,
+    &config,
+    &runtime.weights,
+    context.last_command.as_ref(),
+  ))
+}
+
+struct PipelineContext {
+  sequence_commands: Vec<String>,
+  recent_heads: Vec<String>,
+  session_tokens: Vec<String>,
+  last_command: Option<String>,
+  last_exit_status: Option<i64>,
+  repo_root: String,
+  phase_config: Option<PhaseConfig>,
+  session_phase: Option<PhaseSignal>,
+}
+
+struct CollectedCandidates {
+  candidates: HashMap<String, Candidate>,
+}
+
+async fn build_pipeline_context(
+  conn: &Connection,
+  config: &SuggestConfig,
+  override_prev: Option<&(String, Option<i64>)>,
+  aliases: &HashMap<String, String>,
+) -> Result<Option<PipelineContext>> {
   let recent = get_recent_invocations(conn, config.recent_limit).await?;
   if recent.is_empty() {
-    return Ok(Vec::new());
+    return Ok(None);
   }
 
   let recent_commands: Vec<String> = recent
@@ -115,7 +187,7 @@ pub(crate) async fn suggest_with_runtime(
     .map(|inv| expanded_command_for(inv, aliases))
     .collect();
   let mut sequence_commands = recent_commands.clone();
-  if let Some((cmd, _)) = override_prev.as_ref() {
+  if let Some((cmd, _)) = override_prev {
     if let Some(last) = sequence_commands.last_mut() {
       *last = cmd.clone();
     } else {
@@ -132,11 +204,9 @@ pub(crate) async fn suggest_with_runtime(
     .flat_map(|cmd| normalized_tokens(cmd))
     .collect::<Vec<_>>();
   let last_command = override_prev
-    .as_ref()
     .map(|(cmd, _)| cmd.clone())
     .or_else(|| recent_commands.last().cloned());
   let last_exit_status = override_prev
-    .as_ref()
     .map(|(_, exit)| *exit)
     .unwrap_or_else(|| recent.last().and_then(|inv| inv.exit_status));
   let repo_root = config
@@ -144,15 +214,6 @@ pub(crate) async fn suggest_with_runtime(
     .as_deref()
     .and_then(find_repo_root)
     .unwrap_or_default();
-  let mut candidates: HashMap<String, Candidate> = HashMap::new();
-
-  if let Some(last) = &last_command {
-    add_transition_candidates(conn, last, last_exit_status, &repo_root, &mut candidates).await?;
-  }
-
-  if let Some(session_id) = config.session_id {
-    add_session_candidates(conn, session_id, &mut candidates).await?;
-  }
 
   let recent_head_set: HashSet<String> = recent_heads.iter().cloned().collect();
   let phase_for_recent = load_phase_for_heads(conn, &recent_head_set).await?;
@@ -166,35 +227,99 @@ pub(crate) async fn suggest_with_runtime(
     .as_ref()
     .and_then(|config| detect_session_phase_from_commands(&recent_commands, config))
     .or_else(|| detect_session_phase(&recent_heads, &phase_for_recent));
-  add_phase_candidates(conn, session_phase.as_ref(), &repo_root, &mut candidates).await?;
 
-  add_context_candidates(conn, &config, &mut candidates).await?;
+  Ok(Some(PipelineContext {
+    sequence_commands,
+    recent_heads,
+    session_tokens,
+    last_command,
+    last_exit_status,
+    repo_root,
+    phase_config,
+    session_phase,
+  }))
+}
 
-  if !repo_root.is_empty() {
-    add_repo_candidates(conn, &repo_root, &mut candidates).await?;
+async fn collect_candidates(
+  conn: &Connection,
+  config: &SuggestConfig,
+  context: &PipelineContext,
+  aliases: &HashMap<String, String>,
+) -> Result<CollectedCandidates> {
+  let mut candidates: HashMap<String, Candidate> = HashMap::new();
+
+  if let Some(last) = &context.last_command {
+    add_transition_candidates(
+      conn,
+      last,
+      context.last_exit_status,
+      &context.repo_root,
+      &mut candidates,
+    )
+    .await?;
   }
 
-  if !recent_heads.is_empty() {
-    add_head_candidates(conn, &recent_heads, &repo_root, &mut candidates).await?;
+  if let Some(session_id) = config.session_id {
+    add_session_candidates(conn, session_id, &mut candidates).await?;
+  }
+
+  if let Some(query) = crate::embeddings::mean_embedding_for_commands(
+    conn,
+    &context.sequence_commands,
+    config.recent_limit,
+  )
+  .await?
+  {
+    let similar =
+      crate::embeddings::search_similar_commands(conn, &query, EMBEDDING_CANDIDATE_LIMIT).await?;
+    for cmd in similar {
+      let _ = candidates
+        .entry(cmd.clone())
+        .or_insert_with(|| Candidate::new(&cmd));
+    }
+  }
+
+  add_phase_candidates(
+    conn,
+    context.session_phase.as_ref(),
+    &context.repo_root,
+    &mut candidates,
+  )
+  .await?;
+
+  add_context_candidates(conn, config, &mut candidates).await?;
+
+  if !context.repo_root.is_empty() {
+    add_repo_candidates(conn, &context.repo_root, &mut candidates).await?;
+  }
+
+  if !context.recent_heads.is_empty() {
+    add_head_candidates(
+      conn,
+      &context.recent_heads,
+      &context.repo_root,
+      &mut candidates,
+    )
+    .await?;
   }
 
   if config.use_sequences {
-    add_sequence_candidates(conn, &sequence_commands, &mut candidates).await?;
+    add_sequence_candidates(conn, &context.sequence_commands, &mut candidates).await?;
   }
 
   if !candidates.is_empty() {
-    add_template_candidates(conn, &repo_root, &mut candidates).await?;
+    add_template_candidates(conn, &context.repo_root, &mut candidates).await?;
   }
 
   if candidates.is_empty() {
     add_global_candidates(conn, &mut candidates, GLOBAL_CANDIDATE_LIMIT).await?;
-    add_template_candidates(conn, &repo_root, &mut candidates).await?;
+    add_template_candidates(conn, &context.repo_root, &mut candidates).await?;
   }
 
   if candidates.len() < 25 {
     add_recent_candidates(conn, &mut candidates, RECENT_CANDIDATE_LIMIT).await?;
     add_global_candidates(conn, &mut candidates, GLOBAL_CANDIDATE_LIMIT).await?;
-    add_template_candidates(conn, &repo_root, &mut candidates).await?;
+    add_template_candidates(conn, &context.repo_root, &mut candidates).await?;
   }
 
   let session_stats = if let Some(session_id) = config.session_id {
@@ -202,83 +327,82 @@ pub(crate) async fn suggest_with_runtime(
   } else {
     HashMap::new()
   };
-  let apply_session_stats = |candidates: &mut HashMap<String, Candidate>| {
-    for (cmd, (freq, last_seen)) in &session_stats {
-      let entry = candidates
-        .entry(cmd.clone())
-        .or_insert_with(|| Candidate::new(cmd));
-      entry.session_freq = entry.session_freq.max(*freq);
-      entry.session_last_seen = entry.session_last_seen.max(*last_seen);
-      entry.last_seen = entry.last_seen.max(*last_seen);
-    }
-  };
 
   if !session_stats.is_empty() {
-    apply_session_stats(&mut candidates);
+    apply_session_stats(&session_stats, &mut candidates);
   }
 
   if !candidates.is_empty() {
-    hydrate_candidate_stats(conn, &repo_root, &mut candidates).await?;
+    hydrate_candidate_stats(conn, &context.repo_root, &mut candidates).await?;
   }
 
   if !aliases.is_empty() {
     add_alias_candidates(aliases, &mut candidates);
     if !session_stats.is_empty() {
-      apply_session_stats(&mut candidates);
+      apply_session_stats(&session_stats, &mut candidates);
     }
   }
 
-  let mut scored = score_candidates(&ScoreContext {
-    conn,
-    candidates: &candidates,
-    prefix_norm: &prefix_norm,
-    session_phase: session_phase.as_ref(),
-    session_id: config.session_id,
-    recent_heads: &recent_heads,
-    weights: &runtime.weights,
-    now: runtime.now,
-    recency_half_life: runtime.recency_half_life,
-    phase_config: phase_config.as_ref(),
-    repo_root: &repo_root,
-  })
-  .await?;
+  Ok(CollectedCandidates { candidates })
+}
 
-  let rerank_config = RerankConfig::load()?;
-  if low_confidence(&scored, &rerank_config) {
-    let before = candidates.len();
-    expand_low_confidence_candidates(
-      conn,
-      &repo_root,
-      &recent_heads,
-      &recent_commands,
-      config.use_sequences,
-      &mut candidates,
-    )
-    .await?;
-    if candidates.len() > before {
-      scored = score_candidates(&ScoreContext {
-        conn,
-        candidates: &candidates,
-        prefix_norm: &prefix_norm,
-        session_phase: session_phase.as_ref(),
-        session_id: config.session_id,
-        recent_heads: &recent_heads,
-        weights: &runtime.weights,
-        now: runtime.now,
-        recency_half_life: runtime.recency_half_life,
-        phase_config: phase_config.as_ref(),
-        repo_root: &repo_root,
-      })
-      .await?;
-    }
+fn apply_session_stats(
+  session_stats: &HashMap<String, (i64, i64)>,
+  candidates: &mut HashMap<String, Candidate>,
+) {
+  for (cmd, (freq, last_seen)) in session_stats {
+    let entry = candidates
+      .entry(cmd.clone())
+      .or_insert_with(|| Candidate::new(cmd));
+    entry.session_freq = entry.session_freq.max(*freq);
+    entry.session_last_seen = entry.session_last_seen.max(*last_seen);
+    entry.last_seen = entry.last_seen.max(*last_seen);
   }
+}
 
-  let transition_only = runtime.weights.transition > 0.0
-    && runtime.weights.recency.abs() <= f64::EPSILON
-    && runtime.weights.frequency.abs() <= f64::EPSILON
-    && runtime.weights.context.abs() <= f64::EPSILON
-    && runtime.weights.sequence.abs() <= f64::EPSILON
-    && runtime.weights.similarity.abs() <= f64::EPSILON;
+struct FeatureMatrixArgs<'a> {
+  conn: &'a Connection,
+  context: &'a PipelineContext,
+  candidates: &'a HashMap<String, Candidate>,
+  prefix_norm: &'a [String],
+  weights: &'a RankingWeights,
+  now: i64,
+  recency_half_life: f64,
+  session_id: Option<i64>,
+}
+
+fn build_feature_matrix<'a>(args: &'a FeatureMatrixArgs<'a>) -> ScoreContext<'a> {
+  ScoreContext {
+    conn: args.conn,
+    candidates: args.candidates,
+    prefix_norm: args.prefix_norm,
+    session_phase: args.context.session_phase.as_ref(),
+    session_id: args.session_id,
+    recent_heads: &args.context.recent_heads,
+    weights: args.weights,
+    now: args.now,
+    recency_half_life: args.recency_half_life,
+    phase_config: args.context.phase_config.as_ref(),
+    repo_root: &args.context.repo_root,
+  }
+}
+
+async fn model_score(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>> {
+  score_candidates(context).await
+}
+
+fn final_filter(
+  mut scored: Vec<Suggestion>,
+  config: &SuggestConfig,
+  weights: &RankingWeights,
+  last_command: Option<&String>,
+) -> Vec<Suggestion> {
+  let transition_only = weights.transition > 0.0
+    && weights.recency.abs() <= f64::EPSILON
+    && weights.frequency.abs() <= f64::EPSILON
+    && weights.context.abs() <= f64::EPSILON
+    && weights.sequence.abs() <= f64::EPSILON
+    && weights.similarity.abs() <= f64::EPSILON;
   if transition_only && last_command.is_some() {
     let has_transition = scored.iter().any(|s| s.breakdown.transition > 0.0);
     if has_transition {
@@ -286,24 +410,8 @@ pub(crate) async fn suggest_with_runtime(
     }
   }
 
-  let shellname = detect_shellname();
-  let context = rerank::runtime_context(
-    &repo_root,
-    &recent_heads,
-    session_tokens,
-    session_phase.as_ref().map(|phase| phase.phase.as_str()),
-    &shellname,
-    config.cwd.as_deref(),
-    config.hostname.as_deref(),
-    config.username.as_deref(),
-    config.session_id,
-    last_exit_status,
-    runtime.now,
-  );
-  let _ = rerank::rerank_suggestions(&mut scored, &candidates, &context, &rerank_config);
-
   scored.truncate(config.max_results);
-  Ok(scored)
+  scored
 }
 
 struct ScoreContext<'a> {
@@ -482,29 +590,6 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
     a.command.cmp(&b.command)
   });
   Ok(scored)
-}
-
-async fn expand_low_confidence_candidates(
-  conn: &Connection,
-  repo_root: &str,
-  recent_heads: &[String],
-  recent_commands: &[String],
-  use_sequences: bool,
-  candidates: &mut HashMap<String, Candidate>,
-) -> Result<()> {
-  add_recent_candidates(conn, candidates, RECENT_CANDIDATE_LIMIT_FALLBACK).await?;
-  add_global_candidates(conn, candidates, GLOBAL_CANDIDATE_LIMIT_FALLBACK).await?;
-  if !repo_root.is_empty() {
-    add_repo_candidates(conn, repo_root, candidates).await?;
-  }
-  if !recent_heads.is_empty() {
-    add_head_candidates(conn, recent_heads, repo_root, candidates).await?;
-  }
-  if use_sequences {
-    add_sequence_candidates(conn, recent_commands, candidates).await?;
-  }
-  add_template_candidates(conn, repo_root, candidates).await?;
-  Ok(())
 }
 
 async fn suggest_completions(

@@ -1,6 +1,6 @@
 pub(crate) const MODEL_NAME: &str = "rerank";
 pub(crate) const HASH_FEATURES: usize = 64;
-pub(crate) const BASE_FEATURES: usize = 18;
+pub(crate) const BASE_FEATURES: usize = 26;
 pub(crate) const FEATURE_COUNT: usize = BASE_FEATURES + HASH_FEATURES;
 
 mod calibration;

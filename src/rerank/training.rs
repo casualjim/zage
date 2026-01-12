@@ -261,6 +261,11 @@ fn update_training_stats(
     && let Some(repo_root) = find_repo_root(cwd)
   {
     update_repo_stat(&mut stats.repo_stats, &repo_root, command, ts);
+    stats
+      .repo_commands
+      .entry(repo_root)
+      .or_default()
+      .push(command.to_string());
   }
 
   let session_key = (invocation.session_id, command.to_string());
@@ -368,6 +373,10 @@ fn sample_negatives(
   if let Some(session_list) = stats.session_commands.get(&session_id) {
     candidates.extend(session_list.iter().cloned());
   }
+  if let Some(repo_list) = stats.repo_commands.get(&context.repo_root) {
+    candidates.extend(repo_list.iter().cloned());
+  }
+  candidates.extend(context.recent_commands.iter().cloned());
 
   let desired_pool = limit.saturating_mul(2);
   if candidates.len() < desired_pool {
@@ -612,14 +621,16 @@ async fn load_invocations(conn: &Connection, limit: Option<usize>) -> Result<Vec
     conn
       .query(
         "WITH recent AS (
-           SELECT id, command, expanded_command, shellname, working_directory, hostname, username,
-                  exit_status, start_unix_timestamp, end_unix_timestamp, session_id
+           SELECT id, command, expanded_command, shellname, working_directory, workspace_json,
+                  hostname, username, exit_status, start_unix_timestamp, end_unix_timestamp,
+                  session_id
            FROM shell_history
            ORDER BY COALESCE(start_unix_timestamp, 0) DESC, id DESC
            LIMIT ?
          )
-         SELECT id, command, expanded_command, shellname, working_directory, hostname, username,
-                exit_status, start_unix_timestamp, end_unix_timestamp, session_id
+         SELECT id, command, expanded_command, shellname, working_directory, workspace_json,
+                hostname, username, exit_status, start_unix_timestamp, end_unix_timestamp,
+                session_id
          FROM recent
          ORDER BY COALESCE(start_unix_timestamp, 0) ASC, id ASC",
         libsql::params![limit as i64],
@@ -628,8 +639,9 @@ async fn load_invocations(conn: &Connection, limit: Option<usize>) -> Result<Vec
   } else {
     conn
       .query(
-        "SELECT id, command, expanded_command, shellname, working_directory, hostname, username,
-                exit_status, start_unix_timestamp, end_unix_timestamp, session_id
+        "SELECT id, command, expanded_command, shellname, working_directory, workspace_json,
+                hostname, username, exit_status, start_unix_timestamp, end_unix_timestamp,
+                session_id
          FROM shell_history
          ORDER BY COALESCE(start_unix_timestamp, 0) ASC, id ASC",
         (),
@@ -639,17 +651,23 @@ async fn load_invocations(conn: &Connection, limit: Option<usize>) -> Result<Vec
 
   let mut invocations = Vec::new();
   while let Some(row) = rows.next().await? {
+    let workspace_json: Option<String> = row.get(5)?;
+    let workspace = match workspace_json {
+      Some(raw) => Some(serde_json::from_str(&raw)?),
+      None => None,
+    };
     invocations.push(Invocation {
       command: row.get(1)?,
       expanded_command: row.get(2)?,
       shellname: row.get(3)?,
       working_directory: row.get(4)?,
-      hostname: row.get(5)?,
-      username: row.get(6)?,
-      exit_status: row.get(7)?,
-      start_unix_timestamp: row.get(8)?,
-      end_unix_timestamp: row.get(9)?,
-      session_id: row.get::<Option<i64>>(10)?.unwrap_or(0),
+      workspace,
+      hostname: row.get(6)?,
+      username: row.get(7)?,
+      exit_status: row.get(8)?,
+      start_unix_timestamp: row.get(9)?,
+      end_unix_timestamp: row.get(10)?,
+      session_id: row.get::<Option<i64>>(11)?.unwrap_or(0),
     });
   }
 

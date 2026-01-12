@@ -38,6 +38,14 @@ pub enum ZageError {
   #[diagnostic(code(zage::serialization_error))]
   SerializationError(#[from] serde_json::Error),
 
+  #[error("YAML error: {0}")]
+  #[diagnostic(code(zage::yaml_error))]
+  YamlError(#[from] serde_yaml::Error),
+
+  #[error("TOML edit error: {0}")]
+  #[diagnostic(code(zage::toml_edit_error))]
+  TomlEditError(#[from] toml_edit::TomlError),
+
   #[error("Generic error: {0}")]
   #[diagnostic(code(zage::generic_error))]
   GenericError(Box<dyn StdError + Send + Sync>),

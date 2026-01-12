@@ -6,6 +6,7 @@ pub struct Invocation {
   pub expanded_command: String,
   pub shellname: String,
   pub working_directory: Option<String>,
+  pub workspace: Option<crate::workspace::WorkspaceInfo>,
   pub hostname: Option<String>,
   pub username: Option<String>,
   pub exit_status: Option<i64>,

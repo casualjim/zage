@@ -68,6 +68,10 @@ pub enum Commands {
     /// Also recompute sequence statistics
     #[arg(long)]
     with_sequences: bool,
+
+    /// Also generate embeddings for commands (requires `[embedding]` config)
+    #[arg(long)]
+    with_embeddings: bool,
     /// Use the embedded SQLite database
     #[arg(long)]
     embedded_db: bool,
@@ -352,10 +356,11 @@ pub async fn run(cli: Cli) -> Result<()> {
     Some(Commands::Index {
       max_commands,
       with_sequences,
+      with_embeddings,
       embedded_db: _,
     }) => {
       let backend = require_backend(backend.as_ref())?;
-      index::run(backend, max_commands, with_sequences).await?;
+      index::run(backend, max_commands, with_sequences, with_embeddings).await?;
     }
     Some(Commands::Record {
       command,
