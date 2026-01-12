@@ -263,32 +263,33 @@ async fn collect_candidates(
     add_session_candidates(conn, session_id, &mut candidates).await?;
   }
 
-  let mut query = None;
-  if let Ok(Some((model, train_config))) = crate::neural::load_biencoder_wgpu() {
-    let workspace_root = (!context.repo_root.is_empty()).then_some(context.repo_root.as_str());
-    query = crate::neural::embed_context_with_model(
-      &model,
-      &train_config,
-      crate::neural::EmbedContextInput {
-        workspace_root,
-        cwd: config.cwd.as_deref(),
-        hostname: config.hostname.as_deref(),
-        username: config.username.as_deref(),
-        exit_status: context.last_exit_status,
-        session_id: config.session_id,
-        recent_commands: &context.sequence_commands,
-      },
-    )
-    .ok();
-  }
+  let mut query = crate::embeddings::mean_embedding_for_commands(
+    conn,
+    &context.sequence_commands,
+    config.recent_limit,
+  )
+  .await?;
 
   if query.is_none() {
-    query = crate::embeddings::mean_embedding_for_commands(
-      conn,
-      &context.sequence_commands,
-      config.recent_limit,
-    )
-    .await?;
+    let embedding_dim = crate::embeddings::command_embedding_dim(conn)
+      .await?
+      .unwrap_or(0);
+    if embedding_dim > 0 {
+      let workspace_root = (!context.repo_root.is_empty()).then_some(context.repo_root.as_str());
+      query = Some(crate::embeddings::embed_context_hash(
+        crate::embeddings::EmbedContextInput {
+          workspace_root,
+          cwd: config.cwd.as_deref(),
+          hostname: config.hostname.as_deref(),
+          username: config.username.as_deref(),
+          exit_status: context.last_exit_status,
+          session_id: config.session_id,
+          recent_commands: &context.sequence_commands,
+          window: config.recent_limit,
+        },
+        embedding_dim,
+      ));
+    }
   }
 
   if let Some(query) = query {

@@ -33,12 +33,13 @@ use crate::workspace::detect_workspace_for_cwd;
 use crate::{Result, ZageError};
 
 const DEFAULT_TIMEOUT_MS: u64 = 1_000;
-const LONG_TIMEOUT_MS: u64 = 300_000;
+// We use the server for long-running operations (import/index/train) over a local UDS.
+// Default to a very large timeout to avoid client disconnects during training.
+const LONG_TIMEOUT_MS: u64 = 86_400_000;
 
 fn response_timeout_ms(request: &Request) -> u64 {
   match request {
     Request::Train { timeout_ms, .. } => timeout_ms.unwrap_or(LONG_TIMEOUT_MS),
-    Request::NeuralTrain { timeout_ms, .. } => timeout_ms.unwrap_or(LONG_TIMEOUT_MS),
     Request::Suggest { timeout_ms, .. } => timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
     Request::Yank { .. } => LONG_TIMEOUT_MS,
     #[cfg(feature = "pprof")]
@@ -104,19 +105,6 @@ pub enum Request {
     negatives: usize,
     min_history: usize,
     max_samples: usize,
-    timeout_ms: Option<u64>,
-  },
-  NeuralTrain {
-    epochs: usize,
-    batch_size: usize,
-    learning_rate: f64,
-    window: usize,
-    vocab_size: usize,
-    max_seq_len: usize,
-    embed_dim: usize,
-    projection_dim: usize,
-    temperature: f64,
-    seed: u64,
     timeout_ms: Option<u64>,
   },
   #[cfg(feature = "pprof")]
@@ -551,7 +539,6 @@ fn request_kind(request: &Request) -> &'static str {
     Request::Yank { .. } => "yank",
     Request::Ping => "ping",
     Request::Train { .. } => "train",
-    Request::NeuralTrain { .. } => "neural train",
     #[cfg(feature = "pprof")]
     Request::Pprof { .. } => "pprof",
     Request::ModelStatus => "model status",
@@ -596,48 +583,6 @@ async fn handle_request(
               report.validation_accuracy,
               report.validation_top1,
               report.model_path.display()
-            )],
-          },
-          Err(err) => Response::Error {
-            message: err.to_string(),
-          },
-        }
-      }
-      Err(err) => Response::Error {
-        message: err.to_string(),
-      },
-    },
-    Request::NeuralTrain {
-      epochs,
-      batch_size,
-      learning_rate,
-      window,
-      vocab_size,
-      max_seq_len,
-      embed_dim,
-      projection_dim,
-      temperature,
-      seed,
-      timeout_ms: _,
-    } => match pool.get().await {
-      Ok(conn) => {
-        let cfg = crate::neural::NeuralTrainConfig {
-          epochs,
-          batch_size,
-          learning_rate,
-          window,
-          vocab_size,
-          max_seq_len,
-          embed_dim,
-          projection_dim,
-          temperature,
-          seed,
-        };
-        match crate::neural::train_biencoder_wgpu(&conn, cfg).await {
-          Ok(path) => Response::Text {
-            lines: vec![format!(
-              "Trained neural bi-encoder: model={}",
-              path.display()
             )],
           },
           Err(err) => Response::Error {

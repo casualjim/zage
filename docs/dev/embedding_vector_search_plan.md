@@ -76,6 +76,8 @@ We previously agreed the “real model” goal is:
   `cmd --foo -b x` and `cmd -b x --foo` are treated equivalently for flag features.
 - Args may remain order-dependent (many tools treat positional args as semantic).
 
+Note: this document predates `docs/online_next_command_prediction.md` and describes a heavier neural approach that we are no longer pursuing.
+
 The intended neural model shape:
 
 - Sequence-contrastive **bi-encoder**:
@@ -94,7 +96,7 @@ Integration points:
 
 - Store learned embeddings in DB (sqlite-vec).
 - Use sqlite-vec KNN queries for retrieval and/or ranking.
-- Keep GBRT as a fallback path during A/B, but don’t let it become the primary driver long-term if neural works.
+- Keep GBRT as a fallback path during A/B, but don’t let it become the primary driver long-term if an online learner works.
 
 ## Operational Rules
 

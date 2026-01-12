@@ -5,6 +5,20 @@ use crate::{Result, ZageError};
 const META_KEY_COMMAND_EMBEDDING_DIM: &str = "command_embedding_dim";
 const COMMAND_EMBEDDING_INDEX: &str = "command_stats_embedding_idx";
 const DEFAULT_SHELLNAME: &str = "zsh";
+const DEFAULT_EMBEDDING_DIM: usize = 128;
+const MAX_EMBED_TOKENS: usize = 256;
+
+#[derive(Debug, Clone, Copy)]
+pub struct EmbedContextInput<'a> {
+  pub workspace_root: Option<&'a str>,
+  pub cwd: Option<&'a str>,
+  pub hostname: Option<&'a str>,
+  pub username: Option<&'a str>,
+  pub exit_status: Option<i64>,
+  pub session_id: Option<i64>,
+  pub recent_commands: &'a [String],
+  pub window: usize,
+}
 
 pub async fn ensure_command_embeddings_schema(
   conn: &Connection,
@@ -68,13 +82,7 @@ pub async fn index_command_embeddings(
   conn: &Connection,
   max_commands: Option<usize>,
 ) -> Result<usize> {
-  let Some((model, train_config)) = crate::neural::load_biencoder_wgpu()? else {
-    return Err(ZageError::ConfigError(
-      "neural model not found; run `zage model neural-train` first".to_string(),
-    ));
-  };
-
-  let embedding_dim = train_config.projection_dim;
+  let embedding_dim = DEFAULT_EMBEDDING_DIM;
   ensure_command_embeddings_schema(conn, embedding_dim).await?;
 
   let now = unix_now();
@@ -83,21 +91,132 @@ pub async fn index_command_embeddings(
 
   let mut inserted = 0usize;
   for chunk in commands.chunks(512) {
-    let embeddings = crate::neural::embed_commands_batch_with_model(&model, chunk, &train_config)?;
-    for (idx, embedding) in embeddings.into_iter().enumerate() {
-      let (command, _shellname) = &chunk[idx];
-      if embedding.len() != embedding_dim {
-        return Err(ZageError::ConfigError(format!(
-          "neural model returned {} dims, expected {embedding_dim}",
-          embedding.len()
-        )));
-      }
+    for (command, shellname) in chunk {
+      let embedding = embed_command_hash(shellname, command, embedding_dim);
       upsert_command_embedding(conn, command, &embedding, now).await?;
       inserted += 1;
     }
   }
 
   Ok(inserted)
+}
+
+pub fn embed_context_hash(input: EmbedContextInput<'_>, embedding_dim: usize) -> Vec<f32> {
+  let mut out = vec![0.0f32; embedding_dim];
+
+  // Encode context fields with a fixed weighting scheme.
+  // This is intentionally simple and deterministic; online learning will replace this later.
+  add_token(&mut out, "ctx", 0.25);
+
+  if let Some(root) = input.workspace_root.filter(|v| !v.is_empty()) {
+    add_token(&mut out, &format!("ctx:workspace_root={root}"), 4.0);
+  }
+  if let Some(cwd) = input.cwd.filter(|v| !v.is_empty()) {
+    add_token(&mut out, &format!("ctx:cwd={cwd}"), 2.0);
+  }
+  if let Some(exit) = input.exit_status {
+    add_token(&mut out, &format!("ctx:exit={exit}"), 1.5);
+  }
+  if let Some(host) = input.hostname.filter(|v| !v.is_empty()) {
+    add_token(&mut out, &format!("ctx:host={host}"), 0.25);
+  }
+  if let Some(user) = input.username.filter(|v| !v.is_empty()) {
+    add_token(&mut out, &format!("ctx:user={user}"), 0.25);
+  }
+  if let Some(session) = input.session_id {
+    add_token(&mut out, &format!("ctx:session={session}"), 0.10);
+  }
+
+  // Recent command window: add generalized command tokens with a positional prefix.
+  // We bias towards later commands slightly by weighting closer-to-now higher.
+  let mut remaining = MAX_EMBED_TOKENS;
+  let window = input.window.min(input.recent_commands.len());
+  let start = input.recent_commands.len().saturating_sub(window);
+  for (pos, cmd) in input.recent_commands[start..].iter().enumerate() {
+    if remaining == 0 {
+      break;
+    }
+    // pos is 0..window-1; later commands should matter more.
+    let age = (window - 1).saturating_sub(pos) as f32;
+    let w = 1.0 / (1.0 + age * 0.25);
+
+    let tokens = command_tokens(DEFAULT_SHELLNAME, cmd);
+    for tok in tokens.into_iter().take(remaining) {
+      add_token(&mut out, &format!("prev:{tok}"), w);
+      remaining = remaining.saturating_sub(1);
+      if remaining == 0 {
+        break;
+      }
+    }
+  }
+
+  l2_normalize(&mut out);
+  out
+}
+
+fn embed_command_hash(shellname: &str, command: &str, embedding_dim: usize) -> Vec<f32> {
+  let mut out = vec![0.0f32; embedding_dim];
+  for token in command_tokens(shellname, command)
+    .into_iter()
+    .take(MAX_EMBED_TOKENS)
+  {
+    add_token(&mut out, &token, 1.0);
+  }
+  l2_normalize(&mut out);
+  out
+}
+
+fn command_tokens(shellname: &str, command: &str) -> Vec<String> {
+  let tokens = crate::tokenize::tokenize_index(shellname, command);
+  let Some(parts) = crate::tokenize::extract_command_parts(command, &tokens) else {
+    return Vec::new();
+  };
+
+  let mut out = Vec::new();
+  if !parts.head.is_empty() {
+    out.push(format!("head:{}", parts.head));
+  }
+
+  // position-independent flags
+  let mut flags = parts.flags;
+  flags.sort();
+  flags.dedup();
+  for flag in flags {
+    out.push(format!("flag:{flag}"));
+  }
+
+  // bounded normalized args
+  for arg in parts.args.into_iter().take(8) {
+    if !arg.normalized.is_empty() {
+      out.push(format!("arg:{}", arg.normalized));
+    }
+  }
+
+  out
+}
+
+fn add_token(dst: &mut [f32], token: &str, weight: f32) {
+  if dst.is_empty() {
+    return;
+  }
+  let h = crate::hash_util::stable_hash(token);
+  let idx = (h % dst.len() as u64) as usize;
+  let sign = if (h >> 63) & 1 == 1 { -1.0 } else { 1.0 };
+  dst[idx] += sign * weight;
+}
+
+fn l2_normalize(v: &mut [f32]) {
+  let mut sum = 0.0f32;
+  for x in v.iter() {
+    sum += x * x;
+  }
+  if sum <= 0.0 {
+    return;
+  }
+  let inv = sum.sqrt().recip();
+  for x in v.iter_mut() {
+    *x *= inv;
+  }
 }
 
 async fn list_commands_missing_embeddings(
@@ -252,8 +371,7 @@ pub async fn search_similar_commands(
       &format!(
         "SELECT cs.command
          FROM vector_top_k('{COMMAND_EMBEDDING_INDEX}', ?, ?) v
-         JOIN command_stats cs ON cs.rowid = v.id
-         ORDER BY v.distance ASC"
+         JOIN command_stats cs ON cs.rowid = v.rowid"
       ),
       libsql::params![query_blob, limit as i64],
     )
@@ -561,6 +679,45 @@ mod tests {
     let commands = vec!["x".to_string()];
     let mean = mean_embedding_for_commands(&db.conn, &commands, 0).await?;
     assert!(mean.is_none());
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn search_similar_commands_works_without_distance_column() -> Result<()> {
+    let tmp = NamedTempFile::new()?;
+    let db = db::open_db(tmp.path()).await?;
+
+    ensure_command_embeddings_schema(&db.conn, 2).await?;
+
+    db.conn
+      .execute(
+        "INSERT INTO command_stats (command, freq, last_seen, embedding) VALUES (?, ?, ?, ?)",
+        libsql::params![
+          "a".to_string(),
+          1i64,
+          10i64,
+          Some(encode_f32_blob(&[1.0, 1.0]))
+        ],
+      )
+      .await?;
+    db.conn
+      .execute(
+        "INSERT INTO command_stats (command, freq, last_seen, embedding) VALUES (?, ?, ?, ?)",
+        libsql::params![
+          "b".to_string(),
+          1i64,
+          20i64,
+          Some(encode_f32_blob(&[-1.0, -1.0]))
+        ],
+      )
+      .await?;
+
+    let out = search_similar_commands(&db.conn, &[1.0, 1.0], 2).await?;
+    assert_eq!(out.len(), 2);
+    assert_eq!(out[0], "a".to_string());
+
+    let out = search_similar_commands(&db.conn, &[1.0, 1.0], 1).await?;
+    assert_eq!(out, vec!["a".to_string()]);
     Ok(())
   }
 }
