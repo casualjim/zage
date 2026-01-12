@@ -14,6 +14,7 @@ use crate::shell_history::Shell;
 
 mod import;
 mod index;
+mod neural;
 #[cfg(feature = "pprof")]
 mod pprof;
 mod record;
@@ -69,7 +70,7 @@ pub enum Commands {
     #[arg(long)]
     with_sequences: bool,
 
-    /// Also generate embeddings for commands (requires `[embedding]` config)
+    /// Also generate embeddings for commands (requires trained neural model)
     #[arg(long)]
     with_embeddings: bool,
     /// Use the embedded SQLite database
@@ -270,6 +271,46 @@ pub enum ModelAction {
     #[arg(long)]
     embedded_db: bool,
   },
+
+  /// Train the neural bi-encoder (Burn + WGPU)
+  NeuralTrain {
+    /// Number of training epochs
+    #[arg(long, default_value = "5")]
+    epochs: usize,
+    /// Batch size (in-batch negatives)
+    #[arg(long, default_value = "256")]
+    batch_size: usize,
+    /// Learning rate
+    #[arg(long, default_value = "0.001")]
+    learning_rate: f64,
+    /// Context window size (number of previous commands)
+    #[arg(long, default_value = "10")]
+    window: usize,
+    /// Token hash vocab size
+    #[arg(long, default_value = "65536")]
+    vocab_size: usize,
+    /// Max token sequence length (pads/truncates)
+    #[arg(long, default_value = "256")]
+    max_seq_len: usize,
+    /// Embedding dimension
+    #[arg(long, default_value = "128")]
+    embed_dim: usize,
+    /// Projection dimension (final embedding size)
+    #[arg(long, default_value = "128")]
+    projection_dim: usize,
+    /// Temperature for InfoNCE logits
+    #[arg(long, default_value = "0.07")]
+    temperature: f64,
+    /// RNG seed
+    #[arg(long, default_value = "42")]
+    seed: u64,
+    /// Request timeout for training when using the server (e.g. 10m, 30s)
+    #[arg(long)]
+    timeout: Option<HumanDuration>,
+    /// Use the embedded SQLite database
+    #[arg(long)]
+    embedded_db: bool,
+  },
 }
 
 #[derive(Clone)]
@@ -464,6 +505,39 @@ pub async fn run(cli: Cli) -> Result<()> {
         let backend = require_backend(backend.as_ref())?;
         train::model_reset(backend).await?;
       }
+      ModelAction::NeuralTrain {
+        epochs,
+        batch_size,
+        learning_rate,
+        window,
+        vocab_size,
+        max_seq_len,
+        embed_dim,
+        projection_dim,
+        temperature,
+        seed,
+        timeout,
+        embedded_db: _,
+      } => {
+        let backend = require_backend(backend.as_ref())?;
+        neural::train(
+          backend,
+          crate::neural::NeuralTrainConfig {
+            epochs,
+            batch_size,
+            learning_rate,
+            window,
+            vocab_size,
+            max_seq_len,
+            embed_dim,
+            projection_dim,
+            temperature,
+            seed,
+          },
+          timeout,
+        )
+        .await?;
+      }
     },
     Some(Commands::Server {}) => {
       server::run(&db_config).await?;
@@ -528,7 +602,8 @@ fn command_embedded_override(command: &Commands) -> bool {
     Commands::Model { action } => match action {
       ModelAction::Train { embedded_db, .. }
       | ModelAction::Status { embedded_db, .. }
-      | ModelAction::Reset { embedded_db, .. } => *embedded_db,
+      | ModelAction::Reset { embedded_db, .. }
+      | ModelAction::NeuralTrain { embedded_db, .. } => *embedded_db,
     },
     #[cfg(feature = "pprof")]
     Commands::Pprof { embedded_db, .. } => *embedded_db,

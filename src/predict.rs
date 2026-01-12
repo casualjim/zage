@@ -54,8 +54,8 @@ const FULL_LINE_POOL_LIMIT: usize = 50;
 const CONTEXT_REPO_WEIGHT: f64 = 1.4;
 const CONTEXT_CWD_WEIGHT: f64 = 1.1;
 const CONTEXT_EXIT_WEIGHT: f64 = 0.9;
-const CONTEXT_HOST_WEIGHT: f64 = 0.3;
-const CONTEXT_USER_WEIGHT: f64 = 0.2;
+const CONTEXT_HOST_WEIGHT: f64 = 0.2;
+const CONTEXT_USER_WEIGHT: f64 = 0.3;
 const CONTEXT_TIME_WEIGHT: f64 = 0.05;
 const CONTEXT_SESSION_WEIGHT: f64 = 0.03;
 const CONTEXT_SESSION_MISS_PENALTY: f64 = 0.6;
@@ -263,13 +263,35 @@ async fn collect_candidates(
     add_session_candidates(conn, session_id, &mut candidates).await?;
   }
 
-  if let Some(query) = crate::embeddings::mean_embedding_for_commands(
-    conn,
-    &context.sequence_commands,
-    config.recent_limit,
-  )
-  .await?
-  {
+  let mut query = None;
+  if let Ok(Some((model, train_config))) = crate::neural::load_biencoder_wgpu() {
+    let workspace_root = (!context.repo_root.is_empty()).then_some(context.repo_root.as_str());
+    query = crate::neural::embed_context_with_model(
+      &model,
+      &train_config,
+      crate::neural::EmbedContextInput {
+        workspace_root,
+        cwd: config.cwd.as_deref(),
+        hostname: config.hostname.as_deref(),
+        username: config.username.as_deref(),
+        exit_status: context.last_exit_status,
+        session_id: config.session_id,
+        recent_commands: &context.sequence_commands,
+      },
+    )
+    .ok();
+  }
+
+  if query.is_none() {
+    query = crate::embeddings::mean_embedding_for_commands(
+      conn,
+      &context.sequence_commands,
+      config.recent_limit,
+    )
+    .await?;
+  }
+
+  if let Some(query) = query {
     let similar =
       crate::embeddings::search_similar_commands(conn, &query, EMBEDDING_CANDIDATE_LIMIT).await?;
     for cmd in similar {

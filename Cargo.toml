@@ -9,6 +9,7 @@ pprof = ["dep:pprof"]
 
 [dependencies]
 bstr = { version = "1.12.1", features = ["serde"] }
+burn = { version = "0.20.0-pre.6", default-features = false, features = ["std", "wgpu", "autodiff"] }
 clap = { version = "4.5.54", features = ["derive", "env", "string", "unicode"] }
 clap-config-file = "0.5.0"
 color-eyre = "0.6"
@@ -56,10 +57,10 @@ assert_cmd = "2"
 color-backtrace = "0.7.2"
 csv = "1.4"
 ctor = "0.4"
+liblzma = "0.4"
 libtest-mimic = "0.8.1"
 predicates = "3"
 tempfile = "3.24.0"
-xz2 = "0.1"
 
 # The profile that 'dist' will build with
 [profile.dist]

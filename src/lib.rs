@@ -8,6 +8,7 @@ pub mod core;
 pub mod db;
 pub mod embeddings;
 pub mod indexer;
+pub mod neural;
 pub mod phase;
 pub mod predict;
 #[cfg(feature = "pprof")]

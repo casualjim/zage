@@ -69,13 +69,7 @@ async fn run_embedded(
   }
 
   if with_embeddings {
-    let app_config = crate::config::AppConfig::load().map_err(|err| eyre!(err))?;
-    let Some(embedding) = app_config.embedding.as_ref() else {
-      return Err(eyre!(
-        "embedding config missing; add an `[embedding]` section to your zage config"
-      ));
-    };
-    let count = crate::embeddings::index_command_embeddings(&db.conn, embedding, max_commands)
+    let count = crate::embeddings::index_command_embeddings(&db.conn, max_commands)
       .await
       .map_err(|err| eyre!(err))?;
     eprintln!("Command embeddings: embedded={count}");

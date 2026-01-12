@@ -4,7 +4,7 @@ use std::path::{Path, PathBuf};
 use tree_sitter::{Node, Parser};
 
 use csv::ReaderBuilder;
-use xz2::read::XzDecoder;
+use liblzma::read::XzDecoder;
 
 use crate::tokenize::{Token, TokenKind, extract_command_parts, tokenize_index};
 

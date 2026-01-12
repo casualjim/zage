@@ -1,14 +1,10 @@
-use std::sync::Arc;
-
 use libsql::{Connection, Value};
-use seasoning::BatchItem;
-use seasoning::EmbeddingProvider;
-use seasoning::service::EmbedderService;
 
 use crate::{Result, ZageError};
 
 const META_KEY_COMMAND_EMBEDDING_DIM: &str = "command_embedding_dim";
 const COMMAND_EMBEDDING_INDEX: &str = "command_stats_embedding_idx";
+const DEFAULT_SHELLNAME: &str = "zsh";
 
 pub async fn ensure_command_embeddings_schema(
   conn: &Connection,
@@ -70,82 +66,81 @@ pub async fn command_embedding_dim(conn: &Connection) -> Result<Option<usize>> {
 
 pub async fn index_command_embeddings(
   conn: &Connection,
-  config: &seasoning::Embedding,
   max_commands: Option<usize>,
 ) -> Result<usize> {
-  let embedder_config = config
-    .to_embedder_config()
-    .map_err(|err| ZageError::GenericError(Box::new(err)))?;
-  let embedder = Arc::new(
-    seasoning::embedding::Client::new(embedder_config)
-      .map_err(|err| ZageError::GenericError(Box::new(err)))?,
-  );
+  let Some((model, train_config)) = crate::neural::load_biencoder_wgpu()? else {
+    return Err(ZageError::ConfigError(
+      "neural model not found; run `zage model neural-train` first".to_string(),
+    ));
+  };
 
-  ensure_command_embeddings_schema(conn, config.embedding_dim).await?;
-
-  let (mut service, mut results_rx) = EmbedderService::new(
-    embedder as Arc<dyn EmbeddingProvider>,
-    config.context_length,
-    config.max_batch_size,
-    config.workers,
-  );
-
-  let mut queued = 0usize;
-  let limit = max_commands.map(|v| v as i64).unwrap_or(i64::MAX);
-  let commands = list_commands_missing_embeddings(conn, limit).await?;
-  for command in commands {
-    let token_count = estimate_token_count(&config.tokenizer, &command);
-    service
-      .enqueue(BatchItem {
-        meta: command.clone(),
-        text: command,
-        token_count,
-      })
-      .await
-      .map_err(|err| ZageError::GenericError(Box::new(err)))?;
-    queued += 1;
-  }
-
-  service
-    .flush()
-    .await
-    .map_err(|err| ZageError::GenericError(Box::new(err)))?;
+  let embedding_dim = train_config.projection_dim;
+  ensure_command_embeddings_schema(conn, embedding_dim).await?;
 
   let now = unix_now();
+  let limit = max_commands.map(|v| v as i64).unwrap_or(i64::MAX);
+  let commands = list_commands_missing_embeddings(conn, limit).await?;
+
   let mut inserted = 0usize;
-  while let Some(result) = results_rx.recv().await {
-    let result = result.map_err(|err| ZageError::GenericError(Box::new(err)))?;
-    for (command, embedding) in result.items.into_iter().zip(result.embeddings.into_iter()) {
-      if embedding.len() != config.embedding_dim {
+  for chunk in commands.chunks(512) {
+    let embeddings = crate::neural::embed_commands_batch_with_model(&model, chunk, &train_config)?;
+    for (idx, embedding) in embeddings.into_iter().enumerate() {
+      let (command, _shellname) = &chunk[idx];
+      if embedding.len() != embedding_dim {
         return Err(ZageError::ConfigError(format!(
-          "embedder returned {} dims, expected {}",
-          embedding.len(),
-          config.embedding_dim
+          "neural model returned {} dims, expected {embedding_dim}",
+          embedding.len()
         )));
       }
-      upsert_command_embedding(conn, &command, &embedding, now).await?;
+      upsert_command_embedding(conn, command, &embedding, now).await?;
       inserted += 1;
     }
   }
 
-  Ok(inserted.min(queued))
+  Ok(inserted)
 }
 
-async fn list_commands_missing_embeddings(conn: &Connection, limit: i64) -> Result<Vec<String>> {
+async fn list_commands_missing_embeddings(
+  conn: &Connection,
+  limit: i64,
+) -> Result<Vec<(String, String)>> {
   let mut rows = conn
     .query(
-      "SELECT command
-       FROM command_stats cs
-       WHERE cs.embedding IS NULL
-       ORDER BY cs.last_seen DESC
-       LIMIT ?",
-      libsql::params![limit],
+      "WITH missing AS (
+         SELECT cs.command AS command, cs.last_seen AS last_seen
+         FROM command_stats cs
+         WHERE cs.embedding IS NULL
+         ORDER BY cs.last_seen DESC
+         LIMIT ?
+       ),
+       ranked AS (
+         SELECT
+           sh.expanded_command AS command,
+           sh.shellname AS shellname,
+           ROW_NUMBER() OVER (
+             PARTITION BY sh.expanded_command
+             ORDER BY COALESCE(sh.start_unix_timestamp, 0) DESC, sh.id DESC
+           ) AS rn
+         FROM shell_history sh
+         JOIN missing m ON m.command = sh.expanded_command
+       )
+       SELECT
+         m.command,
+         COALESCE(r.shellname, ?) AS shellname
+       FROM missing m
+       LEFT JOIN ranked r ON r.command = m.command AND r.rn = 1
+       ORDER BY m.last_seen DESC",
+      libsql::params![limit, DEFAULT_SHELLNAME.to_string()],
     )
     .await?;
 
   let mut out = Vec::new();
   while let Some(row) = rows.next().await? {
-    out.push(row.get::<String>(0)?);
+    let command = row.get::<String>(0)?;
+    let shellname = row
+      .get::<String>(1)
+      .unwrap_or_else(|_| DEFAULT_SHELLNAME.to_string());
+    out.push((command, shellname));
   }
   Ok(out)
 }
@@ -251,16 +246,16 @@ pub async fn search_similar_commands(
     return Ok(Vec::new());
   }
 
-  let query_vec_json = encode_f32_json_array(query);
+  let query_blob = encode_f32_blob(query);
   let mut rows = conn
     .query(
       &format!(
         "SELECT cs.command
-         FROM vector_top_k('{COMMAND_EMBEDDING_INDEX}', vector32(?), ?) v
+         FROM vector_top_k('{COMMAND_EMBEDDING_INDEX}', ?, ?) v
          JOIN command_stats cs ON cs.rowid = v.id
          ORDER BY v.distance ASC"
       ),
-      libsql::params![query_vec_json, limit as i64],
+      libsql::params![query_blob, limit as i64],
     )
     .await?;
 
@@ -277,15 +272,14 @@ async fn upsert_command_embedding(
   embedding: &[f32],
   updated_at: i64,
 ) -> Result<()> {
-  // sqlite-vec uses `vector32('[..]')` to turn a JSON float array into `F32_BLOB(dim)`.
-  let embedding_vec_json = encode_f32_json_array(embedding);
+  let embedding_blob = encode_f32_blob(embedding);
   conn
     .execute(
       "UPDATE command_stats
-       SET embedding = vector32(?),
+       SET embedding = ?,
            embedding_updated_at = ?
        WHERE command = ?",
-      (embedding_vec_json, updated_at, command.to_string()),
+      (embedding_blob, updated_at, command.to_string()),
     )
     .await?;
   Ok(())
@@ -343,35 +337,14 @@ async fn ensure_command_stats_embedding_columns(
       .await?;
   }
 
-  // No backwards compatibility: if an older schema is present, fail loudly and force a rebuild.
-  if columns.contains("embedding_json") {
-    return Err(ZageError::ConfigError(
-      "unsupported database schema: command_stats.embedding_json exists; delete the database and re-index"
-        .to_string(),
-    ));
-  }
-
   Ok(())
 }
 
-fn estimate_token_count(tokenizer: &str, text: &str) -> usize {
-  let trimmed = tokenizer.trim();
-  if trimmed.is_empty() || trimmed.eq_ignore_ascii_case("characters") {
-    return text.chars().count();
+fn encode_f32_blob(embedding: &[f32]) -> Vec<u8> {
+  let mut out = Vec::with_capacity(embedding.len() * 4);
+  for v in embedding {
+    out.extend_from_slice(&v.to_le_bytes());
   }
-  text.chars().count()
-}
-
-fn encode_f32_json_array(embedding: &[f32]) -> String {
-  let mut out = String::with_capacity(embedding.len() * 8 + 2);
-  out.push('[');
-  for (idx, value) in embedding.iter().enumerate() {
-    if idx > 0 {
-      out.push(',');
-    }
-    out.push_str(&value.to_string());
-  }
-  out.push(']');
   out
 }
 
@@ -431,10 +404,19 @@ mod tests {
       .await?;
 
     let out = list_commands_missing_embeddings(&db.conn, 10).await?;
-    assert_eq!(out, vec!["b".to_string(), "a".to_string()]);
+    assert_eq!(
+      out,
+      vec![
+        ("b".to_string(), DEFAULT_SHELLNAME.to_string()),
+        ("a".to_string(), DEFAULT_SHELLNAME.to_string())
+      ]
+    );
 
     let out_limited = list_commands_missing_embeddings(&db.conn, 1).await?;
-    assert_eq!(out_limited, vec!["b".to_string()]);
+    assert_eq!(
+      out_limited,
+      vec![("b".to_string(), DEFAULT_SHELLNAME.to_string())]
+    );
     Ok(())
   }
 
