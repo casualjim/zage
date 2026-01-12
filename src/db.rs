@@ -542,6 +542,94 @@ pub async fn update_stats_for_invocation(conn: &Connection, invocation: &Invocat
   Ok(())
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct OnlineModelStatus {
+  pub meta_entries: u64,
+  pub token_embeddings: u64,
+  pub command_biases: u64,
+  pub head_biases: u64,
+  pub group_scalars: u64,
+  pub replay_global: u64,
+  pub replay_workspace: u64,
+  pub feedback: u64,
+}
+
+pub async fn online_model_status(conn: &Connection) -> Result<OnlineModelStatus> {
+  Ok(OnlineModelStatus {
+    meta_entries: count_rows(conn, "online_model_meta").await?,
+    token_embeddings: count_rows(conn, "online_token_embedding").await?,
+    command_biases: count_rows(conn, "online_command_bias").await?,
+    head_biases: count_rows(conn, "online_head_bias").await?,
+    group_scalars: count_rows(conn, "online_group_scalar").await?,
+    replay_global: count_rows(conn, "online_replay_global").await?,
+    replay_workspace: count_rows(conn, "online_replay_workspace").await?,
+    feedback: count_rows(conn, "online_feedback").await?,
+  })
+}
+
+pub async fn online_model_last_updated_at(conn: &Connection) -> Result<Option<i64>> {
+  let mut last: Option<i64> = None;
+  for table in [
+    "online_token_embedding",
+    "online_command_bias",
+    "online_head_bias",
+    "online_group_scalar",
+  ] {
+    let sql = format!("SELECT MAX(updated_at) FROM {table}");
+    let mut rows = conn.query(&sql, ()).await?;
+    let row = rows.next().await?.ok_or_else(|| {
+      crate::ZageError::ConfigError(format!("missing MAX(updated_at) row for table {table}"))
+    })?;
+    let updated_at: Option<i64> = row.get(0)?;
+    match (last, updated_at) {
+      (None, Some(ts)) => last = Some(ts),
+      (Some(prev), Some(ts)) if ts > prev => last = Some(ts),
+      _ => {}
+    }
+  }
+  Ok(last)
+}
+
+pub async fn reset_online_model(conn: &Connection) -> Result<()> {
+  conn.execute("BEGIN", ()).await?;
+
+  let write_result: Result<()> = async {
+    // Keep this list explicit so we never accidentally delete non-model data.
+    for stmt in [
+      "DELETE FROM online_model_meta",
+      "DELETE FROM online_token_embedding",
+      "DELETE FROM online_command_bias",
+      "DELETE FROM online_head_bias",
+      "DELETE FROM online_group_scalar",
+      "DELETE FROM online_replay_global",
+      "DELETE FROM online_replay_workspace",
+      "DELETE FROM online_feedback",
+    ] {
+      conn.execute(stmt, ()).await?;
+    }
+    Ok(())
+  }
+  .await;
+
+  if let Err(err) = write_result {
+    let _ = conn.execute("ROLLBACK", ()).await;
+    return Err(err);
+  }
+
+  conn.execute("COMMIT", ()).await?;
+  Ok(())
+}
+
+async fn count_rows(conn: &Connection, table: &str) -> Result<u64> {
+  let sql = format!("SELECT COUNT(*) FROM {table}");
+  let mut rows = conn.query(&sql, ()).await?;
+  let row = rows.next().await?.ok_or_else(|| {
+    crate::ZageError::ConfigError(format!("missing COUNT(*) row for table {table}"))
+  })?;
+  let count: i64 = row.get(0)?;
+  Ok(count.try_into().unwrap_or(0))
+}
+
 #[cfg(test)]
 mod import_tests {
   use super::*;
@@ -699,6 +787,151 @@ mod tests {
     let row = rows.next().await?.expect("expected row");
     let count = row.get::<i64>(0)?;
     assert_eq!(count, 1);
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn init_creates_online_model_tables() -> Result<()> {
+    let tmp = tempfile::NamedTempFile::new()?;
+    let db = open_db(tmp.path()).await?;
+    init(&db.conn).await?;
+
+    for table in [
+      "online_model_meta",
+      "online_token_embedding",
+      "online_command_bias",
+      "online_head_bias",
+      "online_group_scalar",
+      "online_replay_global",
+      "online_replay_workspace",
+      "online_feedback",
+    ] {
+      let mut rows = db
+        .conn
+        .query(
+          "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name=?",
+          libsql::params![table.to_string()],
+        )
+        .await?;
+      let row = rows.next().await?.expect("expected row");
+      let count = row.get::<i64>(0)?;
+      assert_eq!(count, 1, "missing table: {table}");
+    }
+
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn reset_online_model_clears_only_online_tables() -> Result<()> {
+    let tmp = tempfile::NamedTempFile::new()?;
+    let db = open_db(tmp.path()).await?;
+    init(&db.conn).await?;
+
+    let invocation = Invocation {
+      command: "ls -la".to_string(),
+      expanded_command: "ls -la".to_string(),
+      shellname: "zsh".to_string(),
+      working_directory: Some("/tmp".to_string()),
+      workspace: None,
+      hostname: Some("host".to_string()),
+      username: Some("user".to_string()),
+      exit_status: Some(0),
+      start_unix_timestamp: Some(123),
+      end_unix_timestamp: Some(124),
+      session_id: 42,
+    };
+    assert!(insert_invocation(&db.conn, &invocation).await?);
+
+    db.conn
+      .execute(
+        "INSERT INTO online_model_meta (key, value) VALUES (?, ?)",
+        ("test".to_string(), "1".to_string()),
+      )
+      .await?;
+    db.conn
+      .execute(
+        "INSERT INTO online_token_embedding (bucket, vec, opt_state, updated_at) VALUES (?, X'00', NULL, ?)",
+        (1i64, 1i64),
+      )
+      .await?;
+    db.conn
+      .execute(
+        "INSERT INTO online_command_bias (command, bias, updated_at) VALUES (?, ?, ?)",
+        ("echo hi".to_string(), 0.5f64, 1i64),
+      )
+      .await?;
+    db.conn
+      .execute(
+        "INSERT INTO online_head_bias (head, bias, updated_at) VALUES (?, ?, ?)",
+        ("echo".to_string(), 0.25f64, 1i64),
+      )
+      .await?;
+    db.conn
+      .execute(
+        "INSERT INTO online_group_scalar (group_name, value, updated_at) VALUES (?, ?, ?)",
+        ("global".to_string(), 1.0f64, 1i64),
+      )
+      .await?;
+    db.conn
+      .execute(
+        "INSERT INTO online_replay_global (event_id, payload, sampled_at) VALUES (?, X'00', ?)",
+        (1i64, 1i64),
+      )
+      .await?;
+    db.conn
+      .execute(
+        "INSERT INTO online_replay_workspace (workspace_root, seq, payload) VALUES (?, ?, X'00')",
+        ("/tmp".to_string(), 1i64),
+      )
+      .await?;
+    db.conn
+      .execute(
+        "INSERT INTO online_feedback (shown_id, shown_at, suggestion) VALUES (?, ?, ?)",
+        ("s1".to_string(), 1i64, "echo hi".to_string()),
+      )
+      .await?;
+
+    let before = online_model_status(&db.conn).await?;
+    assert_eq!(before.meta_entries, 1);
+    assert_eq!(before.token_embeddings, 1);
+    assert_eq!(before.command_biases, 1);
+    assert_eq!(before.head_biases, 1);
+    assert_eq!(before.group_scalars, 1);
+    assert_eq!(before.replay_global, 1);
+    assert_eq!(before.replay_workspace, 1);
+    assert_eq!(before.feedback, 1);
+
+    let last_updated = online_model_last_updated_at(&db.conn).await?;
+    assert_eq!(last_updated, Some(1));
+
+    reset_online_model(&db.conn).await?;
+
+    let after = online_model_status(&db.conn).await?;
+    assert_eq!(
+      after,
+      OnlineModelStatus {
+        meta_entries: 0,
+        token_embeddings: 0,
+        command_biases: 0,
+        head_biases: 0,
+        group_scalars: 0,
+        replay_global: 0,
+        replay_workspace: 0,
+        feedback: 0,
+      }
+    );
+
+    let last_updated = online_model_last_updated_at(&db.conn).await?;
+    assert_eq!(last_updated, None);
+
+    let mut rows = db
+      .conn
+      .query("SELECT COUNT(*) FROM shell_history", ())
+      .await?;
+    let row = rows.next().await?.expect("expected row");
+    let count: i64 = row.get(0)?;
+    assert_eq!(count, 1, "reset should not delete shell_history");
+
     Ok(())
   }
 

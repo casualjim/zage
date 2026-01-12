@@ -174,3 +174,62 @@ CREATE TABLE IF NOT EXISTS phase_stats (
 
 CREATE INDEX IF NOT EXISTS idx_phase_stats_head ON phase_stats(command_head);
 CREATE INDEX IF NOT EXISTS idx_phase_stats_phase ON phase_stats(phase);
+
+-- Online next-command model (v1)
+CREATE TABLE IF NOT EXISTS online_model_meta (
+  key TEXT PRIMARY KEY,
+  value TEXT NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS online_token_embedding (
+  bucket INTEGER PRIMARY KEY,
+  vec BLOB NOT NULL,
+  opt_state BLOB,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS online_command_bias (
+  command TEXT PRIMARY KEY,
+  bias REAL NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS online_head_bias (
+  head TEXT PRIMARY KEY,
+  bias REAL NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS online_group_scalar (
+  group_name TEXT PRIMARY KEY,
+  value REAL NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS online_replay_global (
+  event_id INTEGER PRIMARY KEY,
+  payload BLOB NOT NULL,
+  sampled_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS online_replay_workspace (
+  workspace_root TEXT NOT NULL,
+  seq INTEGER NOT NULL,
+  payload BLOB NOT NULL,
+  PRIMARY KEY (workspace_root, seq)
+);
+
+CREATE TABLE IF NOT EXISTS online_feedback (
+  shown_id TEXT PRIMARY KEY,
+  shown_at INTEGER NOT NULL,
+  workspace_root TEXT,
+  cwd TEXT,
+  prefix TEXT,
+  suggestion TEXT NOT NULL,
+  accepted_command TEXT,
+  accepted_at INTEGER,
+  outcome TEXT
+);
+
+CREATE INDEX IF NOT EXISTS idx_online_feedback_shown_at ON online_feedback(shown_at);
+CREATE INDEX IF NOT EXISTS idx_online_feedback_accepted_at ON online_feedback(accepted_at);

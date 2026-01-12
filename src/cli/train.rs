@@ -4,8 +4,8 @@ use color_eyre::eyre::{Result, eyre};
 use humantime::Duration as HumanDuration;
 
 use crate::cli::BackendRef;
-use crate::db::Db;
-use crate::rerank::{TrainConfig, model_status as rerank_model_status, reset_model, train_model};
+use crate::db::{Db, online_model_status, reset_online_model};
+use crate::rerank::{TrainConfig, train_model};
 use crate::server::{self, Request, Response};
 
 pub async fn run(
@@ -25,14 +25,14 @@ pub async fn run(
 pub async fn model_status(backend: BackendRef<'_>) -> Result<()> {
   match backend {
     BackendRef::Server => model_status_server().await,
-    BackendRef::Embedded(_) => model_status_embedded(),
+    BackendRef::Embedded(db) => model_status_embedded(db).await,
   }
 }
 
 pub async fn model_reset(backend: BackendRef<'_>) -> Result<()> {
   match backend {
     BackendRef::Server => model_reset_server().await,
-    BackendRef::Embedded(_) => model_reset_embedded(),
+    BackendRef::Embedded(db) => model_reset_embedded(db).await,
   }
 }
 
@@ -108,19 +108,19 @@ async fn model_status_server() -> Result<()> {
   }
 }
 
-fn model_status_embedded() -> Result<()> {
-  if let Some(model) = rerank_model_status()? {
-    eprintln!(
-      "Reranker model (trees={}, objective={}, loss={}, created_at={}, path={})",
-      model.n_trees,
-      model.objective,
-      model.loss,
-      model.created_at,
-      model.model_path.display()
-    );
-  } else {
-    eprintln!("Reranker model not found");
-  }
+async fn model_status_embedded(db: &Db) -> Result<()> {
+  let status = online_model_status(&db.conn).await?;
+  eprintln!(
+    "Online model: meta={}, token_embeddings={}, command_biases={}, head_biases={}, group_scalars={}, replay_global={}, replay_workspace={}, feedback={}",
+    status.meta_entries,
+    status.token_embeddings,
+    status.command_biases,
+    status.head_biases,
+    status.group_scalars,
+    status.replay_global,
+    status.replay_workspace,
+    status.feedback
+  );
   Ok(())
 }
 
@@ -138,8 +138,8 @@ async fn model_reset_server() -> Result<()> {
   }
 }
 
-fn model_reset_embedded() -> Result<()> {
-  reset_model()?;
-  eprintln!("Reranker model reset");
+async fn model_reset_embedded(db: &Db) -> Result<()> {
+  reset_online_model(&db.conn).await?;
+  eprintln!("Online model reset");
   Ok(())
 }

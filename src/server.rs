@@ -18,13 +18,13 @@ use tracing::{debug, info, warn};
 use crate::capture_profile;
 use crate::config::DbConfig;
 use crate::db::{
-  delete_history_by_command, import_history, insert_invocation, open_db_with_config,
-  update_stats_for_invocation,
+  delete_history_by_command, import_history, insert_invocation, online_model_last_updated_at,
+  online_model_status, open_db_with_config, reset_online_model, update_stats_for_invocation,
 };
 use crate::indexer::rebuild_stats;
 use crate::predict::aliases::{expand_alias, load_aliases};
 use crate::predict::{SuggestConfig, Suggestion as InternalSuggestion, suggest};
-use crate::rerank::{TrainConfig, model_status, reset_model, train_model, warm_model_cache};
+use crate::rerank::{TrainConfig, train_model, warm_model_cache};
 use crate::sequence::{SequenceConfig, analyze_sequences, analyze_token_sequences};
 use crate::shell_history::{
   Invocation, Shell, detect_shellname, parse_bash_history, parse_zsh_history,
@@ -610,27 +610,37 @@ async fn handle_request(
         },
       }
     }
-    Request::ModelStatus => match model_status() {
-      Ok(model) => Response::Text {
-        lines: vec![match model {
-          Some(status) => format!(
-            "Reranker model (trees={}, objective={}, loss={}, created_at={}, path={})",
-            status.n_trees,
-            status.objective,
-            status.loss,
-            status.created_at,
-            status.model_path.display()
-          ),
-          None => "Reranker model not found".to_string(),
-        }],
+    Request::ModelStatus => match pool.get().await {
+      Ok(conn) => match online_model_status(&conn).await {
+        Ok(status) => Response::Text {
+          lines: vec![format!(
+            "Online model: meta={}, token_embeddings={}, command_biases={}, head_biases={}, group_scalars={}, replay_global={}, replay_workspace={}, feedback={}",
+            status.meta_entries,
+            status.token_embeddings,
+            status.command_biases,
+            status.head_biases,
+            status.group_scalars,
+            status.replay_global,
+            status.replay_workspace,
+            status.feedback
+          )],
+        },
+        Err(err) => Response::Error {
+          message: err.to_string(),
+        },
       },
       Err(err) => Response::Error {
         message: err.to_string(),
       },
     },
-    Request::ModelReset => match reset_model() {
-      Ok(()) => Response::Text {
-        lines: vec!["Reranker model reset".to_string()],
+    Request::ModelReset => match pool.get().await {
+      Ok(conn) => match reset_online_model(&conn).await {
+        Ok(()) => Response::Text {
+          lines: vec!["Online model reset".to_string()],
+        },
+        Err(err) => Response::Error {
+          message: err.to_string(),
+        },
       },
       Err(err) => Response::Error {
         message: err.to_string(),
@@ -984,26 +994,32 @@ fn default_history_path(shell: &str) -> Result<PathBuf> {
 }
 
 async fn status_response(pool: &Arc<ConnectionPool>) -> Response {
-  let status = model_status().ok().flatten();
-  let model_loaded = status.is_some();
-  let last_train = status.and_then(|status| status.created_at.parse::<i64>().ok());
-  let history_count = match pool.get().await {
+  let (model_loaded, history_count, last_train) = match pool.get().await {
     Ok(conn) => {
-      let rows = conn
-        .query("SELECT COUNT(*) FROM shell_history", ())
-        .await
-        .ok();
-      if let Some(mut rows) = rows {
-        if let Ok(Some(row)) = rows.next().await {
-          row.get::<i64>(0).unwrap_or(0) as u64
-        } else {
-          0
-        }
-      } else {
-        0
-      }
+      let model_status = online_model_status(&conn).await.ok();
+      let model_loaded = model_status
+        .map(|status| {
+          status.meta_entries > 0
+            || status.token_embeddings > 0
+            || status.command_biases > 0
+            || status.head_biases > 0
+            || status.group_scalars > 0
+            || status.replay_global > 0
+            || status.replay_workspace > 0
+            || status.feedback > 0
+        })
+        .unwrap_or(false);
+      let history_count = match conn.query("SELECT COUNT(*) FROM shell_history", ()).await {
+        Ok(mut rows) => match rows.next().await {
+          Ok(Some(row)) => row.get::<i64>(0).unwrap_or(0) as u64,
+          _ => 0,
+        },
+        Err(_) => 0,
+      };
+      let last_train = online_model_last_updated_at(&conn).await.ok().flatten();
+      (model_loaded, history_count, last_train)
     }
-    Err(_) => 0,
+    Err(_) => (false, 0, None),
   };
   Response::Status {
     model_loaded,

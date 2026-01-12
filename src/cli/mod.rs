@@ -178,7 +178,7 @@ pub enum Commands {
     action: SequencesAction,
   },
 
-  /// Train and manage the reranker model
+  /// Manage the online model
   Model {
     #[command(subcommand)]
     action: ModelAction,
@@ -235,7 +235,7 @@ pub enum SequencesAction {
 
 #[derive(Subcommand, Debug)]
 pub enum ModelAction {
-  /// Train the lightweight reranker model
+  /// Train the legacy reranker model
   Train {
     /// Number of training epochs
     #[arg(long, default_value = "150")]
@@ -257,14 +257,14 @@ pub enum ModelAction {
     embedded_db: bool,
   },
 
-  /// Show reranker model status
+  /// Show online model status
   Status {
     /// Use the embedded SQLite database
     #[arg(long)]
     embedded_db: bool,
   },
 
-  /// Reset (delete) the reranker model
+  /// Reset (delete) the online model
   Reset {
     /// Use the embedded SQLite database
     #[arg(long)]

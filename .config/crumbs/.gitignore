@@ -1,0 +1,8 @@
+# crumbs data
+crumbs.db
+crumbs.db.wal
+crumbs.db.shm
+crumbs.db-wal
+crumbs.db-shm
+secrets.toml
+!.gitignore
