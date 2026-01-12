@@ -140,7 +140,7 @@ pub fn embed_context_hash(input: EmbedContextInput<'_>, embedding_dim: usize) ->
     let age = (window - 1).saturating_sub(pos) as f32;
     let w = 1.0 / (1.0 + age * 0.25);
 
-    let tokens = command_tokens(DEFAULT_SHELLNAME, cmd);
+    let tokens = crate::tokenize::generalized_command_tokens(DEFAULT_SHELLNAME, cmd, 8);
     for tok in tokens.into_iter().take(remaining) {
       add_token(&mut out, &format!("prev:{tok}"), w);
       remaining = remaining.saturating_sub(1);
@@ -156,42 +156,13 @@ pub fn embed_context_hash(input: EmbedContextInput<'_>, embedding_dim: usize) ->
 
 fn embed_command_hash(shellname: &str, command: &str, embedding_dim: usize) -> Vec<f32> {
   let mut out = vec![0.0f32; embedding_dim];
-  for token in command_tokens(shellname, command)
+  for token in crate::tokenize::generalized_command_tokens(shellname, command, 8)
     .into_iter()
     .take(MAX_EMBED_TOKENS)
   {
     add_token(&mut out, &token, 1.0);
   }
   l2_normalize(&mut out);
-  out
-}
-
-fn command_tokens(shellname: &str, command: &str) -> Vec<String> {
-  let tokens = crate::tokenize::tokenize_index(shellname, command);
-  let Some(parts) = crate::tokenize::extract_command_parts(command, &tokens) else {
-    return Vec::new();
-  };
-
-  let mut out = Vec::new();
-  if !parts.head.is_empty() {
-    out.push(format!("head:{}", parts.head));
-  }
-
-  // position-independent flags
-  let mut flags = parts.flags;
-  flags.sort();
-  flags.dedup();
-  for flag in flags {
-    out.push(format!("flag:{flag}"));
-  }
-
-  // bounded normalized args
-  for arg in parts.args.into_iter().take(8) {
-    if !arg.normalized.is_empty() {
-      out.push(format!("arg:{}", arg.normalized));
-    }
-  }
-
   out
 }
 
