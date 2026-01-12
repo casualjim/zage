@@ -16,6 +16,7 @@ pub struct EmbedContextInput<'a> {
   pub username: Option<&'a str>,
   pub exit_status: Option<i64>,
   pub session_id: Option<i64>,
+  pub shellname: &'a str,
   pub recent_commands: &'a [String],
   pub window: usize,
 }
@@ -140,7 +141,7 @@ pub fn embed_context_hash(input: EmbedContextInput<'_>, embedding_dim: usize) ->
     let age = (window - 1).saturating_sub(pos) as f32;
     let w = 1.0 / (1.0 + age * 0.25);
 
-    let tokens = crate::tokenize::generalized_command_tokens(DEFAULT_SHELLNAME, cmd, 8);
+    let tokens = crate::tokenize::generalized_command_tokens(input.shellname, cmd, 8);
     for tok in tokens.into_iter().take(remaining) {
       add_token(&mut out, &format!("prev:{tok}"), w);
       remaining = remaining.saturating_sub(1);
@@ -690,5 +691,42 @@ mod tests {
     let out = search_similar_commands(&db.conn, &[1.0, 1.0], 1).await?;
     assert_eq!(out, vec!["a".to_string()]);
     Ok(())
+  }
+
+  #[test]
+  fn embed_context_hash_respects_shellname_for_recent_commands() {
+    let recent_commands = vec!["echo $FOO".to_string()];
+
+    let unknown = embed_context_hash(
+      EmbedContextInput {
+        workspace_root: None,
+        cwd: None,
+        hostname: None,
+        username: None,
+        exit_status: None,
+        session_id: None,
+        shellname: "unknown",
+        recent_commands: &recent_commands,
+        window: 1,
+      },
+      64,
+    );
+
+    let zsh = embed_context_hash(
+      EmbedContextInput {
+        workspace_root: None,
+        cwd: None,
+        hostname: None,
+        username: None,
+        exit_status: None,
+        session_id: None,
+        shellname: "zsh",
+        recent_commands: &recent_commands,
+        window: 1,
+      },
+      64,
+    );
+
+    assert_ne!(unknown, zsh);
   }
 }

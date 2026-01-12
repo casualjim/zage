@@ -163,6 +163,7 @@ struct PipelineContext {
   last_command: Option<String>,
   last_exit_status: Option<i64>,
   repo_root: String,
+  shellname: String,
   phase_config: Option<PhaseConfig>,
   session_phase: Option<PhaseSignal>,
 }
@@ -209,6 +210,10 @@ async fn build_pipeline_context(
   let last_exit_status = override_prev
     .map(|(_, exit)| *exit)
     .unwrap_or_else(|| recent.last().and_then(|inv| inv.exit_status));
+  let shellname = recent
+    .last()
+    .map(|inv| inv.shellname.clone())
+    .unwrap_or_else(|| "sh".to_string());
   let repo_root = config
     .cwd
     .as_deref()
@@ -235,6 +240,7 @@ async fn build_pipeline_context(
     last_command,
     last_exit_status,
     repo_root,
+    shellname,
     phase_config,
     session_phase,
   }))
@@ -284,6 +290,7 @@ async fn collect_candidates(
           username: config.username.as_deref(),
           exit_status: context.last_exit_status,
           session_id: config.session_id,
+          shellname: context.shellname.as_str(),
           recent_commands: &context.sequence_commands,
           window: config.recent_limit,
         },
