@@ -5,7 +5,7 @@ use crate::cli::BackendRef;
 use crate::db::{insert_invocation, update_stats_for_invocation};
 use crate::predict::aliases::{expand_alias, load_aliases};
 use crate::server::{self, Request, Response};
-use crate::shell_history::{Invocation, detect_shellname, get_hostname};
+use crate::shell_history::{Invocation, get_hostname, normalize_shellname};
 use crate::workspace::detect_workspace_for_cwd;
 
 pub async fn run(
@@ -15,15 +15,21 @@ pub async fn run(
   exit_status: i64,
   start_timestamp: i64,
   end_timestamp: i64,
+  shellname: Option<String>,
   session_id: Option<i64>,
 ) -> Result<()> {
   info!("Recording command invocation");
   let aliases = load_aliases();
   let expanded_command = expand_alias(&command, &aliases).unwrap_or_else(|| command.clone());
+  let shellname = shellname
+    .as_deref()
+    .map(normalize_shellname)
+    .unwrap_or_else(|| "sh".to_string());
 
   let server_req = Request::Record {
     command: command.clone(),
     expanded_command: expanded_command.clone(),
+    shellname: shellname.clone(),
     working_directory: working_directory.clone(),
     exit_status: exit_status as i32,
     start_timestamp,
@@ -49,7 +55,7 @@ pub async fn run(
       let invocation = Invocation {
         command: command.clone(),
         expanded_command: expanded_command.clone(),
-        shellname: detect_shellname(),
+        shellname,
         working_directory: Some(working_directory.clone()),
         workspace,
         hostname: Some(hostname.clone()),

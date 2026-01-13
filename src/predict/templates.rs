@@ -340,6 +340,7 @@ async fn fetch_arg_candidates(
         context,
         sequence: token_prior,
         similarity: 0.0,
+        online_model: 0.0,
       },
     });
   }
@@ -400,6 +401,7 @@ async fn fetch_arg_candidates_any(
         context,
         sequence: token_prior,
         similarity: 0.0,
+        online_model: 0.0,
       },
     });
   }
@@ -476,6 +478,7 @@ async fn fetch_env_candidates(
         context,
         sequence: token_prior,
         similarity: 0.0,
+        online_model: 0.0,
       },
     });
   }
@@ -551,6 +554,7 @@ async fn fetch_env_key_candidates(
         context,
         sequence: 0.0,
         similarity: 0.0,
+        online_model: 0.0,
       },
     });
   }
@@ -626,6 +630,7 @@ async fn fetch_flag_candidates(
         context: context_score,
         sequence: token_prior,
         similarity: 0.0,
+        online_model: 0.0,
       },
     });
   }

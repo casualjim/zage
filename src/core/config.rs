@@ -7,6 +7,7 @@ pub struct SuggestConfig {
   pub hostname: Option<String>,
   pub username: Option<String>,
   pub session_id: Option<i64>,
+  pub shellname: Option<String>,
   pub use_sequences: bool,
   pub prefer_full_line: bool,
 }
@@ -21,6 +22,7 @@ impl Default for SuggestConfig {
       hostname: None,
       username: None,
       session_id: None,
+      shellname: None,
       use_sequences: true,
       prefer_full_line: false,
     }

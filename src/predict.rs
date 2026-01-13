@@ -6,10 +6,14 @@ use crate::Result;
 use crate::core::{Candidate, SystemTimeProvider, TimeProvider};
 pub use crate::core::{ScoreBreakdown, Suggestion};
 use crate::db::get_recent_invocations;
+use crate::online_model::trainer::{
+  DEFAULT_WINDOW as ONLINE_MODEL_DEFAULT_WINDOW, OnlineScoreContext,
+  score_commands as online_score_commands,
+};
 use crate::phase::PhaseConfig;
 use crate::repo::find_repo_root;
 use crate::rerank;
-use crate::shell_history::detect_shellname;
+use crate::shell_history::normalize_shellname;
 use crate::tokenize::{TokenKind, extract_command_parts, normalized_tokens, tokenize_index};
 pub use config::{RankingWeights, SuggestConfig};
 
@@ -119,12 +123,19 @@ pub(crate) async fn suggest_with_runtime(
     now: runtime.now,
     recency_half_life: runtime.recency_half_life,
     session_id: config.session_id,
+    cwd: config.cwd.as_deref(),
+    hostname: config.hostname.as_deref(),
+    username: config.username.as_deref(),
   };
   let feature_context = build_feature_matrix(&feature_args);
   let mut scored = model_score(&feature_context).await?;
 
   let rerank_config = RerankConfig::load()?;
-  let shellname = detect_shellname();
+  let shellname = config
+    .shellname
+    .as_deref()
+    .map(normalize_shellname)
+    .unwrap_or_else(|| "sh".to_string());
   let rerank_context = rerank::runtime_context(
     &context.repo_root,
     &context.recent_heads,
@@ -399,6 +410,9 @@ struct FeatureMatrixArgs<'a> {
   now: i64,
   recency_half_life: f64,
   session_id: Option<i64>,
+  cwd: Option<&'a str>,
+  hostname: Option<&'a str>,
+  username: Option<&'a str>,
 }
 
 fn build_feature_matrix<'a>(args: &'a FeatureMatrixArgs<'a>) -> ScoreContext<'a> {
@@ -406,6 +420,12 @@ fn build_feature_matrix<'a>(args: &'a FeatureMatrixArgs<'a>) -> ScoreContext<'a>
     conn: args.conn,
     candidates: args.candidates,
     prefix_norm: args.prefix_norm,
+    shellname: args.context.shellname.as_str(),
+    sequence_commands: &args.context.sequence_commands,
+    cwd: args.cwd,
+    hostname: args.hostname,
+    username: args.username,
+    exit_status: args.context.last_exit_status,
     session_phase: args.context.session_phase.as_ref(),
     session_id: args.session_id,
     recent_heads: &args.context.recent_heads,
@@ -448,6 +468,12 @@ struct ScoreContext<'a> {
   conn: &'a Connection,
   candidates: &'a HashMap<String, Candidate>,
   prefix_norm: &'a [String],
+  shellname: &'a str,
+  sequence_commands: &'a [String],
+  cwd: Option<&'a str>,
+  hostname: Option<&'a str>,
+  username: Option<&'a str>,
+  exit_status: Option<i64>,
   session_phase: Option<&'a PhaseSignal>,
   session_id: Option<i64>,
   recent_heads: &'a [String],
@@ -468,6 +494,100 @@ fn time_bucket(ts: i64) -> u8 {
     6..=11 => 2,
     12..=17 => 3,
     _ => 4,
+  }
+}
+
+#[derive(Debug, Clone, Copy)]
+struct OnlineBlendConfig {
+  enabled: bool,
+  alpha: f64,
+  margin_gate: f64,
+  min_score_gate: f64,
+}
+
+impl OnlineBlendConfig {
+  fn load() -> Self {
+    let enabled = std::env::var("ZAGE_ONLINE_MODEL_RANKING")
+      .ok()
+      .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
+      .unwrap_or(false);
+    let alpha = std::env::var("ZAGE_ONLINE_MODEL_ALPHA")
+      .ok()
+      .and_then(|v| v.parse::<f64>().ok())
+      .unwrap_or(0.25);
+    let margin_gate = std::env::var("ZAGE_ONLINE_MODEL_MARGIN_GATE")
+      .ok()
+      .and_then(|v| v.parse::<f64>().ok())
+      .unwrap_or(0.05);
+    let min_score_gate = std::env::var("ZAGE_ONLINE_MODEL_MIN_SCORE_GATE")
+      .ok()
+      .and_then(|v| v.parse::<f64>().ok())
+      .unwrap_or(0.0);
+
+    Self {
+      enabled,
+      alpha,
+      margin_gate: margin_gate.max(0.0),
+      min_score_gate,
+    }
+  }
+}
+
+fn apply_online_model_blend(
+  suggestions: &mut [Suggestion],
+  model_scores: &[f32],
+  cfg: OnlineBlendConfig,
+) {
+  if !cfg.enabled || cfg.alpha == 0.0 || suggestions.is_empty() {
+    return;
+  }
+  if suggestions.len() != model_scores.len() {
+    return;
+  }
+
+  let mut top1 = f32::NEG_INFINITY;
+  let mut top2 = f32::NEG_INFINITY;
+  for &score in model_scores {
+    if !score.is_finite() {
+      continue;
+    }
+    if score > top1 {
+      top2 = top1;
+      top1 = score;
+    } else if score > top2 {
+      top2 = score;
+    }
+  }
+
+  if !top1.is_finite() {
+    return;
+  }
+
+  let gate = if (top1 as f64) < cfg.min_score_gate {
+    0.0
+  } else if cfg.margin_gate <= f64::EPSILON || !top2.is_finite() {
+    1.0
+  } else {
+    let margin = (top1 - top2).max(0.0) as f64;
+    if margin >= cfg.margin_gate {
+      1.0
+    } else {
+      (margin / cfg.margin_gate).clamp(0.0, 1.0)
+    }
+  };
+
+  if gate <= 0.0 {
+    return;
+  }
+
+  for (idx, suggestion) in suggestions.iter_mut().enumerate() {
+    let model = model_scores[idx];
+    if !model.is_finite() {
+      continue;
+    }
+    let contrib = cfg.alpha * gate * (model as f64);
+    suggestion.score += contrib;
+    suggestion.breakdown.online_model = contrib;
   }
 }
 
@@ -602,8 +722,35 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
         context: context_score,
         sequence,
         similarity,
+        online_model: 0.0,
       },
     });
+  }
+
+  let online_cfg = OnlineBlendConfig::load();
+  if online_cfg.enabled && !scored.is_empty() {
+    let commands = scored
+      .iter()
+      .map(|suggestion| suggestion.command.clone())
+      .collect::<Vec<_>>();
+    let model_scores = online_score_commands(
+      context.conn,
+      OnlineScoreContext {
+        shellname: context.shellname,
+        repo_root: context.repo_root,
+        cwd: context.cwd,
+        hostname: context.hostname,
+        username: context.username,
+        exit_status: context.exit_status,
+        session_id: context.session_id,
+        unix_timestamp: context.now,
+        recent_commands: context.sequence_commands,
+        window: ONLINE_MODEL_DEFAULT_WINDOW,
+      },
+      &commands,
+    )
+    .await?;
+    apply_online_model_blend(&mut scored, &model_scores, online_cfg);
   }
 
   scored.sort_by(|a, b| {
@@ -948,6 +1095,7 @@ async fn completion_candidates(
         context,
         sequence: 0.0,
         similarity,
+        online_model: 0.0,
       },
     });
   }
@@ -1055,6 +1203,7 @@ async fn completion_candidates(
           context: 0.0,
           sequence: 0.0,
           similarity,
+          online_model: 0.0,
         },
       });
     }
@@ -1081,6 +1230,7 @@ async fn completion_candidates(
           suggestion.breakdown.context *= weight;
           suggestion.breakdown.sequence *= weight;
           suggestion.breakdown.similarity *= weight;
+          suggestion.breakdown.online_model *= weight;
         }
       }
     }
@@ -1144,6 +1294,66 @@ mod tests {
       confidence: 0.9,
     };
     assert_eq!(phase_match_boost(Some(&session), Some(&other)), 0.0);
+  }
+
+  #[test]
+  fn online_model_margin_gate_prevents_reorder_when_ambiguous() {
+    let mut suggestions = vec![
+      Suggestion {
+        command: "A".to_string(),
+        score: 10.0,
+        breakdown: ScoreBreakdown::default(),
+      },
+      Suggestion {
+        command: "B".to_string(),
+        score: 9.0,
+        breakdown: ScoreBreakdown::default(),
+      },
+    ];
+    let model_scores = vec![0.10, 0.11];
+    apply_online_model_blend(
+      &mut suggestions,
+      &model_scores,
+      OnlineBlendConfig {
+        enabled: true,
+        alpha: 5.0,
+        margin_gate: 0.05,
+        min_score_gate: 0.0,
+      },
+    );
+    suggestions.sort_by(|a, b| b.score.total_cmp(&a.score));
+    assert_eq!(suggestions[0].command, "A");
+    assert!(suggestions[1].breakdown.online_model > 0.0);
+  }
+
+  #[test]
+  fn online_model_reorders_when_confident() {
+    let mut suggestions = vec![
+      Suggestion {
+        command: "A".to_string(),
+        score: 10.0,
+        breakdown: ScoreBreakdown::default(),
+      },
+      Suggestion {
+        command: "B".to_string(),
+        score: 9.99,
+        breakdown: ScoreBreakdown::default(),
+      },
+    ];
+    let model_scores = vec![-0.5, 0.5];
+    apply_online_model_blend(
+      &mut suggestions,
+      &model_scores,
+      OnlineBlendConfig {
+        enabled: true,
+        alpha: 5.0,
+        margin_gate: 0.05,
+        min_score_gate: 0.0,
+      },
+    );
+    suggestions.sort_by(|a, b| b.score.total_cmp(&a.score));
+    assert_eq!(suggestions[0].command, "B");
+    assert!(suggestions[0].breakdown.online_model > 0.0);
   }
 
   #[test]

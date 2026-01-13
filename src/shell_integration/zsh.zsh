@@ -26,6 +26,15 @@ export ZAGE_COMPLETION_FORMAT="zsh"
 # Force zage to be the only autosuggest strategy when set to 1
 : ${ZAGE_AUTOSUGGEST_ONLY:="0"}
 
+# Feedback logging (best-effort, non-blocking).
+: ${ZAGE_FEEDBACK_WINDOW_SECONDS:="5"}
+
+# State for suggestion feedback.
+_ZAGE_LAST_SUGGESTION=""
+_ZAGE_LAST_SUGGESTION_AT=""
+_ZAGE_LAST_SUGGESTION_ID=""
+_ZAGE_LAST_SUGGESTION_PWD=""
+
 # Provide a zsh-autosuggestions strategy backed by zage
 _zsh_autosuggest_strategy_zage() {
     emulate -L zsh
@@ -46,6 +55,13 @@ _zsh_autosuggest_strategy_zage() {
 
     if [[ -n "$ZAGE_ZSH_DEBUG" ]]; then
       print -r -- "[zage-autosuggest] prefix=$prefix suggestion=$suggestion" >> "$ZAGE_ZSH_DEBUG"
+    fi
+
+    if [[ -n "$suggestion" ]]; then
+      _ZAGE_LAST_SUGGESTION="$suggestion"
+      _ZAGE_LAST_SUGGESTION_AT="$EPOCHSECONDS"
+      _ZAGE_LAST_SUGGESTION_ID="${ZAGE_SESSION_ID:-$$}-${EPOCHREALTIME}"
+      _ZAGE_LAST_SUGGESTION_PWD="$PWD"
     fi
 }
 
@@ -141,9 +157,53 @@ _zage_cmd_pwd=""
 _zage_preexec() {
     # Store command details
     # $1 is the command string
-    _zage_cmd_start_time=$(date +%s) # Capture start time (Unix epoch seconds)
+    _zage_cmd_start_time=$EPOCHSECONDS # Unix epoch seconds
     _zage_cmd_string=$1
     _zage_cmd_pwd=$PWD
+
+    # Emit best-effort feedback if we recently showed a suggestion.
+    if [[ "$ZAGE_FEEDBACK_DISABLE" != "1" && -n "$_ZAGE_LAST_SUGGESTION_ID" && -n "$_ZAGE_LAST_SUGGESTION_AT" ]]; then
+      if [[ -n "$_zage_cmd_string" && "$_zage_cmd_string" != zage\ * ]]; then
+        local shown_at="$_ZAGE_LAST_SUGGESTION_AT"
+        local now="$_zage_cmd_start_time"
+        local delta=$(( now - shown_at ))
+        if (( delta >= 0 && delta <= ZAGE_FEEDBACK_WINDOW_SECONDS )); then
+          local outcome="rejected"
+          if [[ "$_zage_cmd_string" == "$_ZAGE_LAST_SUGGESTION" ]]; then
+            outcome="accepted"
+          fi
+
+          local cwd="$_ZAGE_LAST_SUGGESTION_PWD"
+          if [[ -z "$cwd" ]]; then
+            cwd="$_zage_cmd_pwd"
+          fi
+
+          if [[ -n "$ZAGE_ZSH_DEBUG" ]]; then
+            zage feedback \
+              --shown-id "$_ZAGE_LAST_SUGGESTION_ID" \
+              --shown-at "$shown_at" \
+              --working-directory "$cwd" \
+              --suggestion "$_ZAGE_LAST_SUGGESTION" \
+              --accepted-command "$_zage_cmd_string" \
+              --accepted-at "$now" \
+              --outcome "$outcome" >> "$ZAGE_ZSH_DEBUG" 2>&1 &
+          else
+            zage feedback \
+              --shown-id "$_ZAGE_LAST_SUGGESTION_ID" \
+              --shown-at "$shown_at" \
+              --working-directory "$cwd" \
+              --suggestion "$_ZAGE_LAST_SUGGESTION" \
+              --accepted-command "$_zage_cmd_string" \
+              --accepted-at "$now" \
+              --outcome "$outcome" > /dev/null 2>&1 &!
+          fi
+        fi
+      fi
+      _ZAGE_LAST_SUGGESTION=""
+      _ZAGE_LAST_SUGGESTION_AT=""
+      _ZAGE_LAST_SUGGESTION_ID=""
+      _ZAGE_LAST_SUGGESTION_PWD=""
+    fi
 
     # Debug preexec
     if [[ -n "$ZAGE_ZSH_DEBUG" ]]; then
@@ -156,10 +216,13 @@ _zage_precmd() {
     # Placeholder - Logic to capture end time, exit status, and call zage record goes here
     # Requires access to _zage_cmd_start_time, _zage_cmd_string, _zage_cmd_pwd and $?
     local exit_status=$?
-    local end_time=$(date +%s)
+    local end_time=$EPOCHSECONDS
 
     # Ensure we don't record empty commands or the recording command itself
-    if [[ -z "$_zage_cmd_string" || "$_zage_cmd_string" =~ ^zage\s+record ]]; then
+    if [[ -z "$_zage_cmd_string"
+      || "$_zage_cmd_string" == zage\ record*
+      || "$_zage_cmd_string" == zage\ feedback*
+    ]]; then
         _zage_cmd_string="" # Clear command string to avoid re-recording
         return
     fi

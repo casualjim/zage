@@ -1,0 +1,74 @@
+# crumbs configuration
+
+[embedding]
+url = "https://api.deepinfra.com/v1/openai"
+model = "Qwen/Qwen3-Embedding-0.6B"
+tokenizer = "hf:Qwen/Qwen3-Embedding-0.6B"
+dialect = "deepinfra"
+timeout_seconds = 10
+embedding_dim = 1024
+context_length = 32768
+max_batch_size = 15
+workers = 5
+requests_per_minute = 1000
+max_concurrent_requests = 300
+tokens_per_minute = 1000000
+
+[reranker]
+url = "https://api.deepinfra.com/v1"
+model = "Qwen/Qwen3-Reranker-0.6B"
+dialect = "deepinfra"
+timeout_seconds = 10
+
+[chunking]
+max_chunk_size = 450
+overlap = 0.20000000298023224
+max_parallel = 4
+max_file_size = 5242880
+large_file_threads = 4
+
+[history]
+depth = 10240
+commit_size_limit_ratio = 1.0
+multi_parents = false
+issue_regex = '(#\d+)'
+path_specs = ""
+
+[search]
+limit = 10
+min_score = 0.4
+hybrid_weight = 0.6000000238418579
+path_prefixes = []
+file_exts = []
+
+[context]
+semantic_limit = 50
+topology_depth = 2
+topology_limit = 30
+cochange_limit = 20
+dependency_issue_limit = 10
+related_issue_limit = 10
+duplicate_limit = 3
+duplicate_threshold = 0.6
+per_file_limit = 5
+max_blocks = 40
+max_per_file = 5
+diversity_lambda = 0.7
+rerank_top_n = 30
+rerank_blend = 0.7
+semantic_weight = 0.4
+topology_weight = 0.25
+cochange_weight = 0.15
+recency_weight = 0.1
+centrality_weight = 0.05
+metadata_weight = 0.05
+topology_distance_decay = 1.0
+label_match_boost = 0.05
+dependency_boost = 0.1
+relates_to_boost = 0.08
+duplicate_boost = 0.05
+multi_source_bonus = 0.1
+
+[prompt]
+tokenizer = ""
+theme = ""

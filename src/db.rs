@@ -620,6 +620,87 @@ pub async fn reset_online_model(conn: &Connection) -> Result<()> {
   Ok(())
 }
 
+#[derive(Debug, Clone)]
+pub struct OnlineFeedbackEvent {
+  pub shown_id: String,
+  pub shown_at: i64,
+  pub cwd: Option<String>,
+  pub suggestion: String,
+  pub accepted_command: Option<String>,
+  pub accepted_at: Option<i64>,
+  pub outcome: Option<String>,
+}
+
+pub async fn upsert_online_feedback(conn: &Connection, event: OnlineFeedbackEvent) -> Result<()> {
+  if event.shown_id.trim().is_empty() {
+    return Err(crate::ZageError::ConfigError(
+      "feedback shown_id is required".to_string(),
+    ));
+  }
+  if event.shown_at <= 0 {
+    return Err(crate::ZageError::ConfigError(
+      "feedback shown_at must be > 0".to_string(),
+    ));
+  }
+  if event.suggestion.trim().is_empty() {
+    return Err(crate::ZageError::ConfigError(
+      "feedback suggestion is required".to_string(),
+    ));
+  }
+  if let Some(at) = event.accepted_at
+    && at <= 0
+  {
+    return Err(crate::ZageError::ConfigError(
+      "feedback accepted_at must be > 0 when present".to_string(),
+    ));
+  }
+  if let Some(outcome) = event.outcome.as_deref()
+    && outcome.trim().is_empty()
+  {
+    return Err(crate::ZageError::ConfigError(
+      "feedback outcome must be non-empty when present".to_string(),
+    ));
+  }
+
+  let workspace_root = event
+    .cwd
+    .as_deref()
+    .and_then(|cwd| {
+      crate::workspace::detect_workspace_for_cwd(cwd)
+        .ok()
+        .flatten()
+    })
+    .map(|w| w.root);
+
+  conn
+    .execute(
+      "INSERT INTO online_feedback (
+         shown_id, shown_at, workspace_root, cwd, prefix, suggestion, accepted_command, accepted_at, outcome
+       ) VALUES (?, ?, ?, ?, NULL, ?, ?, ?, ?)
+       ON CONFLICT(shown_id) DO UPDATE SET
+         shown_at = MIN(shown_at, excluded.shown_at),
+         workspace_root = COALESCE(online_feedback.workspace_root, excluded.workspace_root),
+         cwd = COALESCE(online_feedback.cwd, excluded.cwd),
+         suggestion = COALESCE(online_feedback.suggestion, excluded.suggestion),
+         accepted_command = COALESCE(online_feedback.accepted_command, excluded.accepted_command),
+         accepted_at = COALESCE(online_feedback.accepted_at, excluded.accepted_at),
+         outcome = COALESCE(online_feedback.outcome, excluded.outcome)",
+      libsql::params![
+        event.shown_id,
+        event.shown_at,
+        workspace_root,
+        event.cwd,
+        event.suggestion,
+        event.accepted_command,
+        event.accepted_at,
+        event.outcome
+      ],
+    )
+    .await?;
+
+  Ok(())
+}
+
 async fn count_rows(conn: &Connection, table: &str) -> Result<u64> {
   let sql = format!("SELECT COUNT(*) FROM {table}");
   let mut rows = conn.query(&sql, ()).await?;
@@ -1036,6 +1117,63 @@ mod tests {
     let row = rows.next().await?.expect("row");
     let workspace_json: Option<String> = row.get(0)?;
     assert!(workspace_json.is_some());
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn upsert_online_feedback_validates_required_fields() -> Result<()> {
+    let tmp = tempfile::NamedTempFile::new()?;
+    let db = open_db(tmp.path()).await?;
+    init(&db.conn).await?;
+
+    let err = upsert_online_feedback(
+      &db.conn,
+      OnlineFeedbackEvent {
+        shown_id: "".to_string(),
+        shown_at: 1,
+        cwd: Some("/tmp".to_string()),
+        suggestion: "git status".to_string(),
+        accepted_command: None,
+        accepted_at: None,
+        outcome: None,
+      },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("shown_id"));
+
+    let err = upsert_online_feedback(
+      &db.conn,
+      OnlineFeedbackEvent {
+        shown_id: "s1".to_string(),
+        shown_at: 0,
+        cwd: Some("/tmp".to_string()),
+        suggestion: "git status".to_string(),
+        accepted_command: None,
+        accepted_at: None,
+        outcome: None,
+      },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("shown_at"));
+
+    let err = upsert_online_feedback(
+      &db.conn,
+      OnlineFeedbackEvent {
+        shown_id: "s1".to_string(),
+        shown_at: 1,
+        cwd: Some("/tmp".to_string()),
+        suggestion: "".to_string(),
+        accepted_command: None,
+        accepted_at: None,
+        outcome: None,
+      },
+    )
+    .await
+    .unwrap_err();
+    assert!(err.to_string().contains("suggestion"));
+
     Ok(())
   }
 }

@@ -59,6 +59,7 @@ async fn rerank_training_integrates_with_suggest() -> zage::Result<()> {
       hostname: None,
       username: None,
       session_id: Some(1),
+      shellname: Some("zsh".to_string()),
       use_sequences: false,
       prefer_full_line: false,
     },

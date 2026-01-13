@@ -12,6 +12,7 @@ use crate::config::{AppConfig, DbConfig};
 use crate::db::{Db, open_db_with_config};
 use crate::shell_history::Shell;
 
+mod feedback;
 mod import;
 mod index;
 #[cfg(feature = "pprof")]
@@ -78,6 +79,7 @@ pub enum Commands {
   },
 
   /// (Internal) Record a single command invocation (used by shell hooks)
+  #[command(hide = true)]
   Record {
     /// The command string that was executed
     #[arg(long)]
@@ -94,9 +96,41 @@ pub enum Commands {
     /// The timestamp when the command finished (Unix epoch seconds)
     #[arg(long)]
     end_timestamp: i64,
+    /// Shell name (defaults to $SHELL basename)
+    #[arg(long = "shell", env = "SHELL")]
+    shellname: Option<String>,
     /// The shell session ID
     #[arg(long)]
     session_id: Option<i64>, // Optional for now
+    /// Use the embedded SQLite database
+    #[arg(long)]
+    embedded_db: bool,
+  },
+
+  /// (Internal) Record a suggestion feedback event (used by shell hooks)
+  #[command(hide = true)]
+  Feedback {
+    /// Unique id for the suggestion that was shown
+    #[arg(long)]
+    shown_id: String,
+    /// Unix epoch seconds when the suggestion was shown
+    #[arg(long)]
+    shown_at: i64,
+    /// Current working directory at time of feedback
+    #[arg(long)]
+    working_directory: Option<String>,
+    /// The suggestion string that was shown
+    #[arg(long)]
+    suggestion: String,
+    /// The command that was executed (if known)
+    #[arg(long)]
+    accepted_command: Option<String>,
+    /// Unix epoch seconds when the execution happened (if known)
+    #[arg(long)]
+    accepted_at: Option<i64>,
+    /// Outcome label (e.g. accepted, rejected)
+    #[arg(long)]
+    outcome: Option<String>,
     /// Use the embedded SQLite database
     #[arg(long)]
     embedded_db: bool,
@@ -147,6 +181,10 @@ pub enum Commands {
     /// Override session id
     #[arg(long, env = "ZAGE_SESSION_ID")]
     session_id: Option<i64>,
+
+    /// Override shell name (defaults to $SHELL basename)
+    #[arg(long = "shell", env = "SHELL")]
+    shellname: Option<String>,
 
     /// Disable sequence-based candidates
     #[arg(long)]
@@ -281,6 +319,7 @@ pub struct SuggestArgs {
   pub hostname: Option<String>,
   pub username: Option<String>,
   pub session_id: Option<i64>,
+  pub shellname: Option<String>,
   pub no_sequences: bool,
   pub completion_format: CompletionFormat,
   pub show_scores: bool,
@@ -368,6 +407,7 @@ pub async fn run(cli: Cli) -> Result<()> {
       exit_status,
       start_timestamp,
       end_timestamp,
+      shellname,
       session_id,
       embedded_db: _,
     }) => {
@@ -379,7 +419,31 @@ pub async fn run(cli: Cli) -> Result<()> {
         exit_status,
         start_timestamp,
         end_timestamp,
+        shellname,
         session_id,
+      )
+      .await?;
+    }
+    Some(Commands::Feedback {
+      shown_id,
+      shown_at,
+      working_directory,
+      suggestion,
+      accepted_command,
+      accepted_at,
+      outcome,
+      embedded_db: _,
+    }) => {
+      let backend = require_backend(backend.as_ref())?;
+      feedback::run(
+        backend,
+        shown_id,
+        shown_at,
+        working_directory,
+        suggestion,
+        accepted_command,
+        accepted_at,
+        outcome,
       )
       .await?;
     }
@@ -400,6 +464,7 @@ pub async fn run(cli: Cli) -> Result<()> {
       hostname,
       username,
       session_id,
+      shellname,
       no_sequences,
       completion_format,
       show_scores,
@@ -415,6 +480,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         hostname,
         username,
         session_id,
+        shellname,
         no_sequences,
         completion_format,
         show_scores,
@@ -520,6 +586,7 @@ fn command_embedded_override(command: &Commands) -> bool {
     Commands::Import { embedded_db, .. }
     | Commands::Index { embedded_db, .. }
     | Commands::Record { embedded_db, .. }
+    | Commands::Feedback { embedded_db, .. }
     | Commands::Yank { embedded_db, .. } => *embedded_db,
     Commands::Suggest { embedded_db, .. } => *embedded_db,
     Commands::Sequences { action } => match action {

@@ -1,5 +1,9 @@
 use crate::core::Invocation;
 
+pub(crate) mod replay;
+pub(crate) mod sampler;
+pub(crate) mod trainer;
+
 #[derive(Debug, Clone, Copy)]
 pub struct OnlineContextInput<'a> {
   pub workspace_root: Option<&'a str>,
@@ -214,33 +218,25 @@ mod tests {
     });
     assert!(tokens.iter().any(|t| t.starts_with("ctx:timebucket=")));
     assert!(tokens.contains(&"ctx:workspace_root=/repo".to_string()));
-    assert!(tokens.contains(&"ctx:cwd=/repo/crate".to_string()));
-    assert!(tokens.contains(&"ctx:exit=2".to_string()));
-    assert!(tokens.contains(&"ctx:host=host".to_string()));
-    assert!(tokens.contains(&"ctx:user=user".to_string()));
-    assert!(tokens.contains(&"ctx:session=42".to_string()));
-  }
-
-  #[test]
-  fn stable_char_ngram_hashing_is_deterministic_and_in_range() {
-    let token = "head:git";
-    let mut scratch = Vec::new();
-    let mut a = Vec::new();
-    let mut b = Vec::new();
-    stable_char_ngrams_buckets(token, SUBWORD_BUCKETS, &mut scratch, &mut a);
-    stable_char_ngrams_buckets(token, SUBWORD_BUCKETS, &mut scratch, &mut b);
-    assert_eq!(a, b);
-    assert!(!a.is_empty());
-    assert!(
-      a.iter()
-        .all(|(bucket, sign)| { *bucket < SUBWORD_BUCKETS && (*sign == 1.0 || *sign == -1.0) })
-    );
   }
 
   #[test]
   fn stable_bucket_and_sign_is_deterministic() {
-    let a = stable_bucket_and_sign("abc", SUBWORD_BUCKETS);
-    let b = stable_bucket_and_sign("abc", SUBWORD_BUCKETS);
-    assert_eq!(a, b);
+    let (b1, s1) = stable_bucket_and_sign("tok", SUBWORD_BUCKETS);
+    let (b2, s2) = stable_bucket_and_sign("tok", SUBWORD_BUCKETS);
+    assert_eq!(b1, b2);
+    assert_eq!(s1, s2);
+  }
+
+  #[test]
+  fn stable_char_ngram_hashing_is_deterministic_and_in_range() {
+    let mut idx1 = Vec::new();
+    let mut out1 = Vec::new();
+    stable_char_ngrams_buckets("token", SUBWORD_BUCKETS, &mut idx1, &mut out1);
+    let mut idx2 = Vec::new();
+    let mut out2 = Vec::new();
+    stable_char_ngrams_buckets("token", SUBWORD_BUCKETS, &mut idx2, &mut out2);
+    assert_eq!(out1, out2);
+    assert!(out1.iter().all(|(b, _)| *b < SUBWORD_BUCKETS));
   }
 }

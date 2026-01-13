@@ -18,16 +18,18 @@ use tracing::{debug, info, warn};
 use crate::capture_profile;
 use crate::config::DbConfig;
 use crate::db::{
-  delete_history_by_command, import_history, insert_invocation, online_model_last_updated_at,
-  online_model_status, open_db_with_config, reset_online_model, update_stats_for_invocation,
+  OnlineFeedbackEvent, delete_history_by_command, import_history, insert_invocation,
+  online_model_last_updated_at, online_model_status, open_db_with_config, reset_online_model,
+  update_stats_for_invocation, upsert_online_feedback,
 };
 use crate::indexer::rebuild_stats;
+use crate::online_model::trainer::train_on_invocations as train_online_model;
 use crate::predict::aliases::{expand_alias, load_aliases};
 use crate::predict::{SuggestConfig, Suggestion as InternalSuggestion, suggest};
 use crate::rerank::{TrainConfig, train_model, warm_model_cache};
 use crate::sequence::{SequenceConfig, analyze_sequences, analyze_token_sequences};
 use crate::shell_history::{
-  Invocation, Shell, detect_shellname, parse_bash_history, parse_zsh_history,
+  Invocation, Shell, normalize_shellname, parse_bash_history, parse_zsh_history,
 };
 use crate::workspace::detect_workspace_for_cwd;
 use crate::{Result, ZageError};
@@ -57,11 +59,21 @@ pub enum Request {
   Record {
     command: String,
     expanded_command: String,
+    shellname: String,
     working_directory: String,
     exit_status: i32,
     start_timestamp: i64,
     end_timestamp: i64,
     session_id: u64,
+  },
+  Feedback {
+    shown_id: String,
+    shown_at: i64,
+    working_directory: Option<String>,
+    suggestion: String,
+    accepted_command: Option<String>,
+    accepted_at: Option<i64>,
+    outcome: Option<String>,
   },
   Suggest {
     current_line: Option<String>,
@@ -69,6 +81,7 @@ pub enum Request {
     hostname: Option<String>,
     username: Option<String>,
     session_id: Option<i64>,
+    shellname: Option<String>,
     limit: u32,
     recent_limit: usize,
     use_sequences: bool,
@@ -532,6 +545,7 @@ async fn handle_client(
 fn request_kind(request: &Request) -> &'static str {
   match request {
     Request::Record { .. } => "record",
+    Request::Feedback { .. } => "feedback",
     Request::Suggest { .. } => "suggest",
     Request::Import { .. } => "import",
     Request::Index { .. } => "index",
@@ -721,6 +735,7 @@ async fn handle_request(
     Request::Record {
       command,
       expanded_command,
+      shellname,
       working_directory,
       exit_status,
       start_timestamp,
@@ -743,7 +758,7 @@ async fn handle_request(
       let invocation = Invocation {
         command,
         expanded_command,
-        shellname: detect_shellname(),
+        shellname: normalize_shellname(&shellname),
         working_directory: Some(working_directory),
         workspace,
         hostname: Some(crate::shell_history::get_hostname()),
@@ -764,12 +779,45 @@ async fn handle_request(
       }
       Response::Ack
     }
+    Request::Feedback {
+      shown_id,
+      shown_at,
+      working_directory,
+      suggestion,
+      accepted_command,
+      accepted_at,
+      outcome,
+    } => match pool.get().await {
+      Ok(conn) => match upsert_online_feedback(
+        &conn,
+        OnlineFeedbackEvent {
+          shown_id,
+          shown_at,
+          cwd: working_directory,
+          suggestion,
+          accepted_command,
+          accepted_at,
+          outcome,
+        },
+      )
+      .await
+      {
+        Ok(()) => Response::Ack,
+        Err(err) => Response::Error {
+          message: err.to_string(),
+        },
+      },
+      Err(err) => Response::Error {
+        message: err.to_string(),
+      },
+    },
     Request::Suggest {
       current_line,
       working_directory,
       hostname,
       username,
       session_id,
+      shellname,
       limit,
       recent_limit,
       use_sequences,
@@ -782,6 +830,7 @@ async fn handle_request(
         hostname,
         username,
         session_id,
+        shellname,
         max_results: limit as usize,
         use_sequences,
         recent_limit,
@@ -1072,16 +1121,23 @@ async fn flush_records(pool: &Arc<ConnectionPool>, buffer: &mut Vec<Invocation>)
       return;
     }
   };
+  let mut inserted = Vec::new();
   for invocation in pending {
     match insert_invocation(&conn, &invocation).await {
       Ok(true) => {
         let _ = update_stats_for_invocation(&conn, &invocation).await;
+        inserted.push(invocation);
       }
       Ok(false) => {}
       Err(err) => {
         warn!(error = ?err, "failed to record invocation");
       }
     }
+  }
+  if !inserted.is_empty()
+    && let Err(err) = train_online_model(&conn, &inserted).await
+  {
+    warn!(error = ?err, "online model training failed");
   }
   pool.sync().await;
   debug!("flushed ingestion batch");

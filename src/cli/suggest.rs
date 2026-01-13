@@ -7,7 +7,7 @@ use color_eyre::eyre::{Result, eyre};
 use crate::cli::{BackendRef, CompletionFormat, SuggestArgs};
 use crate::predict::{ScoreBreakdown, SuggestConfig, Suggestion, suggest};
 use crate::server::{self, Request, Response};
-use crate::shell_history::get_hostname;
+use crate::shell_history::{get_hostname, normalize_shellname};
 use crate::tokenize::tokenize;
 
 pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
@@ -19,6 +19,7 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
     hostname,
     username,
     session_id,
+    shellname,
     no_sequences,
     completion_format,
     show_scores,
@@ -43,6 +44,11 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
   let username =
     username.or_else(|| uzers::get_current_username().map(|v| v.to_string_lossy().into_owned()));
 
+  let shellname = shellname
+    .as_deref()
+    .map(normalize_shellname)
+    .unwrap_or_else(|| "sh".to_string());
+
   let has_prefix = current_line
     .as_ref()
     .map(|s| !s.is_empty())
@@ -60,6 +66,7 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
         hostname: hostname.clone(),
         username: username.clone(),
         session_id,
+        shellname: Some(shellname.clone()),
         limit: count as u32,
         recent_limit,
         use_sequences: !no_sequences,
@@ -90,6 +97,7 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
           hostname: hostname.clone(),
           username: username.clone(),
           session_id,
+          shellname: Some(shellname.clone()),
           use_sequences: !no_sequences,
           prefer_full_line: autosuggest,
         };
@@ -161,6 +169,7 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
           hostname,
           username,
           session_id,
+          shellname: Some(shellname.clone()),
           use_sequences: !no_sequences,
           prefer_full_line: autosuggest,
         };

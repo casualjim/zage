@@ -43,6 +43,7 @@ async fn daemon_roundtrip_ping_record_suggest() -> zage::Result<()> {
   let record = Request::Record {
     command: "git status".to_string(),
     expanded_command: "git status".to_string(),
+    shellname: "zsh".to_string(),
     working_directory: "/tmp".to_string(),
     exit_status: 0,
     start_timestamp: 1,
@@ -62,6 +63,7 @@ async fn daemon_roundtrip_ping_record_suggest() -> zage::Result<()> {
     hostname: None,
     username: None,
     session_id: Some(42),
+    shellname: Some("zsh".to_string()),
     limit: 5,
     recent_limit: 10,
     use_sequences: true,
@@ -72,6 +74,28 @@ async fn daemon_roundtrip_ping_record_suggest() -> zage::Result<()> {
     Some(Response::Suggestions { .. }) => {}
     other => panic!("unexpected suggest response: {other:?}"),
   }
+
+  let feedback = Request::Feedback {
+    shown_id: "shown-1".to_string(),
+    shown_at: 2,
+    working_directory: Some("/tmp".to_string()),
+    suggestion: "git status".to_string(),
+    accepted_command: Some("git status".to_string()),
+    accepted_at: Some(3),
+    outcome: Some("accepted".to_string()),
+  };
+  match zage::server::try_request(feedback).await? {
+    Some(Response::Ack) => {}
+    other => panic!("unexpected feedback response: {other:?}"),
+  }
+
+  let mut rows = db
+    .conn
+    .query("SELECT COUNT(*) FROM online_feedback", ())
+    .await?;
+  let row = rows.next().await?.expect("expected row");
+  let count: i64 = row.get(0)?;
+  assert!(count >= 1, "expected feedback row to be inserted");
 
   server_handle.abort();
   let _ = server_handle.await;

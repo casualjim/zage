@@ -46,18 +46,15 @@ pub fn get_hostname() -> String {
   })
 }
 
-pub fn detect_shellname() -> String {
-  let Some(shell) = std::env::var("SHELL").ok().and_then(|value| {
-    Path::new(&value)
-      .file_name()
-      .map(|name| name.to_string_lossy().to_string())
-  }) else {
-    return "sh".to_string();
-  };
-  let normalized = shell.to_lowercase();
+pub fn normalize_shellname(shell: &str) -> String {
+  let name = Path::new(shell)
+    .file_name()
+    .map(|name| name.to_string_lossy().to_string())
+    .unwrap_or_else(|| shell.to_string());
+  let normalized = name.to_ascii_lowercase();
   match normalized.as_str() {
     "zsh" | "bash" | "sh" | "fish" | "nushell" | "nu" => normalized,
-    _ => shell,
+    _ => normalized,
   }
 }
 
@@ -196,5 +193,17 @@ mod tests {
     let fuzz = (0..=255u8).collect::<Vec<_>>();
     file.write_all(&fuzz).unwrap();
     let _ = parse_zsh_history(&file_path, None, None);
+  }
+
+  #[test]
+  fn normalize_shellname_uses_basename() {
+    assert_eq!(normalize_shellname("/bin/zsh"), "zsh");
+    assert_eq!(normalize_shellname("/usr/bin/bash"), "bash");
+  }
+
+  #[test]
+  fn normalize_shellname_lowercases() {
+    assert_eq!(normalize_shellname("ZSH"), "zsh");
+    assert_eq!(normalize_shellname("Nu"), "nu");
   }
 }
