@@ -89,6 +89,27 @@ async fn daemon_roundtrip_ping_record_suggest() -> zage::Result<()> {
     other => panic!("unexpected feedback response: {other:?}"),
   }
 
+  let status = Request::Status;
+  match zage::server::try_request(status).await? {
+    Some(Response::Status {
+      online_model_version,
+      online_update_count: _,
+      online_last_update: _,
+      online_replay_global: _,
+      online_replay_workspace: _,
+      online_replay_workspaces: _,
+      online_group_scalars: _,
+      online_head_biases: _,
+      ..
+    }) => {
+      assert!(
+        !online_model_version.is_empty(),
+        "expected online model version in status"
+      );
+    }
+    other => panic!("unexpected status response: {other:?}"),
+  }
+
   let mut rows = db
     .conn
     .query("SELECT COUNT(*) FROM online_feedback", ())

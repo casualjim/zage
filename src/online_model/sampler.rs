@@ -102,6 +102,7 @@ pub(crate) struct SamplerPools {
 
 pub(crate) struct NegativeSampler<'a> {
   global: &'a GlobalCommandPool,
+  bucket_count: u32,
 }
 
 pub(crate) struct NegativeSample {
@@ -110,8 +111,11 @@ pub(crate) struct NegativeSample {
 }
 
 impl<'a> NegativeSampler<'a> {
-  pub(crate) fn new(global: &'a GlobalCommandPool) -> Self {
-    Self { global }
+  pub(crate) fn new(global: &'a GlobalCommandPool, bucket_count: u32) -> Self {
+    Self {
+      global,
+      bucket_count,
+    }
   }
 
   pub(crate) async fn build_pools(
@@ -255,7 +259,7 @@ impl<'a> NegativeSampler<'a> {
       }
       selected.insert(hash);
 
-      let cmd_buckets = command_buckets(shellname, &cmd);
+      let cmd_buckets = command_buckets(shellname, &cmd, self.bucket_count);
       if cmd_buckets.is_empty() {
         continue;
       }
@@ -331,14 +335,14 @@ fn head_hash_for_command(shellname: &str, command: &str) -> Option<u64> {
   Some(stable_hash(parts.head.trim()))
 }
 
-fn command_buckets(shellname: &str, command: &str) -> Vec<(u32, f32)> {
+fn command_buckets(shellname: &str, command: &str, bucket_count: u32) -> Vec<(u32, f32)> {
   let mut map = HashMap::<u32, f32>::new();
   let mut scratch_indices = Vec::new();
   let mut scratch = Vec::new();
   for tok in super::command_tokens(shellname, command) {
     crate::hash_util::stable_char_ngrams_buckets(
       &tok,
-      crate::hash_util::SUBWORD_BUCKETS,
+      bucket_count,
       &mut scratch_indices,
       &mut scratch,
     );

@@ -590,6 +590,85 @@ pub async fn online_model_last_updated_at(conn: &Connection) -> Result<Option<i6
   Ok(last)
 }
 
+const ONLINE_MODEL_UPDATE_COUNT_KEY: &str = "online_model_update_count";
+
+pub async fn online_model_update_count(conn: &Connection) -> Result<u64> {
+  let Some(value) = online_model_meta_value(conn, ONLINE_MODEL_UPDATE_COUNT_KEY).await? else {
+    return Ok(0);
+  };
+  value.parse::<u64>().map_err(|err| {
+    crate::ZageError::ConfigError(format!(
+      "invalid online model update count: {value} ({err})"
+    ))
+  })
+}
+
+pub async fn bump_online_model_update_count(
+  conn: &Connection,
+  delta: u64,
+) -> Result<u64> {
+  if delta == 0 {
+    return online_model_update_count(conn).await;
+  }
+  let current = online_model_update_count(conn).await?;
+  let next = current.saturating_add(delta);
+  online_model_meta_set(conn, ONLINE_MODEL_UPDATE_COUNT_KEY, &next.to_string()).await?;
+  Ok(next)
+}
+
+pub async fn online_model_group_scalars(
+  conn: &Connection,
+) -> Result<Vec<(String, f64)>> {
+  let mut rows = conn
+    .query(
+      "SELECT group_name, value FROM online_group_scalar ORDER BY group_name",
+      (),
+    )
+    .await?;
+  let mut out = Vec::new();
+  while let Some(row) = rows.next().await? {
+    let group: String = row.get(0)?;
+    let value: f64 = row.get(1)?;
+    out.push((group, value));
+  }
+  Ok(out)
+}
+
+pub async fn online_model_head_biases(
+  conn: &Connection,
+  limit: usize,
+) -> Result<Vec<(String, f64)>> {
+  let mut rows = conn
+    .query(
+      "SELECT head, bias FROM online_head_bias ORDER BY ABS(bias) DESC LIMIT ?",
+      libsql::params![limit as i64],
+    )
+    .await?;
+  let mut out = Vec::new();
+  while let Some(row) = rows.next().await? {
+    let head: String = row.get(0)?;
+    let bias: f64 = row.get(1)?;
+    out.push((head, bias));
+  }
+  Ok(out)
+}
+
+pub async fn online_replay_workspace_roots(conn: &Connection) -> Result<u64> {
+  let mut rows = conn
+    .query(
+      "SELECT COUNT(DISTINCT workspace_root) FROM online_replay_workspace",
+      (),
+    )
+    .await?;
+  let row = rows.next().await?.ok_or_else(|| {
+    crate::ZageError::ConfigError(
+      "missing COUNT(DISTINCT workspace_root) row".to_string(),
+    )
+  })?;
+  let count: i64 = row.get(0)?;
+  Ok(count.max(0) as u64)
+}
+
 pub async fn reset_online_model(conn: &Connection) -> Result<()> {
   conn.execute("BEGIN", ()).await?;
 
@@ -617,6 +696,31 @@ pub async fn reset_online_model(conn: &Connection) -> Result<()> {
   }
 
   conn.execute("COMMIT", ()).await?;
+  Ok(())
+}
+
+async fn online_model_meta_value(conn: &Connection, key: &str) -> Result<Option<String>> {
+  let mut rows = conn
+    .query(
+      "SELECT value FROM online_model_meta WHERE key = ?",
+      libsql::params![key.to_string()],
+    )
+    .await?;
+  let Some(row) = rows.next().await? else {
+    return Ok(None);
+  };
+  let value: String = row.get(0)?;
+  Ok(Some(value))
+}
+
+async fn online_model_meta_set(conn: &Connection, key: &str, value: &str) -> Result<()> {
+  conn
+    .execute(
+      "INSERT INTO online_model_meta (key, value) VALUES (?, ?)
+       ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+      libsql::params![key.to_string(), value.to_string()],
+    )
+    .await?;
   Ok(())
 }
 

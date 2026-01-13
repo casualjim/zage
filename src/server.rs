@@ -19,8 +19,9 @@ use crate::capture_profile;
 use crate::config::DbConfig;
 use crate::db::{
   OnlineFeedbackEvent, delete_history_by_command, import_history, insert_invocation,
-  online_model_last_updated_at, online_model_status, open_db_with_config, reset_online_model,
-  update_stats_for_invocation, upsert_online_feedback,
+  online_model_group_scalars, online_model_head_biases, online_model_last_updated_at,
+  online_model_status, online_model_update_count, online_replay_workspace_roots,
+  open_db_with_config, reset_online_model, update_stats_for_invocation, upsert_online_feedback,
 };
 use crate::indexer::rebuild_stats;
 use crate::online_model::trainer::train_on_invocations as train_online_model;
@@ -144,6 +145,14 @@ pub enum Response {
     model_loaded: bool,
     history_count: u64,
     last_train: Option<i64>,
+    online_model_version: String,
+    online_update_count: u64,
+    online_last_update: Option<i64>,
+    online_replay_global: u64,
+    online_replay_workspace: u64,
+    online_replay_workspaces: u64,
+    online_group_scalars: Vec<(String, f64)>,
+    online_head_biases: Vec<(String, f64)>,
   },
   Text {
     lines: Vec<String>,
@@ -626,19 +635,55 @@ async fn handle_request(
     }
     Request::ModelStatus => match pool.get().await {
       Ok(conn) => match online_model_status(&conn).await {
-        Ok(status) => Response::Text {
-          lines: vec![format!(
-            "Online model: meta={}, token_embeddings={}, command_biases={}, head_biases={}, group_scalars={}, replay_global={}, replay_workspace={}, feedback={}",
+        Ok(status) => {
+          let config = crate::config::OnlineModelConfig::load()
+            .unwrap_or(crate::config::OnlineModelConfig::default());
+          let update_count = online_model_update_count(&conn).await.unwrap_or(0);
+          let last_update = online_model_last_updated_at(&conn).await.ok().flatten();
+          let replay_workspaces = online_replay_workspace_roots(&conn).await.unwrap_or(0);
+          let group_scalars = online_model_group_scalars(&conn).await.unwrap_or_default();
+          let head_biases = online_model_head_biases(&conn, 8).await.unwrap_or_default();
+          let warmed_up = status.token_embeddings > 0 || status.group_scalars > 0;
+
+          let mut lines = Vec::new();
+          lines.push(format!(
+            "Online model: version={}, warmed_up={}, update_count={}, last_update={:?}",
+            config.model_version(),
+            warmed_up,
+            update_count,
+            last_update
+          ));
+          lines.push(format!(
+            "Replay: global={}, workspace={}, workspaces={}",
+            status.replay_global, status.replay_workspace, replay_workspaces
+          ));
+          lines.push(format!(
+            "Tables: meta={}, token_embeddings={}, command_biases={}, head_biases={}, group_scalars={}, feedback={}",
             status.meta_entries,
             status.token_embeddings,
             status.command_biases,
             status.head_biases,
             status.group_scalars,
-            status.replay_global,
-            status.replay_workspace,
             status.feedback
-          )],
-        },
+          ));
+          if !group_scalars.is_empty() {
+            let rendered = group_scalars
+              .iter()
+              .map(|(name, value)| format!("{name}={value:.3}"))
+              .collect::<Vec<_>>()
+              .join(", ");
+            lines.push(format!("Group scalars: {rendered}"));
+          }
+          if !head_biases.is_empty() {
+            let rendered = head_biases
+              .iter()
+              .map(|(head, bias)| format!("{head}={bias:.3}"))
+              .collect::<Vec<_>>()
+              .join(", ");
+            lines.push(format!("Top head biases: {rendered}"));
+          }
+          Response::Text { lines }
+        }
         Err(err) => Response::Error {
           message: err.to_string(),
         },
@@ -1043,10 +1088,12 @@ fn default_history_path(shell: &str) -> Result<PathBuf> {
 }
 
 async fn status_response(pool: &Arc<ConnectionPool>) -> Response {
-  let (model_loaded, history_count, last_train) = match pool.get().await {
+  let default_config = crate::config::OnlineModelConfig::default();
+  let (model_loaded, history_count, last_train, online) = match pool.get().await {
     Ok(conn) => {
       let model_status = online_model_status(&conn).await.ok();
       let model_loaded = model_status
+        .as_ref()
         .map(|status| {
           status.meta_entries > 0
             || status.token_embeddings > 0
@@ -1066,14 +1113,69 @@ async fn status_response(pool: &Arc<ConnectionPool>) -> Response {
         Err(_) => 0,
       };
       let last_train = online_model_last_updated_at(&conn).await.ok().flatten();
-      (model_loaded, history_count, last_train)
+      let config =
+        crate::config::OnlineModelConfig::load().unwrap_or_else(|_| default_config.clone());
+      let update_count = online_model_update_count(&conn).await.unwrap_or(0);
+      let replay_workspaces = online_replay_workspace_roots(&conn).await.unwrap_or(0);
+      let group_scalars = online_model_group_scalars(&conn).await.unwrap_or_default();
+      let head_biases = online_model_head_biases(&conn, 8).await.unwrap_or_default();
+      let (replay_global, replay_workspace) = model_status
+        .map(|status| (status.replay_global, status.replay_workspace))
+        .unwrap_or((0, 0));
+      (
+        model_loaded,
+        history_count,
+        last_train,
+        (
+          config.model_version(),
+          update_count,
+          last_train,
+          replay_global,
+          replay_workspace,
+          replay_workspaces,
+          group_scalars,
+          head_biases,
+        ),
+      )
     }
-    Err(_) => (false, 0, None),
+    Err(_) => (
+      false,
+      0,
+      None,
+      (
+        default_config.model_version(),
+        0,
+        None,
+        0,
+        0,
+        0,
+        Vec::new(),
+        Vec::new(),
+      ),
+    ),
   };
+  let (
+    online_model_version,
+    online_update_count,
+    online_last_update,
+    online_replay_global,
+    online_replay_workspace,
+    online_replay_workspaces,
+    online_group_scalars,
+    online_head_biases,
+  ) = online;
   Response::Status {
     model_loaded,
     history_count,
     last_train,
+    online_model_version,
+    online_update_count,
+    online_last_update,
+    online_replay_global,
+    online_replay_workspace,
+    online_replay_workspaces,
+    online_group_scalars,
+    online_head_biases,
   }
 }
 

@@ -83,11 +83,14 @@ pub fn window_tokens(shellname: &str, recent_commands: &[String], window: usize)
 }
 
 pub fn subword_buckets_for_token(token: &str) -> Vec<(u32, f32)> {
+  let bucket_count = crate::config::OnlineModelConfig::load()
+    .map(|cfg| cfg.bucket_count)
+    .unwrap_or(crate::hash_util::SUBWORD_BUCKETS);
   let mut scratch_indices = Vec::new();
   let mut scratch = Vec::new();
   crate::hash_util::stable_char_ngrams_buckets(
     token,
-    crate::hash_util::SUBWORD_BUCKETS,
+    bucket_count,
     &mut scratch_indices,
     &mut scratch,
   );
@@ -95,13 +98,16 @@ pub fn subword_buckets_for_token(token: &str) -> Vec<(u32, f32)> {
 }
 
 pub fn subword_buckets_for_tokens(tokens: &[String]) -> Vec<(u32, f32)> {
+  let bucket_count = crate::config::OnlineModelConfig::load()
+    .map(|cfg| cfg.bucket_count)
+    .unwrap_or(crate::hash_util::SUBWORD_BUCKETS);
   let mut out = Vec::new();
   let mut scratch_indices = Vec::new();
   let mut scratch = Vec::new();
   for token in tokens {
     crate::hash_util::stable_char_ngrams_buckets(
       token,
-      crate::hash_util::SUBWORD_BUCKETS,
+      bucket_count,
       &mut scratch_indices,
       &mut scratch,
     );
@@ -126,7 +132,7 @@ fn time_bucket(ts: i64) -> u8 {
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::hash_util::{SUBWORD_BUCKETS, stable_bucket_and_sign, stable_char_ngrams_buckets};
+  use crate::hash_util::{stable_bucket_and_sign, stable_char_ngrams_buckets};
 
   #[test]
   fn generalized_command_tokens_flags_are_sorted_and_deduped() {
@@ -222,21 +228,23 @@ mod tests {
 
   #[test]
   fn stable_bucket_and_sign_is_deterministic() {
-    let (b1, s1) = stable_bucket_and_sign("tok", SUBWORD_BUCKETS);
-    let (b2, s2) = stable_bucket_and_sign("tok", SUBWORD_BUCKETS);
+    let bucket_count = crate::config::OnlineModelConfig::default().bucket_count;
+    let (b1, s1) = stable_bucket_and_sign("tok", bucket_count);
+    let (b2, s2) = stable_bucket_and_sign("tok", bucket_count);
     assert_eq!(b1, b2);
     assert_eq!(s1, s2);
   }
 
   #[test]
   fn stable_char_ngram_hashing_is_deterministic_and_in_range() {
+    let bucket_count = crate::config::OnlineModelConfig::default().bucket_count;
     let mut idx1 = Vec::new();
     let mut out1 = Vec::new();
-    stable_char_ngrams_buckets("token", SUBWORD_BUCKETS, &mut idx1, &mut out1);
+    stable_char_ngrams_buckets("token", bucket_count, &mut idx1, &mut out1);
     let mut idx2 = Vec::new();
     let mut out2 = Vec::new();
-    stable_char_ngrams_buckets("token", SUBWORD_BUCKETS, &mut idx2, &mut out2);
+    stable_char_ngrams_buckets("token", bucket_count, &mut idx2, &mut out2);
     assert_eq!(out1, out2);
-    assert!(out1.iter().all(|(b, _)| *b < SUBWORD_BUCKETS));
+    assert!(out1.iter().all(|(b, _)| *b < bucket_count));
   }
 }

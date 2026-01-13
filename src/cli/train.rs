@@ -110,17 +110,51 @@ async fn model_status_server() -> Result<()> {
 
 async fn model_status_embedded(db: &Db) -> Result<()> {
   let status = online_model_status(&db.conn).await?;
+  let config = crate::config::OnlineModelConfig::load()
+    .unwrap_or(crate::config::OnlineModelConfig::default());
+  let update_count = crate::db::online_model_update_count(&db.conn).await?;
+  let last_update = crate::db::online_model_last_updated_at(&db.conn).await?;
+  let replay_workspaces = crate::db::online_replay_workspace_roots(&db.conn).await?;
+  let group_scalars = crate::db::online_model_group_scalars(&db.conn).await?;
+  let head_biases = crate::db::online_model_head_biases(&db.conn, 8).await?;
+  let warmed_up = status.token_embeddings > 0 || status.group_scalars > 0;
+
   eprintln!(
-    "Online model: meta={}, token_embeddings={}, command_biases={}, head_biases={}, group_scalars={}, replay_global={}, replay_workspace={}, feedback={}",
+    "Online model: version={}, warmed_up={}, update_count={}, last_update={:?}",
+    config.model_version(),
+    warmed_up,
+    update_count,
+    last_update
+  );
+  eprintln!(
+    "Replay: global={}, workspace={}, workspaces={}",
+    status.replay_global, status.replay_workspace, replay_workspaces
+  );
+  eprintln!(
+    "Tables: meta={}, token_embeddings={}, command_biases={}, head_biases={}, group_scalars={}, feedback={}",
     status.meta_entries,
     status.token_embeddings,
     status.command_biases,
     status.head_biases,
     status.group_scalars,
-    status.replay_global,
-    status.replay_workspace,
     status.feedback
   );
+  if !group_scalars.is_empty() {
+    let rendered = group_scalars
+      .iter()
+      .map(|(name, value)| format!("{name}={value:.3}"))
+      .collect::<Vec<_>>()
+      .join(", ");
+    eprintln!("Group scalars: {rendered}");
+  }
+  if !head_biases.is_empty() {
+    let rendered = head_biases
+      .iter()
+      .map(|(head, bias)| format!("{head}={bias:.3}"))
+      .collect::<Vec<_>>()
+      .join(", ");
+    eprintln!("Top head biases: {rendered}");
+  }
   Ok(())
 }
 

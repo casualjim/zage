@@ -5,10 +5,10 @@ use libsql::{Connection, Value};
 use crate::Result;
 use crate::core::{Candidate, SystemTimeProvider, TimeProvider};
 pub use crate::core::{ScoreBreakdown, Suggestion};
-use crate::db::get_recent_invocations;
+use crate::config::{OnlineModelBlendConfig, OnlineModelConfig};
+use crate::db::{get_recent_invocations, online_model_status};
 use crate::online_model::trainer::{
-  DEFAULT_WINDOW as ONLINE_MODEL_DEFAULT_WINDOW, OnlineScoreContext,
-  score_commands as online_score_commands,
+  OnlineScoreContext, score_commands as online_score_commands,
 };
 use crate::phase::PhaseConfig;
 use crate::repo::find_repo_root;
@@ -497,48 +497,12 @@ fn time_bucket(ts: i64) -> u8 {
   }
 }
 
-#[derive(Debug, Clone, Copy)]
-struct OnlineBlendConfig {
-  enabled: bool,
-  alpha: f64,
-  margin_gate: f64,
-  min_score_gate: f64,
-}
-
-impl OnlineBlendConfig {
-  fn load() -> Self {
-    let enabled = std::env::var("ZAGE_ONLINE_MODEL_RANKING")
-      .ok()
-      .map(|v| matches!(v.as_str(), "1" | "true" | "TRUE" | "yes" | "YES"))
-      .unwrap_or(false);
-    let alpha = std::env::var("ZAGE_ONLINE_MODEL_ALPHA")
-      .ok()
-      .and_then(|v| v.parse::<f64>().ok())
-      .unwrap_or(0.25);
-    let margin_gate = std::env::var("ZAGE_ONLINE_MODEL_MARGIN_GATE")
-      .ok()
-      .and_then(|v| v.parse::<f64>().ok())
-      .unwrap_or(0.05);
-    let min_score_gate = std::env::var("ZAGE_ONLINE_MODEL_MIN_SCORE_GATE")
-      .ok()
-      .and_then(|v| v.parse::<f64>().ok())
-      .unwrap_or(0.0);
-
-    Self {
-      enabled,
-      alpha,
-      margin_gate: margin_gate.max(0.0),
-      min_score_gate,
-    }
-  }
-}
-
 fn apply_online_model_blend(
   suggestions: &mut [Suggestion],
   model_scores: &[f32],
-  cfg: OnlineBlendConfig,
+  cfg: OnlineModelBlendConfig,
 ) {
-  if !cfg.enabled || cfg.alpha == 0.0 || suggestions.is_empty() {
+  if cfg.alpha == 0.0 || suggestions.is_empty() {
     return;
   }
   if suggestions.len() != model_scores.len() {
@@ -727,12 +691,15 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
     });
   }
 
-  let online_cfg = OnlineBlendConfig::load();
-  if online_cfg.enabled && !scored.is_empty() {
+  let online_cfg = OnlineModelConfig::load()?;
+  let online_status = online_model_status(context.conn).await?;
+  let warmed_up = online_status.token_embeddings > 0 || online_status.group_scalars > 0;
+  if warmed_up && !scored.is_empty() {
     let commands = scored
       .iter()
       .map(|suggestion| suggestion.command.clone())
       .collect::<Vec<_>>();
+    let blend = online_cfg.blend;
     let model_scores = online_score_commands(
       context.conn,
       OnlineScoreContext {
@@ -745,12 +712,13 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
         session_id: context.session_id,
         unix_timestamp: context.now,
         recent_commands: context.sequence_commands,
-        window: ONLINE_MODEL_DEFAULT_WINDOW,
+        window: online_cfg.window,
       },
       &commands,
+      &online_cfg,
     )
     .await?;
-    apply_online_model_blend(&mut scored, &model_scores, online_cfg);
+    apply_online_model_blend(&mut scored, &model_scores, blend);
   }
 
   scored.sort_by(|a, b| {
@@ -1314,8 +1282,7 @@ mod tests {
     apply_online_model_blend(
       &mut suggestions,
       &model_scores,
-      OnlineBlendConfig {
-        enabled: true,
+      OnlineModelBlendConfig {
         alpha: 5.0,
         margin_gate: 0.05,
         min_score_gate: 0.0,
@@ -1344,8 +1311,7 @@ mod tests {
     apply_online_model_blend(
       &mut suggestions,
       &model_scores,
-      OnlineBlendConfig {
-        enabled: true,
+      OnlineModelBlendConfig {
         alpha: 5.0,
         margin_gate: 0.05,
         min_score_gate: 0.0,
