@@ -1,18 +1,45 @@
-# Zage - The Intelligent Shell Sage
+# Zage 🧙 — AI-powered shell suggestions
 
-Zage ("Z Shell" + "Sage") is a Rust CLI that predicts the next command you're likely to run based
-on your shell history, working directory, and command context. It can run fully embedded or as a
-background server and integrates with zsh-autosuggestions.
+Zage is a small Rust CLI that **predicts what you’re about to type next** in your shell.
+It learns from your history and context (repo, folder, exit status, recent commands) using a lightweight **online embedding model** stored in your local database.
 
-## Features
+- ✅ Works offline and stays local by default (no cloud required)
+- ⚡ Learns your workflows per-repo ("in this project I usually run X after Y")
+- 🧠 Uses **AI** to generalize beyond exact string matches (flags reorder, similar commands, similar args)
 
-- 🔮 **Command prediction** from your history
-- 🧠 **Context-aware**: working directory, hostname, username, session
-- 📊 **Sequence learning**: frequent bigrams/trigrams and token sequences
-- 🔎 **Accurate parsing** via tree-sitter (bash + zsh)
-- 🖥️ **Shell integration**: zsh autosuggest backend + hooks
-- 🧰 **Flexible storage**: local, remote (Turso/libsql), or remote replica
-- 🔐 **Encryption support** for private history data
+## Why you’ll want this
+
+- 🔮 **Fewer keystrokes**: suggestions match what you *actually* do in *this* directory/project.
+- 🧩 **Subtle improvements**: not just “history search” — it learns patterns and generalizes.
+- 🏠 **Privacy-friendly**: everything can be local (or you can opt into remote sync + encryption).
+
+## Quick demo (no shell setup yet)
+
+```bash
+# 1) Import history and train the model (pick your shell)
+zage import --shell zsh
+
+# 2) Ask for suggestions
+zage suggest --count 5
+
+# 3) Ask for token completions for the *current word*
+zage suggest --current-line "git " --count 5
+```
+
+## Setup cheat-sheet (for beginners)
+
+1) Figure out your shell:
+
+```bash
+echo "$SHELL"
+```
+
+2) Edit the matching file:
+
+- **bash** → `~/.bashrc`
+- **zsh** → `~/.zshrc`
+
+Then follow the **Bash** or **Zsh** setup section below and restart your shell (or open a new terminal tab).
 
 ## Installation
 
@@ -22,43 +49,104 @@ Build from source:
 git clone https://github.com/casualjim/zage.git
 cd zage
 cargo build --release
+
+# optional: install `zage` into ~/.cargo/bin
+cargo install --path .
 ```
 
-Development setup:
+Make sure `~/.cargo/bin` is on your PATH (restart your terminal after installing).
+
+Dev setup:
 
 ```bash
 mise install
 mise build:debug
 ```
 
-## Quick Start
+## Setup (pick one): simplest vs best experience
 
-1) Import history (automatically trains the online model):
+Zage can run in two modes:
 
-```bash
-zage import --shell zsh
-```
+- **Embedded (simplest)**: no daemon; commands talk directly to the DB.
+- **Server/service (best experience)**: a background daemon handles requests and updates the online model continuously.
 
-For a clean model bootstrap, add `--reset-model`:
+### Option A — Simplest setup (embedded; no daemon)
 
-```bash
-zage import --shell zsh --reset-model
-```
-
-2) Ask for suggestions:
+Create a config file:
 
 ```bash
-zage suggest --current-line "git " --count 5
+mkdir -p ~/.config/zage
+cat > ~/.config/zage/config.toml <<'TOML'
+backend = "embedded"
+TOML
 ```
 
-## Shell Integration
+Now `zage suggest` and `zage import` work without installing a service.
 
-### Zsh (autosuggestions + recording)
+> Note: in embedded mode, the online model is trained during `zage import` (and other explicit training steps), not continuously after every command.
+
+### Option B — Best experience (install background service)
+
+Install the user service (systemd on Linux, launchd on macOS):
 
 ```bash
-# source after zsh-autosuggestions
-source /path/to/zage/src/shell_integration/zsh.zsh
+zage service install
 ```
+
+If you prefer foreground (for debugging):
+
+```bash
+zage server
+```
+
+> In server/service mode, Zage can update the online model continuously as your shell records commands.
+
+## Shell integration (recording + autosuggestions)
+
+Once Zage is installed, add a small snippet to your **shell config** so Zage can:
+
+- record commands as you run them (this is how it learns)
+- show suggestions (zsh only, via zsh-autosuggestions)
+
+### Zsh (recommended: zsh-autosuggestions + Zage)
+
+Zsh is where Zage shines the most, because it can plug into **zsh-autosuggestions**.
+
+#### Why this is better than zsh-autosuggestions alone
+
+zsh-autosuggestions by itself mostly suggests from:
+
+- your history (often global)
+- simple matching
+
+Zage adds a smarter backend that uses **AI-style embeddings + context**, so suggestions are more likely to match what you do *in this repo/dir*, and it can generalize a bit (flags reordered, similar commands).
+
+#### Setup
+
+1) Ensure you have zsh-autosuggestions installed (pick any method you like):
+
+- https://github.com/zsh-users/zsh-autosuggestions
+
+2) In `~/.zshrc`, load zsh-autosuggestions first, then load Zage:
+
+```bash
+# 1) zsh-autosuggestions
+# Install it first: https://github.com/zsh-users/zsh-autosuggestions
+# Then source it here (example path; yours may differ):
+# source /path/to/zsh-autosuggestions/zsh-autosuggestions.zsh
+
+# 2) Zage (adjust to where you cloned it)
+ZAGE_DIR="$HOME/src/zage"
+source "$ZAGE_DIR/src/shell_integration/zsh.zsh"
+```
+
+3) Restart your terminal (or `exec zsh`).
+
+Zsh options:
+
+- `ZAGE_AUTOSUGGEST_DISABLE=1` disables zage autosuggestions
+- `ZAGE_AUTOSUGGEST_ONLY=1` makes zage the only autosuggest strategy
+- `ZAGE_ZSH_DEBUG=/path/to/log` writes debug logs
 
 Antidote users:
 
@@ -67,75 +155,72 @@ Antidote users:
 casualjim/zage
 ```
 
-Zsh options:
+### Bash (beginner-friendly setup)
 
-- `ZAGE_AUTOSUGGEST_DISABLE=1` disables zage autosuggestions
-- `ZAGE_AUTOSUGGEST_ONLY=1` makes zage the only autosuggest strategy
-- `ZAGE_ZSH_DEBUG=/path/to/log` writes debug logs
+Many Linux distros default to **bash**, so here’s the shortest reliable setup.
 
-### Bash (requires bash-preexec)
+#### 1) Install bash-preexec
+
+Zage’s bash integration relies on **bash-preexec** to get `preexec`/`precmd` hooks (bash doesn’t provide those by default).
+
+- https://github.com/rcaloras/bash-preexec
+
+After installing it, you should have a `bash-preexec.sh` you can `source`.
+
+Example (git clone):
 
 ```bash
-# load bash-preexec first
-source /path/to/bash-preexec.sh
-source /path/to/zage/src/shell_integration/bash.sh
+mkdir -p ~/.config
+git clone https://github.com/rcaloras/bash-preexec ~/.config/bash-preexec
+
+# then in ~/.bashrc:
+# source "$HOME/.config/bash-preexec/bash-preexec.sh"
 ```
+
+#### 2) Add this to `~/.bashrc`
+
+```bash
+# 1) bash-preexec (adjust path)
+source /path/to/bash-preexec.sh
+
+# 2) Zage (adjust to where you cloned it)
+ZAGE_DIR="$HOME/src/zage"
+source "$ZAGE_DIR/src/shell_integration/bash.sh"
+```
+
+#### 3) Restart your terminal (or `exec bash`)
 
 Bash options:
 
 - `ZAGE_BASH_DEBUG=/path/to/log` writes debug logs
 
-## Command Reference
+## Common commands
 
-- `zage import --shell {zsh|bash} [FILE] [--no-index] [--reset-model] [--embedded-db]`
-  - Imports shell history and trains the online model.
-  - Defaults to `$HISTFILE` when set, otherwise `~/.zsh_history` / `~/.bash_history`.
-  - `--reset-model`: Start with a clean model (discards previous training).
-  - `--no-index`: Skip rebuilding stats after import.
-- `zage index [--with-sequences] [--max-commands N] [--embedded-db]`
-  - Rebuilds statistics and optionally sequence patterns.
-- `zage sequences analyze [--min-support N] [--min-confidence F] [--min-lift F] [--max-len N]`
-  - Analyzes command sequence patterns.
-- `zage yank "command" [--match-expanded] [--no-sequences] [--embedded-db]`
-  - Removes matching history entries, then rebuilds stats.
-- `zage suggest [--current-line "prefix"] [--count N] [--recent-limit N]
-  [--no-sequences] [--autosuggest] [--completion-format plain|zsh] [--show-scores] [--timeout 2s]`
-  - With `--current-line`, returns token completions for the active token.
-  - Without it, returns full command suggestions ranked by the online model.
-  - `--autosuggest`: Forces full-line output for autosuggest backends.
-  - `--timeout`: Accepts human durations like `500ms`, `2s`, `1m` (server mode only).
-- `zage model status`
-  - Shows online model statistics (embedding count, training examples, etc.).
-- `zage model reset`
-  - Resets the online model (clears all learned embeddings).
-- `zage server`
-  - Runs the suggestion server in foreground mode.
-- `zage service install|uninstall`
-  - Installs/uninstalls the background service (systemd/launchd).
-- `zage record ...`
-  - Internal command used by shell hooks to record command execution.
-  - Requires `--shell`, `--command`, `--working-directory`, `--exit-status`, `--start-timestamp`, `--end-timestamp`.
-  - Updates the online model with each recorded command.
+```bash
+# Import your history (first-time setup / re-train)
+zage import --shell zsh
 
-## Embedded vs Server Mode
+# Ask for suggestions
+zage suggest --count 5
 
-Zage can run embedded (default) or via a background server.
+# Inspect training progress
+zage model status
 
-- Embedded: direct DB access; easiest to start.
-- Server: uses a Unix socket; best for low-latency suggestions and shared state.
+# Run the always-on daemon (optional)
+zage service install   # or: zage server
+```
 
-Config or force it per command:
+## Make it feel “AI-powered” (what’s actually happening)
 
-- Config: `backend = "embedded"` or `backend = "server"`
-- Override: `--embedded-db` on commands
+Zage isn’t calling a hosted LLM.
+Instead it maintains a small **online embedding model** (think: recommender system) that learns from:
 
-Server details:
+- your recent commands (short context window)
+- your current repo/folder
+- exit status (failed commands change what you do next)
+- and tokenized structure (command head, flags, normalized args)
 
-- Socket path:
-  - `ZAGE_SOCKET_PATH=/custom/zage.sock`
-  - Defaults: `/tmp/zage.sock` (macOS), `$XDG_RUNTIME_DIR/zage.sock` or `/tmp/zage.sock` (Linux)
-- Pool size: `ZAGE_DB_POOL_SIZE=30` (default 30)
-- Logs: `ZAGE_LOG=info|debug|trace`
+This is why suggestions can improve in subtle ways over time: it’s learning patterns, not just replaying strings.
 
 ## Configuration
 
@@ -255,7 +340,7 @@ Zage uses an **online two-tower embedding model** that learns continuously from 
    - Learns a **context embedding** from workspace, directory, exit status, and recent commands.
    - Learns a **command embedding** from normalized command structure (head, flags, args).
    - Scores candidates by dot product plus calibrated priors (frecency, sequences).
-   - Updates embeddings **online** after every command execution using negative sampling.
+   - Updates embeddings **online** in server/service mode (and during `zage import`) using negative sampling.
    - Uses replay buffers and confidence gates to prevent catastrophic forgetting.
 
 The model trains incrementally as you work, adapting to your workflows without offline batch training. See [`docs/online_next_command_prediction.md`](docs/online_next_command_prediction.md) for the full design.
@@ -325,13 +410,46 @@ zage record \
 
 ## Troubleshooting
 
-- **"Suggest server unavailable"**: Start the server (`zage server`) or install the service
-  (`zage service install`), or switch to embedded mode (`backend = "embedded"` or `--embedded-db`).
-- **No suggestions**: Run `zage import --shell zsh` to import your history and train the model.
-- **Poor suggestions**: The online model needs training data. Run `zage model status` to check
-  training progress. Consider `zage import --reset-model` for a clean start.
-- **Autosuggest not working**: Ensure zsh-autosuggestions is loaded before the Zage script, and
-  `ZAGE_AUTOSUGGEST_DISABLE` is not set to `1`.
+### I don’t know if I’m using zsh or bash
+
+Run:
+
+```bash
+echo "$SHELL"
+```
+
+Then follow the matching section above (Zsh or Bash).
+
+### I’m not seeing any suggestions / `zage suggest` is empty
+
+1) Import history first:
+
+```bash
+zage import --shell zsh
+# or
+zage import --shell bash
+```
+
+2) Check model status:
+
+```bash
+zage model status
+```
+
+### I see “Suggest server unavailable”
+
+That means you’re in **server mode** but the daemon isn’t running.
+Pick one:
+
+- Install the service: `zage service install`
+- Run in foreground: `zage server`
+- Or switch to embedded mode by setting `backend = "embedded"` in `~/.config/zage/config.toml`
+
+### Zsh autosuggestions aren’t showing up
+
+- Ensure zsh-autosuggestions is loaded **before** `zsh.zsh`.
+- Ensure `ZAGE_AUTOSUGGEST_DISABLE` is not set to `1`.
+- For debugging: set `ZAGE_ZSH_DEBUG=/tmp/zage-zsh.log` and restart your shell.
 
 ## License
 
