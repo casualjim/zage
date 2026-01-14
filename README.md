@@ -101,7 +101,7 @@ source /path/to/zage/src/shell_integration/bash.sh
 - `zage model reset`
 - `zage server` (foreground server)
 - `zage service install|uninstall` (systemd/launchd)
-- `zage record ...` (internal; used by shell hooks)
+- `zage record ...` (internal; used by shell hooks; requires `--shell`)
 
 ## Embedded vs Server Mode
 
@@ -298,6 +298,7 @@ Shell hooks already call this, but you can record a single invocation manually:
 
 ```bash
 zage record \
+  --shell "zsh" \
   --command "ls -la" \
   --working-directory "$PWD" \
   --exit-status 0 \
