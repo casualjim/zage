@@ -5,6 +5,8 @@
 > **CRITICAL: Prefer the Rust LSP for Rust code navigation.** The Rust LSP is the primary tool for Rust files because it is accurate, fast, and type-aware. That said, other tools (rg/find/manual browsing) are still acceptable when they are faster for the task, the LSP is unavailable, or you're working outside Rust code. See the "Code Navigation (Use Rust LSP!)" section for detailed commands.
 >
 > **CRITICAL: Do NOT run git mutations without explicit approval from the user** Do NOT ever run git checkout/revert/restore/reset without EXPLICIT APPROVAL from the USER
+>
+> **CRITICAL: DO NOT ASK KNOWABLE QUESTIONS** Do not ask the user for information that you can look up. 
 
 
 ## Build, Test, and Development Commands
@@ -90,11 +92,24 @@ mcp__rust-lsp__completion "crates/slipstreamd/src/routes.rs" 42 20
 
 
 ## Code Style & Formatting
+
+- Refactor, don't keep adding to the technical debt
+- Clean up what is no longer needed
+- KISS: keep it stupid simple
+- YAGNI: you aren't going to need it, only implement what was asked do not make up requirements
+- Backwards compatibility is not a goal, modify and break the existing code
+- do not create a new file for every new task, work with what already exist.
+- do not create limits or fallbacks for specialized libraries.
+- Create the simplest possible thing that could possibly work
+- Use Uuid::now_v7 not v4
+
 - Rust:
   - Use `eyre::Result` for error handling, `thiserror` for domain errors
   - No `unwrap()` or `expect()` in public APIs
   - Async streaming first - avoid `collect()` patterns
+  - Prefer streaming API's over batching API's. So return streams not vecs
   - Imports: Group std/core, external crates, and internal modules separately
+  - Avoid allocations when you can, proactive cloning is not a good look
   - Formatting: run `mise format`; never invoke `cargo fmt` directly
   - Strict error handling - fail spectacularly, don't swallow errors
 - TypeScript:
