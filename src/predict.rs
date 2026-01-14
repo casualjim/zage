@@ -73,6 +73,40 @@ fn expanded_command_for(
   }
 }
 
+fn normalize_prefix_for_match(prefix: &str) -> String {
+  let trimmed = prefix.trim_start();
+  let mut out = String::with_capacity(trimmed.len());
+  let mut last_was_space = false;
+  for ch in trimmed.chars() {
+    if ch.is_whitespace() {
+      if !last_was_space {
+        out.push(' ');
+        last_was_space = true;
+      }
+    } else {
+      out.push(ch);
+      last_was_space = false;
+    }
+  }
+  out
+}
+
+fn apply_prefix_spacing(prefix: &str, normalized_prefix: &str, suggestions: &mut [Suggestion]) {
+  if prefix.is_empty() || normalized_prefix.is_empty() {
+    return;
+  }
+  for suggestion in suggestions.iter_mut() {
+    let normalized_command = normalize_prefix_for_match(&suggestion.command);
+    let Some(rest) = normalized_command.strip_prefix(normalized_prefix) else {
+      continue;
+    };
+    if rest.is_empty() {
+      continue;
+    }
+    suggestion.command = format!("{prefix}{rest}");
+  }
+}
+
 fn resolve_shellname(config: &SuggestConfig) -> Result<String> {
   let Some(shellname) = config.shellname.as_deref() else {
     return Err(ZageError::ConfigError(
@@ -766,6 +800,7 @@ async fn completion_candidates(
   aliases: &HashMap<String, String>,
   session_filter: Option<i64>,
 ) -> Result<Vec<Suggestion>> {
+  let normalized_prefix = normalize_prefix_for_match(prefix);
   let project_root = config
     .cwd
     .as_deref()
@@ -860,13 +895,15 @@ async fn completion_candidates(
   {
     let has_prefix_match = arg_suggestions
       .iter()
-      .any(|suggestion| suggestion.command.starts_with(prefix));
+      .any(|suggestion| {
+        normalize_prefix_for_match(&suggestion.command).starts_with(&normalized_prefix)
+      });
     if !has_prefix_match {
       // fall through to normal completion candidates
     } else {
-      let trimmed_prefix = prefix.trim_end();
+      let trimmed_prefix = normalized_prefix.trim_end();
       arg_suggestions.retain(|suggestion| {
-        if suggestion.command.trim_end() == trimmed_prefix {
+        if normalize_prefix_for_match(&suggestion.command).trim_end() == trimmed_prefix {
           return false;
         }
         if prefix_flags.is_empty() && prefix_args.is_empty() {
@@ -908,6 +945,7 @@ async fn completion_candidates(
         if prefer_full_line || (ends_with_space && !prefix_flags.is_empty()) || ends_with_quote {
           arg_suggestions_for_merge = Some(arg_suggestions);
         } else {
+          apply_prefix_spacing(prefix, &normalized_prefix, &mut arg_suggestions);
           return Ok(arg_suggestions);
         }
       }
@@ -920,9 +958,12 @@ async fn completion_candidates(
     match_prefix = prefix.to_string();
     apply_env_prefix.clear();
   }
-  let match_prefixes = build_prefix_variants(&match_prefix, aliases);
+  let normalized_match_prefix = normalize_prefix_for_match(&match_prefix);
+  let match_prefixes = build_prefix_variants(&normalized_match_prefix, aliases);
   if match_prefixes.is_empty() {
-    return Ok(env_suggestions.unwrap_or_default());
+    let mut suggestions = env_suggestions.unwrap_or_default();
+    apply_prefix_spacing(prefix, &normalized_prefix, &mut suggestions);
+    return Ok(suggestions);
   }
 
   let mut sql = String::from(
@@ -988,17 +1029,17 @@ async fn completion_candidates(
 
     let expanded = expand_alias(&command, aliases);
     let expanded_for_score = expanded.as_deref().unwrap_or(&command);
-    let matches_prefix = match_prefixes
-      .iter()
-      .any(|variant| command.starts_with(variant) || expanded_for_score.starts_with(variant));
+    let matches_prefix = match_prefixes.iter().any(|variant| {
+      command.starts_with(variant) || expanded_for_score.starts_with(variant)
+    });
     if !matches_prefix {
       continue;
     }
     let norm_tokens = normalized_tokens(expanded_for_score);
     let similarity = token_similarity(prefix_norm, &norm_tokens);
-    let prefix_score = if command.starts_with(prefix) {
+    let prefix_score = if command.starts_with(&normalized_match_prefix) {
       1.0
-    } else if expanded_for_score.starts_with(prefix) {
+    } else if expanded_for_score.starts_with(&normalized_match_prefix) {
       0.8
     } else {
       0.0
@@ -1028,7 +1069,7 @@ async fn completion_candidates(
     let mut suggestion_command = command.clone();
     for (alias, expansion) in aliases {
       if let Some(alias_command) = alias_for_command(alias, expansion, &command)
-        && alias_command.starts_with(&match_prefix)
+        && alias_command.starts_with(&normalized_match_prefix)
       {
         suggestion_command = alias_command;
         break;
@@ -1069,6 +1110,7 @@ async fn completion_candidates(
       if let Some(mut arg_suggestions) = arg_suggestions_for_merge.take() {
         merged.append(&mut arg_suggestions);
       }
+      apply_prefix_spacing(prefix, &normalized_prefix, &mut merged);
       return Ok(merged);
     }
     let mut rows = query_prepared(
@@ -1133,13 +1175,13 @@ async fn completion_candidates(
       let frequency = (freq as f64).ln_1p();
       let score = 0.7 * similarity + 0.2 * recency + 0.1 * frequency;
 
-      let mut suggestion_command = command.clone();
-      for (alias, expansion) in aliases {
-        if let Some(alias_command) = alias_for_command(alias, expansion, &command)
-          && alias_command.starts_with(&match_prefix)
-        {
-          suggestion_command = alias_command;
-          break;
+    let mut suggestion_command = command.clone();
+    for (alias, expansion) in aliases {
+      if let Some(alias_command) = alias_for_command(alias, expansion, &command)
+        && alias_command.starts_with(&normalized_match_prefix)
+      {
+        suggestion_command = alias_command;
+        break;
         }
       }
       if !apply_env_prefix.is_empty() {
@@ -1173,42 +1215,36 @@ async fn completion_candidates(
   }
 
   if !prefix.is_empty() {
-    let starts_with_space = prefix
+    let ends_with_space = normalized_prefix
       .chars()
-      .next()
+      .last()
       .map(|ch| ch.is_whitespace())
       .unwrap_or(false);
-    if starts_with_space {
+    let match_prefix = if ends_with_space {
+      normalized_prefix.trim_end()
+    } else {
+      normalized_prefix.as_str()
+    };
+    if match_prefix.is_empty() {
       scored.clear();
     } else {
-      let ends_with_space = prefix
-        .chars()
-        .last()
-        .map(|ch| ch.is_whitespace())
-        .unwrap_or(false);
-      let match_prefix = if ends_with_space {
-        prefix.trim_end()
-      } else {
-        prefix
-      };
-      if match_prefix.is_empty() {
-        scored.clear();
-      } else {
-        let has_prefix_match = scored
-          .iter()
-          .any(|suggestion| suggestion.command.starts_with(match_prefix));
-        if has_prefix_match {
-          if ends_with_space {
-            scored.retain(|suggestion| {
-              if !suggestion.command.starts_with(match_prefix) {
-                return false;
-              }
-              let rest = &suggestion.command[match_prefix.len()..];
-              rest.chars().next().map(|ch| ch.is_whitespace()).unwrap_or(true)
-            });
-          } else {
-            scored.retain(|suggestion| suggestion.command.starts_with(match_prefix));
-          }
+      let has_prefix_match = scored.iter().any(|suggestion| {
+        normalize_prefix_for_match(&suggestion.command).starts_with(match_prefix)
+      });
+      if has_prefix_match {
+        if ends_with_space {
+          scored.retain(|suggestion| {
+            let normalized_command = normalize_prefix_for_match(&suggestion.command);
+            if !normalized_command.starts_with(match_prefix) {
+              return false;
+            }
+            let rest = &normalized_command[match_prefix.len()..];
+            rest.chars().next().map(|ch| ch.is_whitespace()).unwrap_or(true)
+          });
+        } else {
+          scored.retain(|suggestion| {
+            normalize_prefix_for_match(&suggestion.command).starts_with(match_prefix)
+          });
         }
       }
     }
@@ -1227,6 +1263,7 @@ async fn completion_candidates(
   if prefer_full_line && !scored.is_empty() {
     scored.sort_by(|a, b| b.score.total_cmp(&a.score));
     scored.truncate(config.max_results);
+    apply_prefix_spacing(prefix, &normalized_prefix, &mut scored);
     return Ok(scored);
   }
 
@@ -1258,6 +1295,7 @@ async fn completion_candidates(
 
   scored.sort_by(|a, b| b.score.total_cmp(&a.score));
   scored.truncate(config.max_results);
+  apply_prefix_spacing(prefix, &normalized_prefix, &mut scored);
   Ok(scored)
 }
 

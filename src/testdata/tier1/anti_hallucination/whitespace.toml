@@ -23,8 +23,7 @@ cwd = "/tmp"
 session = "s1"
 
 [scenario.expect]
-# Leading space means no command starts with " git"
-empty = true
+contains = ["git status"]
 
 [[scenario]]
 name = "trailing_spaces"
