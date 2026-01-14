@@ -33,19 +33,19 @@ mise build:debug
 
 ## Quick Start
 
-1) Import history (also trains the online model; add `--reset-model` for a clean bootstrap):
+1) Import history (automatically trains the online model):
 
 ```bash
 zage import --shell zsh
 ```
 
-2) Build stats (and optional sequences):
+For a clean model bootstrap, add `--reset-model`:
 
 ```bash
-zage index --with-sequences
+zage import --shell zsh --reset-model
 ```
 
-3) Ask for suggestions:
+2) Ask for suggestions:
 
 ```bash
 zage suggest --current-line "git " --count 5
@@ -81,27 +81,41 @@ source /path/to/bash-preexec.sh
 source /path/to/zage/src/shell_integration/bash.sh
 ```
 
+Bash options:
+
+- `ZAGE_BASH_DEBUG=/path/to/log` writes debug logs
+
 ## Command Reference
 
 - `zage import --shell {zsh|bash} [FILE] [--no-index] [--reset-model] [--embedded-db]`
+  - Imports shell history and trains the online model.
   - Defaults to `$HISTFILE` when set, otherwise `~/.zsh_history` / `~/.bash_history`.
+  - `--reset-model`: Start with a clean model (discards previous training).
+  - `--no-index`: Skip rebuilding stats after import.
 - `zage index [--with-sequences] [--max-commands N] [--embedded-db]`
+  - Rebuilds statistics and optionally sequence patterns.
 - `zage sequences analyze [--min-support N] [--min-confidence F] [--min-lift F] [--max-len N]`
+  - Analyzes command sequence patterns.
 - `zage yank "command" [--match-expanded] [--no-sequences] [--embedded-db]`
-  - Removes matching history entries, then rebuilds stats (and sequences unless `--no-sequences`).
+  - Removes matching history entries, then rebuilds stats.
 - `zage suggest [--current-line "prefix"] [--count N] [--recent-limit N]
   [--no-sequences] [--autosuggest] [--completion-format plain|zsh] [--show-scores] [--timeout 2s]`
-  - With `--current-line`, Zage returns token completions for the active token.
-  - Without it, Zage returns full command suggestions.
-  - `--autosuggest` forces full-line output for autosuggest backends.
-  - `--timeout` accepts human durations like `500ms`, `2s`, `1m` (server mode only).
-- `zage pprof [--duration 30s] [--frequency 100] [--output zage.pprof]`
-  - Requires the `pprof` feature at build time: `cargo build --features pprof`
+  - With `--current-line`, returns token completions for the active token.
+  - Without it, returns full command suggestions ranked by the online model.
+  - `--autosuggest`: Forces full-line output for autosuggest backends.
+  - `--timeout`: Accepts human durations like `500ms`, `2s`, `1m` (server mode only).
 - `zage model status`
+  - Shows online model statistics (embedding count, training examples, etc.).
 - `zage model reset`
-- `zage server` (foreground server)
-- `zage service install|uninstall` (systemd/launchd)
-- `zage record ...` (internal; used by shell hooks; requires `--shell`)
+  - Resets the online model (clears all learned embeddings).
+- `zage server`
+  - Runs the suggestion server in foreground mode.
+- `zage service install|uninstall`
+  - Installs/uninstalls the background service (systemd/launchd).
+- `zage record ...`
+  - Internal command used by shell hooks to record command execution.
+  - Requires `--shell`, `--command`, `--working-directory`, `--exit-status`, `--start-timestamp`, `--end-timestamp`.
+  - Updates the online model with each recorded command.
 
 ## Embedded vs Server Mode
 
@@ -230,19 +244,21 @@ openssl rand -base64 32
 
 ## How It Works
 
-Zage ranks possible next commands in two phases:
+Zage uses an **online two-tower embedding model** that learns continuously from your shell history:
 
-1) **Tier‑1 candidate generation**
-   - Parses commands with tree‑sitter (bash/zsh).
-   - Tracks recency, frequency, transitions (what follows what), context (cwd/host/user),
-     and sequences (bigrams/trigrams).
-   - Produces a ranked candidate list with a score breakdown.
+1) **Candidate generation**
+   - Parses commands with tree‑sitter (bash/zsh) into structured tokens.
+   - Generates candidates from transitions, context stats, and sequence patterns.
+   - Applies hard constraints (prefix matching, syntax validity, deduplication).
 
-2) **Online model blending**
-  - Once warmed up, the online model adds a learned score to help reorder candidates.
-  - It stays conservative via confidence gates so ranking never regresses badly.
+2) **Online model ranking**
+   - Learns a **context embedding** from workspace, directory, exit status, and recent commands.
+   - Learns a **command embedding** from normalized command structure (head, flags, args).
+   - Scores candidates by dot product plus calibrated priors (frecency, sequences).
+   - Updates embeddings **online** after every command execution using negative sampling.
+   - Uses replay buffers and confidence gates to prevent catastrophic forgetting.
 
-This keeps suggestions fast and reliable while still learning your personal workflows.
+The model trains incrementally as you work, adapting to your workflows without offline batch training. See [`docs/online_next_command_prediction.md`](docs/online_next_command_prediction.md) for the full design.
 
 ## Advanced Features
 
@@ -309,11 +325,12 @@ zage record \
 
 ## Troubleshooting
 
-- **"Suggest server unavailable"**: start the server (`zage server`) or install the service
-  (`zage service install`), or switch to embedded (`backend = "embedded"` or `--embedded-db`).
-- **No suggestions**: run `zage import` then `zage index --with-sequences`.
-- **Online model not warmed**: run `zage import` (optionally `--reset-model`) to bootstrap.
-- **Autosuggest not working**: ensure zsh-autosuggestions is loaded before the Zage script, and
+- **"Suggest server unavailable"**: Start the server (`zage server`) or install the service
+  (`zage service install`), or switch to embedded mode (`backend = "embedded"` or `--embedded-db`).
+- **No suggestions**: Run `zage import --shell zsh` to import your history and train the model.
+- **Poor suggestions**: The online model needs training data. Run `zage model status` to check
+  training progress. Consider `zage import --reset-model` for a clean start.
+- **Autosuggest not working**: Ensure zsh-autosuggestions is loaded before the Zage script, and
   `ZAGE_AUTOSUGGEST_DISABLE` is not set to `1`.
 
 ## License
