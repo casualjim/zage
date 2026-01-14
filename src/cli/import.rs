@@ -6,8 +6,9 @@ use dirs::home_dir;
 use tracing::{debug, info};
 
 use crate::cli::BackendRef;
-use crate::db::{Db, import_history};
+use crate::db::{Db, import_history, reset_online_model};
 use crate::indexer::rebuild_stats;
+use crate::online_model::trainer::train_on_invocations;
 use crate::predict::aliases::{expand_alias, load_aliases};
 use crate::sequence::{SequenceConfig, analyze_sequences, analyze_token_sequences};
 use crate::server::{self, Request, Response};
@@ -20,10 +21,13 @@ pub async fn run(
   username: Option<String>,
   shell: Shell,
   no_index: bool,
+  reset_model: bool,
 ) -> Result<()> {
   match backend {
-    BackendRef::Server => run_server(file, hostname, username, shell, no_index).await,
-    BackendRef::Embedded(db) => run_embedded(db, file, hostname, username, shell, no_index).await,
+    BackendRef::Server => run_server(file, hostname, username, shell, no_index, reset_model).await,
+    BackendRef::Embedded(db) => {
+      run_embedded(db, file, hostname, username, shell, no_index, reset_model).await
+    }
   }
 }
 
@@ -42,6 +46,7 @@ async fn run_server(
   username: Option<String>,
   shell: Shell,
   no_index: bool,
+  reset_model: bool,
 ) -> Result<()> {
   let base_dir = std::env::current_dir()
     .ok()
@@ -58,6 +63,7 @@ async fn run_server(
     username,
     shell: shell_name,
     no_index,
+    reset_model,
   };
   match server::try_request(request).await? {
     Some(Response::Text { lines }) => {
@@ -79,6 +85,7 @@ async fn run_embedded(
   username: Option<String>,
   shell: Shell,
   no_index: bool,
+  reset_model: bool,
 ) -> Result<()> {
   debug!("File argument value: {:?}", file);
 
@@ -107,8 +114,14 @@ async fn run_embedded(
         expand_alias(&invocation.command, &aliases).unwrap_or_else(|| invocation.command.clone());
     }
   }
-  import_history(&db.conn, invocations).await?;
+  import_history(&db.conn, invocations.iter().cloned()).await?;
   eprintln!("Imported history from {:?}", history_file);
+  if reset_model {
+    reset_online_model(&db.conn).await?;
+    eprintln!("Online model reset");
+  }
+  train_on_invocations(&db.conn, &invocations).await?;
+  eprintln!("Online model trained on {} invocations", invocations.len());
   if no_index {
     eprintln!("Index rebuild skipped (requested via --no-index)");
   } else {

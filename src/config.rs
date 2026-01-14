@@ -3,7 +3,6 @@ use std::fs;
 use std::path::PathBuf;
 use std::str::FromStr;
 
-use seasoning::Reranker as SeasoningReranker;
 use serde::Deserialize;
 
 use crate::{Result, ZageError};
@@ -95,7 +94,6 @@ impl DbConfig {
 pub struct AppConfig {
   pub backend: BackendMode,
   pub db: DbConfig,
-  pub reranker: Option<SeasoningReranker>,
   pub online_model: OnlineModelConfig,
 }
 
@@ -103,7 +101,6 @@ pub struct AppConfig {
 struct AppConfigFile {
   backend: Option<BackendMode>,
   db: Option<DbConfigFile>,
-  reranker: Option<SeasoningReranker>,
   online_model: Option<OnlineModelConfigFile>,
 }
 
@@ -178,9 +175,6 @@ impl AppConfig {
         config.db.sync_interval_ms = Some(interval);
       }
     }
-    if let Some(reranker) = parsed.reranker {
-      config.reranker = Some(reranker);
-    }
     if let Some(online) = parsed.online_model {
       config.online_model.apply_file(online);
     }
@@ -201,7 +195,6 @@ impl AppConfig {
         remote_encryption_key: None,
         sync_interval_ms: None,
       },
-      reranker: None,
       online_model: OnlineModelConfig::default(),
     })
   }

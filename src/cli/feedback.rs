@@ -5,16 +5,26 @@ use crate::cli::BackendRef;
 use crate::db::{OnlineFeedbackEvent, upsert_online_feedback};
 use crate::server::{self, Request, Response};
 
-pub async fn run(
-  backend: BackendRef<'_>,
-  shown_id: String,
-  shown_at: i64,
-  working_directory: Option<String>,
-  suggestion: String,
-  accepted_command: Option<String>,
-  accepted_at: Option<i64>,
-  outcome: Option<String>,
-) -> Result<()> {
+pub struct FeedbackArgs {
+  pub shown_id: String,
+  pub shown_at: i64,
+  pub working_directory: Option<String>,
+  pub suggestion: String,
+  pub accepted_command: Option<String>,
+  pub accepted_at: Option<i64>,
+  pub outcome: Option<String>,
+}
+
+pub async fn run(backend: BackendRef<'_>, args: FeedbackArgs) -> Result<()> {
+  let FeedbackArgs {
+    shown_id,
+    shown_at,
+    working_directory,
+    suggestion,
+    accepted_command,
+    accepted_at,
+    outcome,
+  } = args;
   info!("Recording feedback event");
   match backend {
     BackendRef::Server => {

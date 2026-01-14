@@ -8,16 +8,26 @@ use crate::server::{self, Request, Response};
 use crate::shell_history::{Invocation, get_hostname, normalize_shellname};
 use crate::workspace::detect_workspace_for_cwd;
 
-pub async fn run(
-  backend: BackendRef<'_>,
-  command: String,
-  working_directory: String,
-  exit_status: i64,
-  start_timestamp: i64,
-  end_timestamp: i64,
-  shellname: Option<String>,
-  session_id: Option<i64>,
-) -> Result<()> {
+pub struct RecordArgs {
+  pub command: String,
+  pub working_directory: String,
+  pub exit_status: i64,
+  pub start_timestamp: i64,
+  pub end_timestamp: i64,
+  pub shellname: Option<String>,
+  pub session_id: Option<i64>,
+}
+
+pub async fn run(backend: BackendRef<'_>, args: RecordArgs) -> Result<()> {
+  let RecordArgs {
+    command,
+    working_directory,
+    exit_status,
+    start_timestamp,
+    end_timestamp,
+    shellname,
+    session_id,
+  } = args;
   info!("Recording command invocation");
   let aliases = load_aliases();
   let expanded_command = expand_alias(&command, &aliases).unwrap_or_else(|| command.clone());

@@ -131,7 +131,6 @@ The goal is a fast, on-device predictor that is accurate for personal histories 
 
 - `src/ranking/mod.rs`
   - Weighted scoring and final top-K selection
-  - Optional Tier-2 reranking (GBDT/linear) once candidates are generated
 
 - `src/predict/mod.rs`
   - Orchestrates tokenize -> candidate -> rank

@@ -26,6 +26,17 @@ CREATE UNIQUE INDEX IF NOT EXISTS idx_shell_history_unique ON shell_history (
   session_id
 );
 
+CREATE INDEX IF NOT EXISTS idx_shell_history_session_ts ON shell_history (
+  session_id,
+  COALESCE(start_unix_timestamp, 0),
+  id
+);
+
+CREATE INDEX IF NOT EXISTS idx_shell_history_ts ON shell_history (
+  COALESCE(start_unix_timestamp, 0),
+  id
+);
+
 CREATE TABLE IF NOT EXISTS command_stats (
   command TEXT PRIMARY KEY,
   freq INTEGER NOT NULL,

@@ -3,17 +3,13 @@ use std::collections::{HashMap, HashSet};
 use libsql::{Connection, Value};
 
 use crate::Result;
+use crate::config::{OnlineModelBlendConfig, OnlineModelConfig};
 use crate::core::{Candidate, SystemTimeProvider, TimeProvider};
 pub use crate::core::{ScoreBreakdown, Suggestion};
-use crate::config::{OnlineModelBlendConfig, OnlineModelConfig};
 use crate::db::{get_recent_invocations, online_model_status};
-use crate::online_model::trainer::{
-  OnlineScoreContext, score_commands as online_score_commands,
-};
+use crate::online_model::trainer::{OnlineScoreContext, score_commands as online_score_commands};
 use crate::phase::PhaseConfig;
 use crate::repo::find_repo_root;
-use crate::rerank;
-use crate::shell_history::normalize_shellname;
 use crate::tokenize::{TokenKind, extract_command_parts, normalized_tokens, tokenize_index};
 pub use config::{RankingWeights, SuggestConfig};
 
@@ -28,7 +24,6 @@ mod templates;
 #[cfg(any(test, feature = "tier1-tests"))]
 pub mod verifier;
 
-use crate::rerank_config::RerankConfig;
 use aliases::{
   add_alias_candidates, alias_for_command, build_prefix_variants, expand_alias, load_aliases,
 };
@@ -64,11 +59,6 @@ const CONTEXT_TIME_WEIGHT: f64 = 0.05;
 const CONTEXT_SESSION_WEIGHT: f64 = 0.03;
 const CONTEXT_SESSION_MISS_PENALTY: f64 = 0.6;
 const CONTEXT_SESSION_BOOST: f64 = 0.5;
-
-#[cfg(test)]
-pub(crate) fn candidate_for_test(command: &str) -> Candidate {
-  Candidate::new(command)
-}
 
 fn expanded_command_for(
   invocation: &crate::shell_history::Invocation,
@@ -128,36 +118,7 @@ pub(crate) async fn suggest_with_runtime(
     username: config.username.as_deref(),
   };
   let feature_context = build_feature_matrix(&feature_args);
-  let mut scored = model_score(&feature_context).await?;
-
-  let rerank_config = RerankConfig::load()?;
-  let shellname = config
-    .shellname
-    .as_deref()
-    .map(normalize_shellname)
-    .unwrap_or_else(|| "sh".to_string());
-  let rerank_context = rerank::runtime_context(
-    &context.repo_root,
-    &context.recent_heads,
-    context.session_tokens.clone(),
-    context
-      .session_phase
-      .as_ref()
-      .map(|phase| phase.phase.as_str()),
-    &shellname,
-    config.cwd.as_deref(),
-    config.hostname.as_deref(),
-    config.username.as_deref(),
-    config.session_id,
-    context.last_exit_status,
-    runtime.now,
-  );
-  let _ = rerank::rerank_suggestions(
-    &mut scored,
-    &collected.candidates,
-    &rerank_context,
-    &rerank_config,
-  );
+  let scored = model_score(&feature_context).await?;
 
   Ok(final_filter(
     scored,
@@ -170,7 +131,6 @@ pub(crate) async fn suggest_with_runtime(
 struct PipelineContext {
   sequence_commands: Vec<String>,
   recent_heads: Vec<String>,
-  session_tokens: Vec<String>,
   last_command: Option<String>,
   last_exit_status: Option<i64>,
   repo_root: String,
@@ -211,10 +171,6 @@ async fn build_pipeline_context(
     .map(|inv| (inv, expanded_command_for(inv, aliases)))
     .filter_map(|(inv, command)| command_head_for_phase(&inv.shellname, &command))
     .collect();
-  let session_tokens = recent_commands
-    .iter()
-    .flat_map(|cmd| normalized_tokens(cmd))
-    .collect::<Vec<_>>();
   let last_command = override_prev
     .map(|(cmd, _)| cmd.clone())
     .or_else(|| recent_commands.last().cloned());
@@ -247,7 +203,6 @@ async fn build_pipeline_context(
   Ok(Some(PipelineContext {
     sequence_commands,
     recent_heads,
-    session_tokens,
     last_command,
     last_exit_status,
     repo_root,

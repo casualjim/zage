@@ -3,7 +3,7 @@
 "cargo:cargo-sort" = "latest"
 hk = "latest"
 pkl = "latest"
-rust =  { version = "latest", profile = "default", components = "llvm-tools" }
+rust =  { version = "latest", profile = "default", components = "llvm-tools,rustfmt,clippy" }
 shellcheck = "latest"
 taplo = "latest"
 "ubi:cargo-bins/cargo-binstall" = "latest"

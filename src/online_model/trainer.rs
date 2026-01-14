@@ -84,14 +84,8 @@ pub(crate) async fn train_on_invocations(
     let mut updates = 0u64;
 
     for inv in invocations {
-      let Some(example_input) = build_example_input(
-        conn,
-        inv,
-        now_fallback,
-        config.window,
-        config.bucket_count,
-      )
-      .await?
+      let Some(example_input) =
+        build_example_input(conn, inv, now_fallback, config.window, config.bucket_count).await?
       else {
         continue;
       };
@@ -702,18 +696,14 @@ async fn train_one(
       input.example.positive_head_hash,
     )
     .await?;
-  train_example_with_pools(
+  let mut ctx = TrainStepContext {
     conn,
     cache,
     group_scalars,
     sampler,
-    &pools,
-    &input.example,
-    Some(&input.recent_commands),
-    negatives,
     rng,
-  )
-  .await
+  };
+  train_example_with_pools(&mut ctx, &pools, &input.example, negatives).await
 }
 
 async fn train_replay(
@@ -735,37 +725,36 @@ async fn train_replay(
       replay.positive_head_hash,
     )
     .await?;
-  train_example_with_pools(
+  let mut ctx = TrainStepContext {
     conn,
     cache,
     group_scalars,
     sampler,
-    &pools,
-    replay,
-    None,
-    negatives,
     rng,
-  )
-  .await
+  };
+  train_example_with_pools(&mut ctx, &pools, replay, negatives).await
+}
+
+struct TrainStepContext<'a, 'g> {
+  conn: &'a Connection,
+  cache: &'a mut EmbeddingCache,
+  group_scalars: &'a mut GroupScalarStore,
+  sampler: &'a mut NegativeSampler<'g>,
+  rng: &'a mut StdRng,
 }
 
 async fn train_example_with_pools(
-  conn: &Connection,
-  cache: &mut EmbeddingCache,
-  group_scalars: &mut GroupScalarStore,
-  sampler: &mut NegativeSampler<'_>,
+  ctx: &mut TrainStepContext<'_, '_>,
   pools: &SamplerPools,
   example: &OnlineExample,
-  recent_commands: Option<&[String]>,
   negatives: usize,
-  rng: &mut StdRng,
 ) -> Result<()> {
-  let (negatives, log_q_pos) = sampler.sample_with_logq(
+  let (negatives, log_q_pos) = ctx.sampler.sample_with_logq(
     pools,
     &example.shellname,
     example.positive_command_hash,
     negatives,
-    rng,
+    ctx.rng,
   )?;
 
   // Hash command vectors for negatives (we keep the positive vector in the example).
@@ -798,128 +787,130 @@ async fn train_example_with_pools(
     }
   }
 
-  cache
-    .preload(conn, buckets.into_iter(), example.now)
+  ctx
+    .cache
+    .preload(ctx.conn, buckets.into_iter(), example.now)
     .await?;
 
   // Resolve group scalars (lazy init in DB).
-  let s_workspace = group_scalars
-    .get_or_init(conn, GROUP_WORKSPACE_ROOT)
+  let s_workspace = ctx
+    .group_scalars
+    .get_or_init(ctx.conn, GROUP_WORKSPACE_ROOT)
     .await?;
-  let s_cwd = group_scalars.get_or_init(conn, GROUP_CWD).await?;
-  let s_exit = group_scalars.get_or_init(conn, GROUP_EXIT).await?;
-  let s_host = group_scalars.get_or_init(conn, GROUP_HOST).await?;
-  let s_user = group_scalars.get_or_init(conn, GROUP_USER).await?;
-  let s_timebucket = group_scalars.get_or_init(conn, GROUP_TIMEBUCKET).await?;
-  let s_session = group_scalars.get_or_init(conn, GROUP_SESSION).await?;
-  let s_recent_heads = group_scalars.get_or_init(conn, GROUP_RECENT_HEADS).await?;
-  let s_recent_flags = group_scalars.get_or_init(conn, GROUP_RECENT_FLAGS).await?;
+  let s_cwd = ctx.group_scalars.get_or_init(ctx.conn, GROUP_CWD).await?;
+  let s_exit = ctx.group_scalars.get_or_init(ctx.conn, GROUP_EXIT).await?;
+  let s_host = ctx.group_scalars.get_or_init(ctx.conn, GROUP_HOST).await?;
+  let s_user = ctx.group_scalars.get_or_init(ctx.conn, GROUP_USER).await?;
+  let s_timebucket = ctx
+    .group_scalars
+    .get_or_init(ctx.conn, GROUP_TIMEBUCKET)
+    .await?;
+  let s_session = ctx
+    .group_scalars
+    .get_or_init(ctx.conn, GROUP_SESSION)
+    .await?;
+  let s_recent_heads = ctx
+    .group_scalars
+    .get_or_init(ctx.conn, GROUP_RECENT_HEADS)
+    .await?;
+  let s_recent_flags = ctx
+    .group_scalars
+    .get_or_init(ctx.conn, GROUP_RECENT_FLAGS)
+    .await?;
 
   // Build context vector and bucket weights used in the context tower.
-  let mut u_ctx = vec![0.0f32; cache.dim];
+  let mut u_ctx = vec![0.0f32; ctx.cache.dim];
   let mut ctx_weights: HashMap<u32, f32> = HashMap::new();
   let mut group_u_no_scalar: HashMap<&'static str, Vec<f32>> = HashMap::new();
 
-  add_group_to_context(
-    cache,
-    &example.ctx_workspace,
-    W_WORKSPACE_ROOT,
-    s_workspace,
-    GROUP_WORKSPACE_ROOT,
-    &mut u_ctx,
-    &mut ctx_weights,
-    &mut group_u_no_scalar,
-  );
-  add_group_to_context(
-    cache,
-    &example.ctx_cwd,
-    W_CWD,
-    s_cwd,
-    GROUP_CWD,
-    &mut u_ctx,
-    &mut ctx_weights,
-    &mut group_u_no_scalar,
-  );
-  add_group_to_context(
-    cache,
-    &example.ctx_exit,
-    W_EXIT,
-    s_exit,
-    GROUP_EXIT,
-    &mut u_ctx,
-    &mut ctx_weights,
-    &mut group_u_no_scalar,
-  );
-  add_group_to_context(
-    cache,
-    &example.ctx_host,
-    W_HOST,
-    s_host,
-    GROUP_HOST,
-    &mut u_ctx,
-    &mut ctx_weights,
-    &mut group_u_no_scalar,
-  );
-  add_group_to_context(
-    cache,
-    &example.ctx_user,
-    W_USER,
-    s_user,
-    GROUP_USER,
-    &mut u_ctx,
-    &mut ctx_weights,
-    &mut group_u_no_scalar,
-  );
-  add_group_to_context(
-    cache,
-    &example.ctx_timebucket,
-    W_TIMEBUCKET,
-    s_timebucket,
-    GROUP_TIMEBUCKET,
-    &mut u_ctx,
-    &mut ctx_weights,
-    &mut group_u_no_scalar,
-  );
-  add_group_to_context(
-    cache,
-    &example.ctx_session,
-    W_SESSION,
-    s_session,
-    GROUP_SESSION,
-    &mut u_ctx,
-    &mut ctx_weights,
-    &mut group_u_no_scalar,
-  );
-
-  add_group_to_context(
-    cache,
-    &example.recent_heads,
-    W_RECENT_HEADS,
-    s_recent_heads,
-    GROUP_RECENT_HEADS,
-    &mut u_ctx,
-    &mut ctx_weights,
-    &mut group_u_no_scalar,
-  );
-  add_group_to_context(
-    cache,
-    &example.recent_flags,
-    W_RECENT_FLAGS,
-    s_recent_flags,
-    GROUP_RECENT_FLAGS,
-    &mut u_ctx,
-    &mut ctx_weights,
-    &mut group_u_no_scalar,
-  );
+  {
+    let mut acc = ContextAccumulator {
+      u_ctx: &mut u_ctx,
+      ctx_weights: &mut ctx_weights,
+      group_u_no_scalar: &mut group_u_no_scalar,
+    };
+    add_group_to_context(
+      ctx.cache,
+      &example.ctx_workspace,
+      W_WORKSPACE_ROOT,
+      s_workspace,
+      GROUP_WORKSPACE_ROOT,
+      &mut acc,
+    );
+    add_group_to_context(
+      ctx.cache,
+      &example.ctx_cwd,
+      W_CWD,
+      s_cwd,
+      GROUP_CWD,
+      &mut acc,
+    );
+    add_group_to_context(
+      ctx.cache,
+      &example.ctx_exit,
+      W_EXIT,
+      s_exit,
+      GROUP_EXIT,
+      &mut acc,
+    );
+    add_group_to_context(
+      ctx.cache,
+      &example.ctx_host,
+      W_HOST,
+      s_host,
+      GROUP_HOST,
+      &mut acc,
+    );
+    add_group_to_context(
+      ctx.cache,
+      &example.ctx_user,
+      W_USER,
+      s_user,
+      GROUP_USER,
+      &mut acc,
+    );
+    add_group_to_context(
+      ctx.cache,
+      &example.ctx_timebucket,
+      W_TIMEBUCKET,
+      s_timebucket,
+      GROUP_TIMEBUCKET,
+      &mut acc,
+    );
+    add_group_to_context(
+      ctx.cache,
+      &example.ctx_session,
+      W_SESSION,
+      s_session,
+      GROUP_SESSION,
+      &mut acc,
+    );
+    add_group_to_context(
+      ctx.cache,
+      &example.recent_heads,
+      W_RECENT_HEADS,
+      s_recent_heads,
+      GROUP_RECENT_HEADS,
+      &mut acc,
+    );
+    add_group_to_context(
+      ctx.cache,
+      &example.recent_flags,
+      W_RECENT_FLAGS,
+      s_recent_flags,
+      GROUP_RECENT_FLAGS,
+      &mut acc,
+    );
+  }
 
   // recent_args have a fixed base weight in v1.
-  add_fixed_group_to_context(
-    cache,
-    &example.recent_args,
-    W_RECENT_ARGS,
-    &mut u_ctx,
-    &mut ctx_weights,
-  );
+  {
+    let mut acc = FixedContextAccumulator {
+      u_ctx: &mut u_ctx,
+      ctx_weights: &mut ctx_weights,
+    };
+    add_fixed_group_to_context(ctx.cache, &example.recent_args, W_RECENT_ARGS, &mut acc);
+  }
 
   let norm_ctx = l2_norm(&u_ctx);
   if norm_ctx <= 1e-8 {
@@ -943,7 +934,7 @@ async fn train_example_with_pools(
   let mut candidates: Vec<Candidate> = Vec::with_capacity(command_vecs.len());
   for (idx, (cmd_buckets, log_q)) in command_vecs.iter().enumerate() {
     let label = if idx == 0 { 1.0 } else { 0.0 };
-    let (u_cmd, cmd_weights) = command_tower_vector(cache, cmd_buckets);
+    let (u_cmd, cmd_weights) = command_tower_vector(ctx.cache, cmd_buckets);
     let norm_cmd = l2_norm(&u_cmd);
     if norm_cmd <= 1e-8 {
       continue;
@@ -1009,21 +1000,29 @@ async fn train_example_with_pools(
 
   // Apply embedding updates.
   for (bucket, grad) in bucket_grads {
-    cache.apply_adagrad_update(bucket, &grad, LR_EMBED)?;
+    ctx.cache.apply_adagrad_update(bucket, &grad, LR_EMBED)?;
   }
 
   // Apply scalar updates with L2 reg toward 1.0.
   for (group, grad) in scalar_grads {
-    let current = group_scalars.get_or_init(conn, group).await?;
+    let current = ctx.group_scalars.get_or_init(ctx.conn, group).await?;
     let reg = L2_GROUP_SCALAR * (current - 1.0);
     let updated = (current - LR_GROUP_SCALAR * (grad + reg)).clamp(0.05, 20.0);
-    group_scalars.set(group, updated);
+    ctx.group_scalars.set(group, updated);
   }
 
-  // Slight sanity: keep recent_commands used to build pools from being unused in the signature.
-  let _ = recent_commands;
-
   Ok(())
+}
+
+struct ContextAccumulator<'a> {
+  u_ctx: &'a mut [f32],
+  ctx_weights: &'a mut HashMap<u32, f32>,
+  group_u_no_scalar: &'a mut HashMap<&'static str, Vec<f32>>,
+}
+
+struct FixedContextAccumulator<'a> {
+  u_ctx: &'a mut [f32],
+  ctx_weights: &'a mut HashMap<u32, f32>,
 }
 
 fn add_group_to_context(
@@ -1032,9 +1031,7 @@ fn add_group_to_context(
   base_weight: f32,
   scalar: f32,
   group: &'static str,
-  u_ctx: &mut Vec<f32>,
-  ctx_weights: &mut HashMap<u32, f32>,
-  group_u_no_scalar: &mut HashMap<&'static str, Vec<f32>>,
+  acc: &mut ContextAccumulator<'_>,
 ) {
   if buckets.is_empty() || base_weight == 0.0 {
     return;
@@ -1046,21 +1043,20 @@ fn add_group_to_context(
       for (idx, v) in e.iter().enumerate() {
         u[idx] += base_weight * (*w) * (*v);
       }
-      *ctx_weights.entry(*bucket).or_insert(0.0) += base_weight * scalar * (*w);
+      *acc.ctx_weights.entry(*bucket).or_insert(0.0) += base_weight * scalar * (*w);
     }
   }
-  for idx in 0..u_ctx.len() {
-    u_ctx[idx] += scalar * u[idx];
+  for (dst, value) in acc.u_ctx.iter_mut().zip(u.iter()) {
+    *dst += scalar * value;
   }
-  group_u_no_scalar.insert(group, u);
+  acc.group_u_no_scalar.insert(group, u);
 }
 
 fn add_fixed_group_to_context(
   cache: &EmbeddingCache,
   buckets: &[(u32, f32)],
   base_weight: f32,
-  u_ctx: &mut Vec<f32>,
-  ctx_weights: &mut HashMap<u32, f32>,
+  acc: &mut FixedContextAccumulator<'_>,
 ) {
   if buckets.is_empty() || base_weight == 0.0 {
     return;
@@ -1068,9 +1064,9 @@ fn add_fixed_group_to_context(
   for (bucket, w) in buckets {
     if let Some(e) = cache.get(*bucket) {
       for (idx, v) in e.iter().enumerate() {
-        u_ctx[idx] += base_weight * (*w) * (*v);
+        acc.u_ctx[idx] += base_weight * (*w) * (*v);
       }
-      *ctx_weights.entry(*bucket).or_insert(0.0) += base_weight * (*w);
+      *acc.ctx_weights.entry(*bucket).or_insert(0.0) += base_weight * (*w);
     }
   }
 }
@@ -1150,12 +1146,7 @@ fn add_token_to_map(
   if scale == 0.0 {
     return;
   }
-  crate::hash_util::stable_char_ngrams_buckets(
-    token,
-    bucket_count,
-    scratch_indices,
-    scratch,
-  );
+  crate::hash_util::stable_char_ngrams_buckets(token, bucket_count, scratch_indices, scratch);
   for (bucket, sign) in scratch.iter().copied() {
     *out.entry(bucket).or_insert(0.0) += scale * sign;
   }
@@ -1260,9 +1251,7 @@ impl EmbeddingCache {
           ZageError::ConfigError(format!("invalid embedding blob for bucket {bucket}"))
         })?;
         let acc = match opt_blob {
-          Some(blob) => {
-            decode_f32_blob(&blob, self.dim).unwrap_or_else(|| vec![0.0; self.dim])
-          }
+          Some(blob) => decode_f32_blob(&blob, self.dim).unwrap_or_else(|| vec![0.0; self.dim]),
           None => vec![0.0; self.dim],
         };
         self.map.insert(
@@ -1300,16 +1289,13 @@ impl EmbeddingCache {
         "missing embedding bucket {bucket} (not preloaded)"
       )));
     };
-    if row.vec.len() != self.dim
-      || row.acc.len() != self.dim
-      || grad.len() != self.dim
-    {
+    if row.vec.len() != self.dim || row.acc.len() != self.dim || grad.len() != self.dim {
       return Err(ZageError::ConfigError(format!(
         "dimension mismatch for bucket {bucket}"
       )));
     }
-    for idx in 0..self.dim {
-      let g = grad[idx];
+    for (idx, g) in grad.iter().enumerate() {
+      let g = *g;
       row.acc[idx] += g * g;
       row.vec[idx] -= lr * g / (row.acc[idx] + ADAGRAD_EPS).sqrt();
     }
@@ -1430,12 +1416,11 @@ impl GroupScalarStore {
 mod tests {
   use super::*;
   use crate::core::Invocation;
+  use crate::core::RankingWeights;
   use crate::db::{init, insert_invocation, open_db, update_stats_for_invocation};
   use crate::predict::verifier::{TestConfig, suggest_for_test};
-  use crate::core::RankingWeights;
   use std::fs;
   use std::path::Path;
-  use std::sync::{Mutex, OnceLock};
   use tempfile::NamedTempFile;
   use tempfile::TempDir;
 
@@ -1466,14 +1451,8 @@ mod tests {
     command: &str,
   ) -> Result<f32> {
     let config = OnlineModelConfig::default();
-    let input = build_example_input(
-      conn,
-      inv,
-      unix_now(),
-      config.window,
-      config.bucket_count,
-    )
-    .await?;
+    let input =
+      build_example_input(conn, inv, unix_now(), config.window, config.bucket_count).await?;
     let Some(input) = input else {
       return Err(ZageError::ConfigError("missing example".to_string()));
     };
@@ -1508,76 +1487,40 @@ mod tests {
 
     let mut u_ctx = vec![0.0f32; cache.dim];
     let mut ctx_weights = HashMap::new();
+    let mut acc = FixedContextAccumulator {
+      u_ctx: &mut u_ctx,
+      ctx_weights: &mut ctx_weights,
+    };
     add_fixed_group_to_context(
       &cache,
       &input.example.ctx_workspace,
       W_WORKSPACE_ROOT,
-      &mut u_ctx,
-      &mut ctx_weights,
+      &mut acc,
     );
-    add_fixed_group_to_context(
-      &cache,
-      &input.example.ctx_cwd,
-      W_CWD,
-      &mut u_ctx,
-      &mut ctx_weights,
-    );
-    add_fixed_group_to_context(
-      &cache,
-      &input.example.ctx_exit,
-      W_EXIT,
-      &mut u_ctx,
-      &mut ctx_weights,
-    );
-    add_fixed_group_to_context(
-      &cache,
-      &input.example.ctx_host,
-      W_HOST,
-      &mut u_ctx,
-      &mut ctx_weights,
-    );
-    add_fixed_group_to_context(
-      &cache,
-      &input.example.ctx_user,
-      W_USER,
-      &mut u_ctx,
-      &mut ctx_weights,
-    );
+    add_fixed_group_to_context(&cache, &input.example.ctx_cwd, W_CWD, &mut acc);
+    add_fixed_group_to_context(&cache, &input.example.ctx_exit, W_EXIT, &mut acc);
+    add_fixed_group_to_context(&cache, &input.example.ctx_host, W_HOST, &mut acc);
+    add_fixed_group_to_context(&cache, &input.example.ctx_user, W_USER, &mut acc);
     add_fixed_group_to_context(
       &cache,
       &input.example.ctx_timebucket,
       W_TIMEBUCKET,
-      &mut u_ctx,
-      &mut ctx_weights,
+      &mut acc,
     );
-    add_fixed_group_to_context(
-      &cache,
-      &input.example.ctx_session,
-      W_SESSION,
-      &mut u_ctx,
-      &mut ctx_weights,
-    );
+    add_fixed_group_to_context(&cache, &input.example.ctx_session, W_SESSION, &mut acc);
     add_fixed_group_to_context(
       &cache,
       &input.example.recent_heads,
       W_RECENT_HEADS,
-      &mut u_ctx,
-      &mut ctx_weights,
+      &mut acc,
     );
     add_fixed_group_to_context(
       &cache,
       &input.example.recent_flags,
       W_RECENT_FLAGS,
-      &mut u_ctx,
-      &mut ctx_weights,
+      &mut acc,
     );
-    add_fixed_group_to_context(
-      &cache,
-      &input.example.recent_args,
-      W_RECENT_ARGS,
-      &mut u_ctx,
-      &mut ctx_weights,
-    );
+    add_fixed_group_to_context(&cache, &input.example.recent_args, W_RECENT_ARGS, &mut acc);
 
     let (u_cmd, _) = command_tower_vector(&cache, &cmd_buckets);
     let norm_ctx = l2_norm(&u_ctx).max(1e-8);
@@ -1595,43 +1538,6 @@ mod tests {
     leakage_rate: f64,
     total: usize,
     step_mrr: Vec<f64>,
-  }
-
-  struct EnvGuard {
-    key: &'static str,
-    previous: Option<String>,
-  }
-
-  impl Drop for EnvGuard {
-    fn drop(&mut self) {
-      if let Some(value) = self.previous.as_ref() {
-        unsafe {
-          std::env::set_var(self.key, value);
-        }
-      } else {
-        unsafe {
-          std::env::remove_var(self.key);
-        }
-      }
-    }
-  }
-
-  fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-    static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-    LOCK.get_or_init(|| Mutex::new(())).lock().unwrap()
-  }
-
-  fn set_env_guard(key: &'static str, value: Option<String>) -> EnvGuard {
-    let previous = std::env::var(key).ok();
-    match value {
-      Some(value) => unsafe {
-        std::env::set_var(key, value);
-      },
-      None => unsafe {
-        std::env::remove_var(key);
-      },
-    }
-    EnvGuard { key, previous }
   }
 
   fn workspace_key(invocation: &Invocation) -> String {
@@ -1679,51 +1585,15 @@ mod tests {
     let mut ts = 1_700_000_000i64;
 
     for _ in 0..4 {
-      push_invocation(
-        &mut invocations,
-        "git status",
-        &repo_b_work,
-        2,
-        &mut ts,
-      );
-      push_invocation(
-        &mut invocations,
-        "git log",
-        &repo_b_work,
-        2,
-        &mut ts,
-      );
-      push_invocation(
-        &mut invocations,
-        "git status",
-        &repo_b_work,
-        2,
-        &mut ts,
-      );
-      push_invocation(
-        &mut invocations,
-        "git show",
-        &repo_b_work,
-        2,
-        &mut ts,
-      );
+      push_invocation(&mut invocations, "git status", &repo_b_work, 2, &mut ts);
+      push_invocation(&mut invocations, "git log", &repo_b_work, 2, &mut ts);
+      push_invocation(&mut invocations, "git status", &repo_b_work, 2, &mut ts);
+      push_invocation(&mut invocations, "git show", &repo_b_work, 2, &mut ts);
     }
 
     for _ in 0..20 {
-      push_invocation(
-        &mut invocations,
-        "git status",
-        &repo_a_work,
-        1,
-        &mut ts,
-      );
-      push_invocation(
-        &mut invocations,
-        "git diff",
-        &repo_a_work,
-        1,
-        &mut ts,
-      );
+      push_invocation(&mut invocations, "git status", &repo_a_work, 1, &mut ts);
+      push_invocation(&mut invocations, "git diff", &repo_a_work, 1, &mut ts);
     }
 
     Ok(invocations)
@@ -1815,12 +1685,12 @@ mod tests {
         }
 
         let mut step_score = 0.0;
-        if let Some(rank) = rank {
-          if rank <= max_results {
-            step_score = 1.0 / rank as f64;
-            mrr_sum += step_score;
-            recall_hits += 1;
-          }
+        if let Some(rank) = rank
+          && rank <= max_results
+        {
+          step_score = 1.0 / rank as f64;
+          mrr_sum += step_score;
+          recall_hits += 1;
         }
         step_mrr.push(step_score);
 
@@ -1949,7 +1819,6 @@ mod tests {
 
   #[tokio::test]
   async fn prequential_eval_tracks_online_mrr_and_leakage() -> Result<()> {
-    let _env_lock = env_lock();
     let temp_dir = TempDir::new()?;
     let invocations = build_fixture(&temp_dir)?;
 
@@ -1961,11 +1830,6 @@ mod tests {
       .unwrap_or(0);
     let eval_start = first_a + recent_limit + 2;
 
-    let model_dir = temp_dir.path().join("model");
-    fs::create_dir_all(&model_dir)?;
-    let _model_guard =
-      set_env_guard("ZAGE_MODEL_PATH", Some(model_dir.to_string_lossy().to_string()));
-
     let weights = RankingWeights {
       recency: 0.10,
       frequency: 0.0,
@@ -1975,9 +1839,14 @@ mod tests {
       similarity: 0.0,
     };
 
-    let online =
-      run_prequential(&invocations, eval_start, max_results, recent_limit, weights.clone())
-        .await?;
+    let online = run_prequential(
+      &invocations,
+      eval_start,
+      max_results,
+      recent_limit,
+      weights.clone(),
+    )
+    .await?;
 
     let split = online.step_mrr.len() / 2;
     let (early_slice, late_slice) = if split > 0 {
@@ -2007,9 +1876,7 @@ mod tests {
     );
     eprintln!(
       "prequential@{} online split: early_mrr={:.3} late_mrr={:.3}",
-      max_results,
-      early_mrr,
-      late_mrr
+      max_results, early_mrr, late_mrr
     );
 
     assert!(

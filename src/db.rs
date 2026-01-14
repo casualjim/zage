@@ -603,10 +603,7 @@ pub async fn online_model_update_count(conn: &Connection) -> Result<u64> {
   })
 }
 
-pub async fn bump_online_model_update_count(
-  conn: &Connection,
-  delta: u64,
-) -> Result<u64> {
+pub async fn bump_online_model_update_count(conn: &Connection, delta: u64) -> Result<u64> {
   if delta == 0 {
     return online_model_update_count(conn).await;
   }
@@ -616,9 +613,7 @@ pub async fn bump_online_model_update_count(
   Ok(next)
 }
 
-pub async fn online_model_group_scalars(
-  conn: &Connection,
-) -> Result<Vec<(String, f64)>> {
+pub async fn online_model_group_scalars(conn: &Connection) -> Result<Vec<(String, f64)>> {
   let mut rows = conn
     .query(
       "SELECT group_name, value FROM online_group_scalar ORDER BY group_name",
@@ -661,9 +656,7 @@ pub async fn online_replay_workspace_roots(conn: &Connection) -> Result<u64> {
     )
     .await?;
   let row = rows.next().await?.ok_or_else(|| {
-    crate::ZageError::ConfigError(
-      "missing COUNT(DISTINCT workspace_root) row".to_string(),
-    )
+    crate::ZageError::ConfigError("missing COUNT(DISTINCT workspace_root) row".to_string())
   })?;
   let count: i64 = row.get(0)?;
   Ok(count.max(0) as u64)

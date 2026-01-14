@@ -9,7 +9,6 @@ background server and integrates with zsh-autosuggestions.
 - 🔮 **Command prediction** from your history
 - 🧠 **Context-aware**: working directory, hostname, username, session
 - 📊 **Sequence learning**: frequent bigrams/trigrams and token sequences
-- 🤖 **ML reranker** (optional) trained from your own usage
 - 🔎 **Accurate parsing** via tree-sitter (bash + zsh)
 - 🖥️ **Shell integration**: zsh autosuggest backend + hooks
 - 🧰 **Flexible storage**: local, remote (Turso/libsql), or remote replica
@@ -34,7 +33,7 @@ mise build:debug
 
 ## Quick Start
 
-1) Import history:
+1) Import history (also trains the online model; add `--reset-model` for a clean bootstrap):
 
 ```bash
 zage import --shell zsh
@@ -50,12 +49,6 @@ zage index --with-sequences
 
 ```bash
 zage suggest --current-line "git " --count 5
-```
-
-4) (Optional) Train the ML model:
-
-```bash
-zage model train
 ```
 
 ## Shell Integration
@@ -90,7 +83,7 @@ source /path/to/zage/src/shell_integration/bash.sh
 
 ## Command Reference
 
-- `zage import --shell {zsh|bash} [FILE] [--no-index] [--embedded-db]`
+- `zage import --shell {zsh|bash} [FILE] [--no-index] [--reset-model] [--embedded-db]`
   - Defaults to `$HISTFILE` when set, otherwise `~/.zsh_history` / `~/.bash_history`.
 - `zage index [--with-sequences] [--max-commands N] [--embedded-db]`
 - `zage sequences analyze [--min-support N] [--min-confidence F] [--min-lift F] [--max-len N]`
@@ -102,8 +95,6 @@ source /path/to/zage/src/shell_integration/bash.sh
   - Without it, Zage returns full command suggestions.
   - `--autosuggest` forces full-line output for autosuggest backends.
   - `--timeout` accepts human durations like `500ms`, `2s`, `1m` (server mode only).
-- `zage model train [--epochs N] [--negatives N] [--min-history N] [--max-samples N] [--timeout 30m]`
-  - `--timeout` accepts human durations like `30s`, `10m`, `2h` (server mode only).
 - `zage pprof [--duration 30s] [--frequency 100] [--output zage.pprof]`
   - Requires the `pprof` feature at build time: `cargo build --features pprof`
 - `zage model status`
@@ -177,7 +168,6 @@ Environment overrides:
 - `ZAGE_COMPLETION_FORMAT=plain|zsh`
 - `ZAGE_ALIASES` or `ZAGE_ALIAS_FILE`
 - `ZAGE_HOSTNAME`
-- `ZAGE_MODEL_PATH` (reranker model location)
 - `ZAGE_SUGGEST_TIMEOUT` (human duration, server mode only)
 
 ## Database and Encryption
@@ -248,39 +238,13 @@ Zage ranks possible next commands in two phases:
      and sequences (bigrams/trigrams).
    - Produces a ranked candidate list with a score breakdown.
 
-2) **Optional ML reranking**
-   - If a trained model is present, it reorders candidates using learned features.
-   - The model is conservative: it only takes over when its confidence is high.
+2) **Online model blending**
+  - Once warmed up, the online model adds a learned score to help reorder candidates.
+  - It stays conservative via confidence gates so ranking never regresses badly.
 
 This keeps suggestions fast and reliable while still learning your personal workflows.
 
 ## Advanced Features
-
-### Rerank Configuration
-
-The reranker can be tuned via a TOML config file. Zage loads it in this order:
-
-- `ZAGE_RERANK_CONFIG=/path/to/rerank.toml`
-- `config/rerank.toml` (repo-local)
-- `~/.config/zage/rerank.toml`
-
-Example:
-
-```toml
-[low_confidence]
-# If top-1 score is below this, expand candidate pool.
-top = 0.15
-# If top-1 and top-2 are too close, expand candidate pool.
-margin = 0.02
-
-[rerank]
-# Minimum probability for reranker to accept reordering.
-min_prob = 0.30
-# Minimum margin between top-1 and top-2 for reranker to accept.
-min_margin = 0.02
-# Soft timeout for reranker inference; 0 disables the guard.
-timeout_ms = 50
-```
 
 ### Phase Configuration
 
@@ -347,7 +311,7 @@ zage record \
 - **"Suggest server unavailable"**: start the server (`zage server`) or install the service
   (`zage service install`), or switch to embedded (`backend = "embedded"` or `--embedded-db`).
 - **No suggestions**: run `zage import` then `zage index --with-sequences`.
-- **Model not found**: run `zage model train`.
+- **Online model not warmed**: run `zage import` (optionally `--reset-model`) to bootstrap.
 - **Autosuggest not working**: ensure zsh-autosuggestions is loaded before the Zage script, and
   `ZAGE_AUTOSUGGEST_DISABLE` is not set to `1`.
 

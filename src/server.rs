@@ -27,7 +27,6 @@ use crate::indexer::rebuild_stats;
 use crate::online_model::trainer::train_on_invocations as train_online_model;
 use crate::predict::aliases::{expand_alias, load_aliases};
 use crate::predict::{SuggestConfig, Suggestion as InternalSuggestion, suggest};
-use crate::rerank::{TrainConfig, train_model, warm_model_cache};
 use crate::sequence::{SequenceConfig, analyze_sequences, analyze_token_sequences};
 use crate::shell_history::{
   Invocation, Shell, normalize_shellname, parse_bash_history, parse_zsh_history,
@@ -36,13 +35,12 @@ use crate::workspace::detect_workspace_for_cwd;
 use crate::{Result, ZageError};
 
 const DEFAULT_TIMEOUT_MS: u64 = 1_000;
-// We use the server for long-running operations (import/index/train) over a local UDS.
-// Default to a very large timeout to avoid client disconnects during training.
+// We use the server for long-running operations (import/index) over a local UDS.
+// Default to a very large timeout to avoid client disconnects during indexing.
 const LONG_TIMEOUT_MS: u64 = 86_400_000;
 
 fn response_timeout_ms(request: &Request) -> u64 {
   match request {
-    Request::Train { timeout_ms, .. } => timeout_ms.unwrap_or(LONG_TIMEOUT_MS),
     Request::Suggest { timeout_ms, .. } => timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
     Request::Yank { .. } => LONG_TIMEOUT_MS,
     #[cfg(feature = "pprof")]
@@ -96,6 +94,7 @@ pub enum Request {
     username: Option<String>,
     shell: String,
     no_index: bool,
+    reset_model: bool,
   },
   Index {
     max_commands: Option<usize>,
@@ -114,13 +113,6 @@ pub enum Request {
     with_sequences: bool,
   },
   Ping,
-  Train {
-    epochs: usize,
-    negatives: usize,
-    min_history: usize,
-    max_samples: usize,
-    timeout_ms: Option<u64>,
-  },
   #[cfg(feature = "pprof")]
   Pprof {
     duration_ms: u64,
@@ -178,7 +170,7 @@ pub enum SuggestionSource {
   Transition,
   Sequence,
   Template,
-  Reranker,
+  Similarity,
 }
 
 struct DbManager {
@@ -289,7 +281,6 @@ pub async fn run_server(db_config: &DbConfig) -> Result<()> {
   }
   let sync_enabled = matches!(db_config.kind, crate::config::DbKind::RemoteReplica);
   let pool = Arc::new(ConnectionPool::new(db.db, sync_enabled)?);
-  let _ = warm_model_cache();
 
   if sync_enabled {
     let pool = pool.clone();
@@ -561,7 +552,6 @@ fn request_kind(request: &Request) -> &'static str {
     Request::AnalyzeSequences { .. } => "sequences analyze",
     Request::Yank { .. } => "yank",
     Request::Ping => "ping",
-    Request::Train { .. } => "train",
     #[cfg(feature = "pprof")]
     Request::Pprof { .. } => "pprof",
     Request::ModelStatus => "model status",
@@ -579,44 +569,6 @@ async fn handle_request(
   match request {
     Request::Ping => Response::Pong,
     Request::Status => status_response(pool).await,
-    Request::Train {
-      epochs,
-      negatives,
-      min_history,
-      max_samples,
-      timeout_ms: _,
-    } => match pool.get().await {
-      Ok(conn) => {
-        let result = train_model(
-          &conn,
-          TrainConfig {
-            epochs,
-            negatives_per_pos: negatives,
-            min_history,
-            max_samples,
-          },
-        )
-        .await;
-        match result {
-          Ok(report) => Response::Text {
-            lines: vec![format!(
-              "Trained reranker: samples={}, pairs={}, validation_accuracy={:.2}, validation_top1={:.2}, model={}",
-              report.samples,
-              report.pairs,
-              report.validation_accuracy,
-              report.validation_top1,
-              report.model_path.display()
-            )],
-          },
-          Err(err) => Response::Error {
-            message: err.to_string(),
-          },
-        }
-      }
-      Err(err) => Response::Error {
-        message: err.to_string(),
-      },
-    },
     #[cfg(feature = "pprof")]
     Request::Pprof {
       duration_ms,
@@ -636,8 +588,7 @@ async fn handle_request(
     Request::ModelStatus => match pool.get().await {
       Ok(conn) => match online_model_status(&conn).await {
         Ok(status) => {
-          let config = crate::config::OnlineModelConfig::load()
-            .unwrap_or(crate::config::OnlineModelConfig::default());
+          let config = crate::config::OnlineModelConfig::load().unwrap_or_default();
           let update_count = online_model_update_count(&conn).await.unwrap_or(0);
           let last_update = online_model_last_updated_at(&conn).await.ok().flatten();
           let replay_workspaces = online_replay_workspace_roots(&conn).await.unwrap_or(0);
@@ -712,9 +663,19 @@ async fn handle_request(
       username,
       shell,
       no_index,
+      reset_model,
     } => match pool.get().await {
       Ok(conn) => {
-        match handle_import(&conn, file, base_dir, hostname, username, shell, no_index).await {
+        let import = ImportRequest {
+          file,
+          base_dir,
+          hostname,
+          username,
+          shell,
+          no_index,
+          reset_model,
+        };
+        match handle_import(&conn, import).await {
           Ok(lines) => Response::Text { lines },
           Err(err) => Response::Error {
             message: err.to_string(),
@@ -898,19 +859,21 @@ async fn handle_request(
   }
 }
 
-async fn handle_import(
-  conn: &Connection,
+struct ImportRequest {
   file: Option<String>,
   base_dir: Option<String>,
   hostname: Option<String>,
   username: Option<String>,
   shell: String,
   no_index: bool,
-) -> Result<Vec<String>> {
-  let history_file = if let Some(path) = file {
+  reset_model: bool,
+}
+
+async fn handle_import(conn: &Connection, request: ImportRequest) -> Result<Vec<String>> {
+  let history_file = if let Some(path) = request.file {
     let path = PathBuf::from(path);
     if path.is_relative() {
-      if let Some(base) = base_dir {
+      if let Some(base) = request.base_dir {
         PathBuf::from(base).join(path)
       } else {
         std::env::current_dir()?.join(path)
@@ -919,14 +882,22 @@ async fn handle_import(
       path
     }
   } else {
-    default_history_path(&shell)?
+    default_history_path(&request.shell)?
   };
 
-  let shell = parse_shell(&shell)?;
+  let shell = parse_shell(&request.shell)?;
   let aliases = load_aliases();
   let mut invocations = match shell {
-    Shell::Zsh => parse_zsh_history(&history_file, hostname.clone(), username.clone())?,
-    Shell::Bash => parse_bash_history(&history_file, hostname.clone(), username.clone())?,
+    Shell::Zsh => parse_zsh_history(
+      &history_file,
+      request.hostname.clone(),
+      request.username.clone(),
+    )?,
+    Shell::Bash => parse_bash_history(
+      &history_file,
+      request.hostname.clone(),
+      request.username.clone(),
+    )?,
   };
   for invocation in invocations.iter_mut() {
     if invocation.expanded_command.is_empty() {
@@ -934,10 +905,19 @@ async fn handle_import(
         expand_alias(&invocation.command, &aliases).unwrap_or_else(|| invocation.command.clone());
     }
   }
-  import_history(conn, invocations).await?;
+  import_history(conn, invocations.iter().cloned()).await?;
 
   let mut lines = vec![format!("Imported history from {:?}", history_file)];
-  if no_index {
+  if request.reset_model {
+    reset_online_model(conn).await?;
+    lines.push("Online model reset".to_string());
+  }
+  train_online_model(conn, &invocations).await?;
+  lines.push(format!(
+    "Online model trained on {} invocations",
+    invocations.len()
+  ));
+  if request.no_index {
     lines.push("Index rebuild skipped (requested via --no-index)".to_string());
     return Ok(lines);
   }
@@ -1205,7 +1185,7 @@ fn suggestion_source(item: &InternalSuggestion) -> SuggestionSource {
     best = SuggestionSource::Transition;
   }
   if item.breakdown.similarity > score {
-    best = SuggestionSource::Reranker;
+    best = SuggestionSource::Similarity;
   }
   best
 }

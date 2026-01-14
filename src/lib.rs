@@ -14,8 +14,6 @@ pub mod predict;
 #[cfg(feature = "pprof")]
 mod profile;
 pub mod repo;
-pub mod rerank;
-pub mod rerank_config;
 pub mod sequence;
 pub mod server;
 pub mod service;

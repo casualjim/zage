@@ -55,6 +55,9 @@ pub enum Commands {
     /// Skip rebuilding stats and sequences after import (for bulk imports)
     #[arg(long)]
     no_index: bool,
+    /// Reset the online model before importing history
+    #[arg(long)]
+    reset_model: bool,
     /// Use the embedded SQLite database
     #[arg(long)]
     embedded_db: bool,
@@ -273,28 +276,6 @@ pub enum SequencesAction {
 
 #[derive(Subcommand, Debug)]
 pub enum ModelAction {
-  /// Train the legacy reranker model
-  Train {
-    /// Number of training epochs
-    #[arg(long, default_value = "150")]
-    epochs: usize,
-    /// Number of negatives per positive example
-    #[arg(long, default_value = "6")]
-    negatives: usize,
-    /// Minimum history size required to train (0 = auto)
-    #[arg(long, default_value = "0")]
-    min_history: usize,
-    /// Maximum number of history entries to use (0 = no limit)
-    #[arg(long, default_value = "0")]
-    max_samples: usize,
-    /// Request timeout for training when using the server (e.g. 5m, 30s)
-    #[arg(long)]
-    timeout: Option<HumanDuration>,
-    /// Use the embedded SQLite database
-    #[arg(long)]
-    embedded_db: bool,
-  },
-
   /// Show online model status
   Status {
     /// Use the embedded SQLite database
@@ -387,10 +368,20 @@ pub async fn run(cli: Cli) -> Result<()> {
       username,
       shell,
       no_index,
+      reset_model,
       embedded_db: _,
     }) => {
       let backend = require_backend(backend.as_ref())?;
-      import::run(backend, file, hostname, username, shell, no_index).await?;
+      import::run(
+        backend,
+        file,
+        hostname,
+        username,
+        shell,
+        no_index,
+        reset_model,
+      )
+      .await?;
     }
     Some(Commands::Index {
       max_commands,
@@ -414,13 +405,15 @@ pub async fn run(cli: Cli) -> Result<()> {
       let backend = require_backend(backend.as_ref())?;
       record::run(
         backend,
-        command,
-        working_directory,
-        exit_status,
-        start_timestamp,
-        end_timestamp,
-        shellname,
-        session_id,
+        record::RecordArgs {
+          command,
+          working_directory,
+          exit_status,
+          start_timestamp,
+          end_timestamp,
+          shellname,
+          session_id,
+        },
       )
       .await?;
     }
@@ -437,13 +430,15 @@ pub async fn run(cli: Cli) -> Result<()> {
       let backend = require_backend(backend.as_ref())?;
       feedback::run(
         backend,
-        shown_id,
-        shown_at,
-        working_directory,
-        suggestion,
-        accepted_command,
-        accepted_at,
-        outcome,
+        feedback::FeedbackArgs {
+          shown_id,
+          shown_at,
+          working_directory,
+          suggestion,
+          accepted_command,
+          accepted_at,
+          outcome,
+        },
       )
       .await?;
     }
@@ -503,25 +498,6 @@ pub async fn run(cli: Cli) -> Result<()> {
       }
     },
     Some(Commands::Model { action }) => match action {
-      ModelAction::Train {
-        epochs,
-        negatives,
-        min_history,
-        max_samples,
-        timeout,
-        embedded_db: _,
-      } => {
-        let backend = require_backend(backend.as_ref())?;
-        train::run(
-          backend,
-          epochs,
-          negatives,
-          min_history,
-          max_samples,
-          timeout,
-        )
-        .await?;
-      }
       ModelAction::Status { embedded_db: _ } => {
         let backend = require_backend(backend.as_ref())?;
         train::model_status(backend).await?;
@@ -593,9 +569,9 @@ fn command_embedded_override(command: &Commands) -> bool {
       SequencesAction::Analyze { embedded_db, .. } => *embedded_db,
     },
     Commands::Model { action } => match action {
-      ModelAction::Train { embedded_db, .. }
-      | ModelAction::Status { embedded_db, .. }
-      | ModelAction::Reset { embedded_db, .. } => *embedded_db,
+      ModelAction::Status { embedded_db, .. } | ModelAction::Reset { embedded_db, .. } => {
+        *embedded_db
+      }
     },
     #[cfg(feature = "pprof")]
     Commands::Pprof { embedded_db, .. } => *embedded_db,

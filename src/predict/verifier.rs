@@ -917,13 +917,6 @@ async fn run_tier1_spec(path: &Path, scenario_index: Option<usize>) -> Result<()
   seed_history(&db.conn, &spec.history, &temp_dir, physics_now, &aliases).await?;
 
   let _env_lock = env_lock();
-  let model_dir = temp_dir.path().join("model");
-  fs::create_dir_all(&model_dir)?;
-  let _model_guard = set_env_guard(
-    "ZAGE_MODEL_PATH",
-    Some(model_dir.to_string_lossy().to_string()),
-  );
-  crate::rerank::clear_model_cache();
   let run_phase_indexing = spec
     .options
     .as_ref()
