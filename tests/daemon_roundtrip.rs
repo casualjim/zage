@@ -93,6 +93,7 @@ async fn daemon_roundtrip_ping_record_suggest() -> zage::Result<()> {
   match zage::server::try_request(status).await? {
     Some(Response::Status {
       online_model_version,
+      online_warmed_up,
       online_update_count: _,
       online_last_update: _,
       online_replay_global: _,
@@ -100,12 +101,28 @@ async fn daemon_roundtrip_ping_record_suggest() -> zage::Result<()> {
       online_replay_workspaces: _,
       online_group_scalars: _,
       online_head_biases: _,
+      online_blend_alpha,
+      online_blend_margin_gate,
+      online_blend_min_score_gate,
       ..
     }) => {
       assert!(
         !online_model_version.is_empty(),
         "expected online model version in status"
       );
+      assert!(
+        online_blend_alpha.is_finite(),
+        "expected finite online blend alpha"
+      );
+      assert!(
+        online_blend_margin_gate.is_finite(),
+        "expected finite online blend margin gate"
+      );
+      assert!(
+        online_blend_min_score_gate.is_finite(),
+        "expected finite online blend min score gate"
+      );
+      let _ = online_warmed_up;
     }
     other => panic!("unexpected status response: {other:?}"),
   }

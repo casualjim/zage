@@ -138,6 +138,7 @@ pub enum Response {
     history_count: u64,
     last_train: Option<i64>,
     online_model_version: String,
+    online_warmed_up: bool,
     online_update_count: u64,
     online_last_update: Option<i64>,
     online_replay_global: u64,
@@ -145,6 +146,9 @@ pub enum Response {
     online_replay_workspaces: u64,
     online_group_scalars: Vec<(String, f64)>,
     online_head_biases: Vec<(String, f64)>,
+    online_blend_alpha: f64,
+    online_blend_margin_gate: f64,
+    online_blend_min_score_gate: f64,
   },
   Text {
     lines: Vec<String>,
@@ -603,6 +607,12 @@ async fn handle_request(
             warmed_up,
             update_count,
             last_update
+          ));
+          lines.push(format!(
+            "Blend: alpha={:.3}, margin_gate={:.3}, min_score_gate={:.3}",
+            config.blend.alpha,
+            config.blend.margin_gate,
+            config.blend.min_score_gate
           ));
           lines.push(format!(
             "Replay: global={}, workspace={}, workspaces={}",
@@ -1099,6 +1109,13 @@ async fn status_response(pool: &Arc<ConnectionPool>) -> Response {
       let replay_workspaces = online_replay_workspace_roots(&conn).await.unwrap_or(0);
       let group_scalars = online_model_group_scalars(&conn).await.unwrap_or_default();
       let head_biases = online_model_head_biases(&conn, 8).await.unwrap_or_default();
+      let warmed_up = model_status
+        .as_ref()
+        .map(|status| status.token_embeddings > 0 || status.group_scalars > 0)
+        .unwrap_or(false);
+      let blend_alpha = config.blend.alpha;
+      let blend_margin_gate = config.blend.margin_gate;
+      let blend_min_score_gate = config.blend.min_score_gate;
       let (replay_global, replay_workspace) = model_status
         .map(|status| (status.replay_global, status.replay_workspace))
         .unwrap_or((0, 0));
@@ -1108,6 +1125,7 @@ async fn status_response(pool: &Arc<ConnectionPool>) -> Response {
         last_train,
         (
           config.model_version(),
+          warmed_up,
           update_count,
           last_train,
           replay_global,
@@ -1115,6 +1133,9 @@ async fn status_response(pool: &Arc<ConnectionPool>) -> Response {
           replay_workspaces,
           group_scalars,
           head_biases,
+          blend_alpha,
+          blend_margin_gate,
+          blend_min_score_gate,
         ),
       )
     }
@@ -1124,6 +1145,7 @@ async fn status_response(pool: &Arc<ConnectionPool>) -> Response {
       None,
       (
         default_config.model_version(),
+        false,
         0,
         None,
         0,
@@ -1131,11 +1153,15 @@ async fn status_response(pool: &Arc<ConnectionPool>) -> Response {
         0,
         Vec::new(),
         Vec::new(),
+        default_config.blend.alpha,
+        default_config.blend.margin_gate,
+        default_config.blend.min_score_gate,
       ),
     ),
   };
   let (
     online_model_version,
+    online_warmed_up,
     online_update_count,
     online_last_update,
     online_replay_global,
@@ -1143,12 +1169,16 @@ async fn status_response(pool: &Arc<ConnectionPool>) -> Response {
     online_replay_workspaces,
     online_group_scalars,
     online_head_biases,
+    online_blend_alpha,
+    online_blend_margin_gate,
+    online_blend_min_score_gate,
   ) = online;
   Response::Status {
     model_loaded,
     history_count,
     last_train,
     online_model_version,
+    online_warmed_up,
     online_update_count,
     online_last_update,
     online_replay_global,
@@ -1156,6 +1186,9 @@ async fn status_response(pool: &Arc<ConnectionPool>) -> Response {
     online_replay_workspaces,
     online_group_scalars,
     online_head_biases,
+    online_blend_alpha,
+    online_blend_margin_gate,
+    online_blend_min_score_gate,
   }
 }
 

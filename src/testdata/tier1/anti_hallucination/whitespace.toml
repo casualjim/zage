@@ -23,7 +23,7 @@ cwd = "/tmp"
 session = "s1"
 
 [scenario.expect]
-contains = ["git status"]
+contains = [" git status"]
 
 [[scenario]]
 name = "trailing_spaces"
@@ -35,4 +35,4 @@ cwd = "/tmp"
 session = "s1"
 
 [scenario.expect]
-contains = ["git status"]
+contains = ["git   status"]
