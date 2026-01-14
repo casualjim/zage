@@ -44,7 +44,7 @@ _zsh_autosuggest_strategy_zage() {
     if [[ -z "$prefix" ]]; then
       output="$(zage suggest --autosuggest --count 5)"
     else
-      output="$(zage suggest --autosuggest --count 5 --current-line "$prefix")"
+      output="$(zage suggest --autosuggest --count 5 --current-line="$prefix")"
     fi
 
     if [[ -n "$output" && "$output" == "$prefix"* && "$output" != "$prefix" ]]; then

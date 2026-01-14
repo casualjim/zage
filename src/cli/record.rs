@@ -14,7 +14,7 @@ pub struct RecordArgs {
   pub exit_status: i64,
   pub start_timestamp: i64,
   pub end_timestamp: i64,
-  pub shellname: Option<String>,
+  pub shellname: String,
   pub session_id: Option<i64>,
 }
 
@@ -31,10 +31,7 @@ pub async fn run(backend: BackendRef<'_>, args: RecordArgs) -> Result<()> {
   info!("Recording command invocation");
   let aliases = load_aliases();
   let expanded_command = expand_alias(&command, &aliases).unwrap_or_else(|| command.clone());
-  let shellname = shellname
-    .as_deref()
-    .map(normalize_shellname)
-    .unwrap_or_else(|| "sh".to_string());
+  let shellname = normalize_shellname(&shellname);
 
   let server_req = Request::Record {
     command: command.clone(),

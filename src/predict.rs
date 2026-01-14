@@ -7,9 +7,11 @@ use crate::config::{OnlineModelBlendConfig, OnlineModelConfig};
 use crate::core::{Candidate, SystemTimeProvider, TimeProvider};
 pub use crate::core::{ScoreBreakdown, Suggestion};
 use crate::db::{get_recent_invocations, online_model_status};
+use crate::err::ZageError;
 use crate::online_model::trainer::{OnlineScoreContext, score_commands as online_score_commands};
 use crate::phase::PhaseConfig;
 use crate::repo::find_repo_root;
+use crate::shell_history::normalize_shellname;
 use crate::tokenize::{TokenKind, extract_command_parts, normalized_tokens, tokenize_index};
 pub use config::{RankingWeights, SuggestConfig};
 
@@ -69,6 +71,21 @@ fn expanded_command_for(
   } else {
     expand_alias(&invocation.command, aliases).unwrap_or_else(|| invocation.command.clone())
   }
+}
+
+fn resolve_shellname(config: &SuggestConfig) -> Result<String> {
+  let Some(shellname) = config.shellname.as_deref() else {
+    return Err(ZageError::ConfigError(
+      "shellname is required for suggestions".to_string(),
+    ));
+  };
+  let normalized = normalize_shellname(shellname);
+  if normalized.is_empty() {
+    return Err(ZageError::ConfigError(
+      "shellname is required for suggestions".to_string(),
+    ));
+  }
+  Ok(normalized)
 }
 
 pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Suggestion>> {
@@ -177,10 +194,7 @@ async fn build_pipeline_context(
   let last_exit_status = override_prev
     .map(|(_, exit)| *exit)
     .unwrap_or_else(|| recent.last().and_then(|inv| inv.exit_status));
-  let shellname = recent
-    .last()
-    .map(|inv| inv.shellname.clone())
-    .unwrap_or_else(|| "sh".to_string());
+  let shellname = resolve_shellname(config)?;
   let repo_root = config
     .cwd
     .as_deref()
@@ -300,22 +314,46 @@ async fn collect_candidates(
   }
 
   if config.use_sequences {
-    add_sequence_candidates(conn, &context.sequence_commands, &mut candidates).await?;
+    add_sequence_candidates(
+      conn,
+      &context.sequence_commands,
+      context.shellname.as_str(),
+      &mut candidates,
+    )
+    .await?;
   }
 
   if !candidates.is_empty() {
-    add_template_candidates(conn, &context.repo_root, &mut candidates).await?;
+    add_template_candidates(
+      conn,
+      &context.repo_root,
+      context.shellname.as_str(),
+      &mut candidates,
+    )
+    .await?;
   }
 
   if candidates.is_empty() {
     add_global_candidates(conn, &mut candidates, GLOBAL_CANDIDATE_LIMIT).await?;
-    add_template_candidates(conn, &context.repo_root, &mut candidates).await?;
+    add_template_candidates(
+      conn,
+      &context.repo_root,
+      context.shellname.as_str(),
+      &mut candidates,
+    )
+    .await?;
   }
 
   if candidates.len() < 25 {
     add_recent_candidates(conn, &mut candidates, RECENT_CANDIDATE_LIMIT).await?;
     add_global_candidates(conn, &mut candidates, GLOBAL_CANDIDATE_LIMIT).await?;
-    add_template_candidates(conn, &context.repo_root, &mut candidates).await?;
+    add_template_candidates(
+      conn,
+      &context.repo_root,
+      context.shellname.as_str(),
+      &mut candidates,
+    )
+    .await?;
   }
 
   let session_stats = if let Some(session_id) = config.session_id {
@@ -514,7 +552,7 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
   let mut candidate_heads: HashMap<String, String> = HashMap::new();
   let mut phase_heads: HashSet<String> = context.recent_heads.iter().cloned().collect();
   for candidate in context.candidates.values() {
-    if let Some(head) = command_head_for_phase("sh", &candidate.command) {
+    if let Some(head) = command_head_for_phase(context.shellname, &candidate.command) {
       phase_heads.insert(head.clone());
       candidate_heads.insert(candidate.command.clone(), head);
     }
@@ -744,6 +782,7 @@ async fn completion_candidates(
     .unwrap_or_default()
     .trim_end_matches('/')
     .to_string();
+  let shellname = resolve_shellname(config)?;
   let prefer_full_line = config.prefer_full_line;
   let pool_limit = if prefer_full_line {
     config.max_results.max(FULL_LINE_POOL_LIMIT)
@@ -752,7 +791,7 @@ async fn completion_candidates(
   };
   let token_priors = token_sequence_predictions(conn, prefix_norm).await?;
   let (prefix_flags, prefix_args) = {
-    let tokens = tokenize_index("sh", prefix);
+    let tokens = tokenize_index(shellname.as_str(), prefix);
     let ends_with_space = prefix
       .chars()
       .last()
@@ -812,6 +851,7 @@ async fn completion_candidates(
     conn,
     prefix,
     &repo_root,
+    shellname.as_str(),
     &token_priors,
     runtime.now,
     runtime.recency_half_life,
@@ -832,7 +872,7 @@ async fn completion_candidates(
         if prefix_flags.is_empty() && prefix_args.is_empty() {
           return true;
         }
-        let tokens = tokenize_index("sh", &suggestion.command);
+        let tokens = tokenize_index(shellname.as_str(), &suggestion.command);
         let Some(parts) = extract_command_parts(&suggestion.command, &tokens) else {
           return false;
         };
@@ -1042,7 +1082,7 @@ async fn completion_candidates(
       let freq = row.get::<i64>(1)?;
       let last_seen = row.get::<i64>(2)?;
       if !prefix_flags.is_empty() {
-        let tokens = tokenize_index("sh", &command);
+        let tokens = tokenize_index(shellname.as_str(), &command);
         let Some(parts) = extract_command_parts(&command, &tokens) else {
           continue;
         };
@@ -1066,7 +1106,7 @@ async fn completion_candidates(
           }
         }
       } else if !prefix_args.is_empty() {
-        let tokens = tokenize_index("sh", &command);
+        let tokens = tokenize_index(shellname.as_str(), &command);
         let Some(parts) = extract_command_parts(&command, &tokens) else {
           continue;
         };
@@ -1132,6 +1172,58 @@ async fn completion_candidates(
     }
   }
 
+  if !prefix.is_empty() {
+    let starts_with_space = prefix
+      .chars()
+      .next()
+      .map(|ch| ch.is_whitespace())
+      .unwrap_or(false);
+    if starts_with_space {
+      scored.clear();
+    } else {
+      let ends_with_space = prefix
+        .chars()
+        .last()
+        .map(|ch| ch.is_whitespace())
+        .unwrap_or(false);
+      let match_prefix = if ends_with_space {
+        prefix.trim_end()
+      } else {
+        prefix
+      };
+      if match_prefix.is_empty() {
+        scored.clear();
+      } else {
+        let has_prefix_match = scored
+          .iter()
+          .any(|suggestion| suggestion.command.starts_with(match_prefix));
+        if has_prefix_match {
+          if ends_with_space {
+            scored.retain(|suggestion| {
+              if !suggestion.command.starts_with(match_prefix) {
+                return false;
+              }
+              let rest = &suggestion.command[match_prefix.len()..];
+              rest.chars().next().map(|ch| ch.is_whitespace()).unwrap_or(true)
+            });
+          } else {
+            scored.retain(|suggestion| suggestion.command.starts_with(match_prefix));
+          }
+        }
+      }
+    }
+  }
+
+  apply_online_model_for_completions(
+    conn,
+    config,
+    runtime,
+    aliases,
+    &repo_root,
+    &mut scored,
+  )
+  .await?;
+
   if prefer_full_line && !scored.is_empty() {
     scored.sort_by(|a, b| b.score.total_cmp(&a.score));
     scored.truncate(config.max_results);
@@ -1167,6 +1259,59 @@ async fn completion_candidates(
   scored.sort_by(|a, b| b.score.total_cmp(&a.score));
   scored.truncate(config.max_results);
   Ok(scored)
+}
+
+async fn apply_online_model_for_completions(
+  conn: &Connection,
+  config: &SuggestConfig,
+  runtime: &SuggestRuntime,
+  aliases: &HashMap<String, String>,
+  repo_root: &str,
+  scored: &mut Vec<Suggestion>,
+) -> Result<()> {
+  if scored.is_empty() {
+    return Ok(());
+  }
+
+  let online_cfg = OnlineModelConfig::load()?;
+  let online_status = online_model_status(conn).await?;
+  let warmed_up = online_status.token_embeddings > 0 || online_status.group_scalars > 0;
+  if !warmed_up {
+    return Ok(());
+  }
+
+  let recent = get_recent_invocations(conn, config.recent_limit).await?;
+  let recent_commands: Vec<String> = recent
+    .iter()
+    .map(|inv| expanded_command_for(inv, aliases))
+    .collect();
+  let last_exit_status = recent.last().and_then(|inv| inv.exit_status);
+  let shellname = resolve_shellname(config)?;
+
+  let commands = scored
+    .iter()
+    .map(|suggestion| suggestion.command.clone())
+    .collect::<Vec<_>>();
+  let model_scores = online_score_commands(
+    conn,
+    OnlineScoreContext {
+      shellname: shellname.as_str(),
+      repo_root,
+      cwd: config.cwd.as_deref(),
+      hostname: config.hostname.as_deref(),
+      username: config.username.as_deref(),
+      exit_status: last_exit_status,
+      session_id: config.session_id,
+      unix_timestamp: runtime.now,
+      recent_commands: &recent_commands,
+      window: online_cfg.window,
+    },
+    &commands,
+    &online_cfg,
+  )
+  .await?;
+  apply_online_model_blend(scored, &model_scores, online_cfg.blend);
+  Ok(())
 }
 
 #[cfg(test)]
@@ -1310,6 +1455,50 @@ mod tests {
     let alias_candidate = candidates.get("gst").expect("alias candidate");
     assert_eq!(alias_candidate.freq, 4);
     assert_eq!(alias_candidate.last_seen, 123);
+  }
+
+  #[tokio::test]
+  async fn completion_suggests_double_dash_flags() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db = open_db(tmp.path()).await.unwrap();
+    init(&db.conn).await.unwrap();
+
+    db.conn
+      .execute(
+        "INSERT INTO flag_stats (repo_root, command_head, flag_raw, flag_norm, freq, last_seen)
+         VALUES (?, ?, ?, ?, ?, ?)",
+        ("", "cargo", "--locked", "--locked", 5i64, 10i64),
+      )
+      .await
+      .unwrap();
+
+    let cwd = tempfile::tempdir().unwrap();
+    let runtime = SuggestRuntime {
+      aliases: HashMap::new(),
+      weights: RankingWeights::default(),
+      recency_half_life: ranking::DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+      now: 1_000,
+    };
+    let prefix = "cargo install --path . --force --";
+    let config = SuggestConfig {
+      max_results: 5,
+      recent_limit: 10,
+      prefix: Some(prefix.to_string()),
+      cwd: Some(cwd.path().to_string_lossy().into_owned()),
+      hostname: None,
+      username: None,
+      session_id: None,
+      shellname: Some("zsh".to_string()),
+      use_sequences: false,
+      prefer_full_line: true,
+    };
+
+    let suggestions = suggest_with_runtime(&db.conn, config, &runtime, None)
+      .await
+      .unwrap();
+
+    assert!(suggestions.iter().any(|s| s.command == format!("{prefix}locked")));
+    assert!(suggestions.iter().all(|s| s.command.starts_with(prefix)));
   }
 
   #[tokio::test]

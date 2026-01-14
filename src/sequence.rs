@@ -49,8 +49,8 @@ pub struct SequenceCandidate {
   pub prefix_len: usize,
 }
 
-fn command_signature(command: &str) -> Option<String> {
-  let tokens = tokenize_index("sh", command);
+fn command_signature(shellname: &str, command: &str) -> Option<String> {
+  let tokens = tokenize_index(shellname, command);
   let parts = extract_command_parts(command, &tokens)?;
   let mut signature = parts.head;
   if let Some(first_arg) = parts.args.first() {
@@ -66,8 +66,8 @@ fn command_signature(command: &str) -> Option<String> {
   Some(signature)
 }
 
-fn normalize_sequence_command(command: &str) -> String {
-  command_signature(command).unwrap_or_else(|| command.to_string())
+fn normalize_sequence_command(shellname: &str, command: &str) -> String {
+  command_signature(shellname, command).unwrap_or_else(|| command.to_string())
 }
 
 pub async fn analyze_sequences(
@@ -83,7 +83,7 @@ pub async fn analyze_sequences(
 
   let mut rows = conn
     .query(
-      "SELECT expanded_command FROM shell_history ORDER BY COALESCE(start_unix_timestamp, 0) ASC, id ASC",
+      "SELECT expanded_command, shellname FROM shell_history ORDER BY COALESCE(start_unix_timestamp, 0) ASC, id ASC",
       (),
     )
     .await?;
@@ -92,7 +92,8 @@ pub async fn analyze_sequences(
 
   while let Some(row) = rows.next().await? {
     let raw_cmd = row.get::<String>(0)?;
-    let cmd = normalize_sequence_command(&raw_cmd);
+    let shellname = row.get::<String>(1)?;
+    let cmd = normalize_sequence_command(&shellname, &raw_cmd);
     total += 1;
     *unigram_counts.entry(cmd.clone()).or_insert(0) += 1;
 
@@ -339,6 +340,7 @@ pub async fn analyze_token_sequences(
 
 pub async fn candidates_from_sequences(
   conn: &Connection,
+  shellname: &str,
   recent_commands: &[String],
   limit: usize,
 ) -> Result<Vec<SequenceCandidate>> {
@@ -352,12 +354,12 @@ pub async fn candidates_from_sequences(
   let mut candidates = Vec::new();
   let normalized_recent_commands = recent_commands
     .iter()
-    .map(|cmd| normalize_sequence_command(cmd))
+    .map(|cmd| normalize_sequence_command(shellname, cmd))
     .collect::<Vec<_>>();
   let recent_len = normalized_recent_commands.len();
   let recent_signatures = normalized_recent_commands
     .iter()
-    .map(|cmd| command_signature(cmd))
+    .map(|cmd| command_signature(shellname, cmd))
     .collect::<Vec<_>>();
   while let Some(row) = rows.next().await? {
     let sequence_json = row.get::<String>(0)?;
@@ -378,7 +380,7 @@ pub async fn candidates_from_sequences(
     if !matched {
       let seq_signatures = sequence[..prefix_len]
         .iter()
-        .map(|cmd| command_signature(cmd))
+        .map(|cmd| command_signature(shellname, cmd))
         .collect::<Vec<_>>();
       matched = seq_signatures.len() == prefix_len
         && seq_signatures

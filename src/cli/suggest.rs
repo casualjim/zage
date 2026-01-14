@@ -27,6 +27,8 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
     timeout,
   } = args;
 
+  let current_line = current_line.filter(|value| !value.is_empty());
+
   let cwd = match cwd {
     Some(val) => Some(val),
     None => std::env::current_dir()
@@ -44,10 +46,7 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
   let username =
     username.or_else(|| uzers::get_current_username().map(|v| v.to_string_lossy().into_owned()));
 
-  let shellname = shellname
-    .as_deref()
-    .map(normalize_shellname)
-    .unwrap_or_else(|| "sh".to_string());
+  let shellname = normalize_shellname(&shellname);
 
   let has_prefix = current_line
     .as_ref()

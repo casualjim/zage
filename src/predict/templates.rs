@@ -4,7 +4,7 @@ use libsql::{Connection, Value};
 use serde_json;
 
 use crate::Result;
-use crate::tokenize::{Token, TokenKind, extract_command_parts, tokenize};
+use crate::tokenize::{Token, TokenKind, extract_command_parts, tokenize, tokenize_index};
 
 use super::ranking::recency_score;
 use super::sql::query_prepared;
@@ -42,11 +42,12 @@ pub(crate) async fn arg_template_candidates(
   conn: &Connection,
   prefix: &str,
   repo_root: &str,
+  shellname: &str,
   token_priors: &HashMap<String, f64>,
   now: i64,
   recency_half_life: f64,
 ) -> Result<Option<Vec<Suggestion>>> {
-  let ctx = match analyze_prefix(prefix, repo_root) {
+  let ctx = match analyze_prefix(prefix, repo_root, shellname) {
     Some(ctx) => ctx,
     None => return Ok(None),
   };
@@ -265,8 +266,14 @@ async fn flag_candidates(
         .map(|flag| flag.starts_with("--"))
         .unwrap_or(false)
     };
-    repo_flags.retain(|suggestion| !is_long_flag(&suggestion.command));
-    global_flags.retain(|suggestion| !is_long_flag(&suggestion.command));
+    let has_short_flag = repo_flags
+      .iter()
+      .chain(global_flags.iter())
+      .any(|suggestion| !is_long_flag(&suggestion.command));
+    if has_short_flag {
+      repo_flags.retain(|suggestion| !is_long_flag(&suggestion.command));
+      global_flags.retain(|suggestion| !is_long_flag(&suggestion.command));
+    }
   }
 
   if repo_flags.is_empty() && global_flags.is_empty() {
@@ -638,8 +645,8 @@ async fn fetch_flag_candidates(
   Ok(results)
 }
 
-fn analyze_prefix(prefix: &str, repo_root: &str) -> Option<PrefixContext> {
-  let tokens = tokenize(prefix);
+fn analyze_prefix(prefix: &str, repo_root: &str, shellname: &str) -> Option<PrefixContext> {
+  let tokens = tokenize_index(shellname, prefix);
   if tokens.is_empty() {
     return None;
   }
@@ -951,6 +958,7 @@ mod tests {
       &db.conn,
       "git ",
       "",
+      "zsh",
       &token_priors,
       1_000,
       crate::predict::ranking::DEFAULT_RECENCY_HALF_LIFE_SECONDS,
@@ -984,6 +992,7 @@ mod tests {
       &db.conn,
       "git ",
       "",
+      "zsh",
       &token_priors,
       1_000,
       crate::predict::ranking::DEFAULT_RECENCY_HALF_LIFE_SECONDS,

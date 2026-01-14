@@ -494,9 +494,10 @@ pub(crate) async fn hydrate_candidate_stats(
 pub(crate) async fn add_sequence_candidates(
   conn: &Connection,
   recent_commands: &[String],
+  shellname: &str,
   candidates: &mut HashMap<String, Candidate>,
 ) -> Result<()> {
-  let sequences = candidates_from_sequences(conn, recent_commands, 200).await?;
+  let sequences = candidates_from_sequences(conn, shellname, recent_commands, 200).await?;
   for seq in sequences {
     let entry = candidates
       .entry(seq.command.clone())
@@ -520,11 +521,12 @@ struct TemplateStat {
 pub(crate) async fn add_template_candidates(
   conn: &Connection,
   repo_root: &str,
+  shellname: &str,
   candidates: &mut HashMap<String, Candidate>,
 ) -> Result<()> {
   let mut heads: HashSet<String> = HashSet::new();
   for cmd in candidates.keys() {
-    if let Some(head) = command_head_for_phase("sh", cmd) {
+    if let Some(head) = command_head_for_phase(shellname, cmd) {
       heads.insert(head);
     }
   }

@@ -101,7 +101,7 @@ pub enum Commands {
     end_timestamp: i64,
     /// Shell name (defaults to $SHELL basename)
     #[arg(long = "shell", env = "SHELL")]
-    shellname: Option<String>,
+    shellname: String,
     /// The shell session ID
     #[arg(long)]
     session_id: Option<i64>, // Optional for now
@@ -162,7 +162,7 @@ pub enum Commands {
     count: usize,
 
     /// Current input line (prefix)
-    #[arg(long)]
+    #[arg(long, allow_hyphen_values = true)]
     current_line: Option<String>,
 
     /// Number of recent commands to consider as context
@@ -187,7 +187,7 @@ pub enum Commands {
 
     /// Override shell name (defaults to $SHELL basename)
     #[arg(long = "shell", env = "SHELL")]
-    shellname: Option<String>,
+    shellname: String,
 
     /// Disable sequence-based candidates
     #[arg(long)]
@@ -300,7 +300,7 @@ pub struct SuggestArgs {
   pub hostname: Option<String>,
   pub username: Option<String>,
   pub session_id: Option<i64>,
-  pub shellname: Option<String>,
+  pub shellname: String,
   pub no_sequences: bool,
   pub completion_format: CompletionFormat,
   pub show_scores: bool,

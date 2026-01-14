@@ -478,6 +478,7 @@ fn build_suggest_config(
     recent_limit: 50,
     ..SuggestConfig::default()
   };
+  config.shellname = Some("zsh".to_string());
   let expect = &scenario.expect;
   let top_items = expect.top.as_deref().unwrap_or(&[]);
   let contains_items = expect.contains.as_deref().unwrap_or(&[]);

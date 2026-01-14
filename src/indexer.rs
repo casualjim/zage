@@ -263,10 +263,9 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
 
   if phase_labels.len() > 1 {
     for (command, stat) in &command_stats {
-      let shellname = command_shell
-        .get(command)
-        .map(|s| s.as_str())
-        .unwrap_or("sh");
+      let Some(shellname) = command_shell.get(command).map(|s| s.as_str()) else {
+        continue;
+      };
       let tokens = tokenize_index(shellname, command);
       let parts = extract_command_parts(command, &tokens);
       let Some(parts) = parts else {
