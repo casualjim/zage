@@ -147,6 +147,8 @@ fn test_record_command() -> Result<()> {
     .arg(start_ts.to_string())
     .arg("--end-timestamp")
     .arg(end_ts.to_string())
+    .arg("--shell")
+    .arg("zsh")
     .arg("--session-id")
     .arg(session_id.to_string())
     .output()?;
