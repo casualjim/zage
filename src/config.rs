@@ -1,11 +1,24 @@
 use std::env;
-use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
+use clap::Args;
+use confique::Config as _;
+use confique::Layer as _;
 use serde::Deserialize;
 
 use crate::{Result, ZageError};
+
+#[derive(Args, Debug, Clone, Default)]
+pub struct ConfigArgs {
+  /// Optional path to a config file to load in addition to the standard locations.
+  #[arg(long = "config-file", global = true)]
+  pub config_file: Option<PathBuf>,
+
+  /// Path to the SQLite database file (overrides config/env).
+  #[arg(long = "db-path", global = true)]
+  pub db_path: Option<PathBuf>,
+}
 
 #[derive(Debug, Clone, Copy, Deserialize, Default)]
 #[serde(rename_all = "snake_case")]
@@ -30,46 +43,45 @@ pub enum DbKind {
   RemoteReplica,
 }
 
-#[derive(Debug, Clone)]
+#[derive(confique::Config, Debug, Clone)]
+pub struct AppConfig {
+  #[config(default = "server")]
+  pub backend: BackendMode,
+  #[config(nested)]
+  pub db: DbConfig,
+  #[config(nested)]
+  pub online_model: OnlineModelConfig,
+}
+
+#[derive(confique::Config, Debug, Clone)]
 pub struct DbConfig {
+  #[config(default = "local")]
   pub kind: DbKind,
+  #[config(env = "ZAGE_DB_PATH")]
   pub path: PathBuf,
   pub url: Option<String>,
+  #[config(env = "ZAGE_DB_AUTH_TOKEN")]
   pub auth_token: Option<String>,
+  #[config(env = "ZAGE_DB_ENCRYPTION_KEY")]
   pub encryption_key: Option<String>,
   pub encryption_cipher: Option<String>,
+  #[config(env = "ZAGE_DB_REMOTE_ENCRYPTION_KEY")]
   pub remote_encryption_key: Option<String>,
+  #[config(env = "ZAGE_DB_SYNC_INTERVAL_MS")]
   pub sync_interval_ms: Option<u64>,
 }
 
 impl DbConfig {
-  pub fn with_cli_path(&self, cli_path: Option<&PathBuf>) -> Self {
-    let mut next = self.clone();
-    if let Some(path) = cli_path {
-      next.path = path.clone();
-    }
-    next
-  }
-
   pub fn resolved_auth_token(&self) -> Option<String> {
-    self
-      .auth_token
-      .clone()
-      .or_else(|| env::var("ZAGE_DB_AUTH_TOKEN").ok())
+    self.auth_token.clone()
   }
 
   pub fn resolved_encryption_key(&self) -> Option<String> {
-    self
-      .encryption_key
-      .clone()
-      .or_else(|| env::var("ZAGE_DB_ENCRYPTION_KEY").ok())
+    self.encryption_key.clone()
   }
 
   pub fn resolved_remote_encryption_key(&self) -> Option<String> {
-    self
-      .remote_encryption_key
-      .clone()
-      .or_else(|| env::var("ZAGE_DB_REMOTE_ENCRYPTION_KEY").ok())
+    self.remote_encryption_key.clone()
   }
 
   pub fn resolved_cipher(&self) -> Result<Option<libsql::Cipher>> {
@@ -82,290 +94,189 @@ impl DbConfig {
   }
 
   pub fn resolved_sync_interval_ms(&self) -> Option<u64> {
-    self.sync_interval_ms.or_else(|| {
-      env::var("ZAGE_DB_SYNC_INTERVAL_MS")
-        .ok()
-        .and_then(|v| v.parse().ok())
-    })
+    self.sync_interval_ms
   }
 }
 
-#[derive(Debug, Clone)]
-pub struct AppConfig {
-  pub backend: BackendMode,
-  pub db: DbConfig,
-  pub online_model: OnlineModelConfig,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct AppConfigFile {
-  backend: Option<BackendMode>,
-  db: Option<DbConfigFile>,
-  online_model: Option<OnlineModelConfigFile>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct DbConfigFile {
-  #[serde(rename = "type")]
-  kind: Option<DbKind>,
-  path: Option<String>,
-  url: Option<String>,
-  auth_token: Option<String>,
-  encryption_key: Option<String>,
-  encryption_cipher: Option<String>,
-  remote_encryption_key: Option<String>,
-  sync_interval_ms: Option<u64>,
-}
-
-impl AppConfig {
-  pub fn load() -> Result<Self> {
-    let mut candidates: Vec<PathBuf> = Vec::new();
-    if let Ok(path) = env::var("ZAGE_CONFIG") {
-      candidates.push(PathBuf::from(path));
-    }
-    candidates.push(PathBuf::from("config/zage.toml"));
-    if let Some(config_dir) = dirs::config_dir() {
-      candidates.push(config_dir.join("zage").join("config.toml"));
-    }
-
-    for path in candidates {
-      if path.exists() {
-        let contents = fs::read_to_string(&path)?;
-        return Self::from_str(&contents);
-      }
-    }
-
-    Self::default_config()
-  }
-
-  fn from_str(contents: &str) -> Result<Self> {
-    let parsed: AppConfigFile =
-      toml::from_str(contents).map_err(|err| ZageError::ConfigError(err.to_string()))?;
-    Self::from_file(parsed)
-  }
-
-  fn from_file(parsed: AppConfigFile) -> Result<Self> {
-    let mut config = Self::default_config()?;
-    if let Some(backend) = parsed.backend {
-      config.backend = backend;
-    }
-    if let Some(db) = parsed.db {
-      if let Some(kind) = db.kind {
-        config.db.kind = kind;
-      }
-      if let Some(path) = db.path {
-        config.db.path = PathBuf::from(path);
-      }
-      if let Some(url) = db.url {
-        config.db.url = Some(url);
-      }
-      if let Some(token) = db.auth_token {
-        config.db.auth_token = Some(token);
-      }
-      if let Some(key) = db.encryption_key {
-        config.db.encryption_key = Some(key);
-      }
-      if let Some(cipher) = db.encryption_cipher {
-        config.db.encryption_cipher = Some(cipher);
-      }
-      if let Some(key) = db.remote_encryption_key {
-        config.db.remote_encryption_key = Some(key);
-      }
-      if let Some(interval) = db.sync_interval_ms {
-        config.db.sync_interval_ms = Some(interval);
-      }
-    }
-    if let Some(online) = parsed.online_model {
-      config.online_model.apply_file(online);
-    }
-    Ok(config)
-  }
-
-  fn default_config() -> Result<Self> {
-    let path = default_db_path()?;
-    Ok(Self {
-      backend: BackendMode::default(),
-      db: DbConfig {
-        kind: DbKind::Local,
-        path,
-        url: None,
-        auth_token: None,
-        encryption_key: None,
-        encryption_cipher: None,
-        remote_encryption_key: None,
-        sync_interval_ms: None,
-      },
-      online_model: OnlineModelConfig::default(),
-    })
-  }
-}
-
-const DEFAULT_ONLINE_DIM: usize = 64;
-const DEFAULT_ONLINE_NEGATIVES: usize = 16;
-const DEFAULT_ONLINE_WINDOW: usize = 10;
-const DEFAULT_ONLINE_BUCKETS: u32 = crate::hash_util::SUBWORD_BUCKETS;
-const DEFAULT_REPLAY_GLOBAL: usize = 20_000;
-const DEFAULT_REPLAY_WORKSPACE: usize = 5_000;
-const DEFAULT_REPLAY_MAX_WORKSPACES: usize = 50;
-const DEFAULT_BLEND_ALPHA: f64 = 0.25;
-const DEFAULT_BLEND_MARGIN_GATE: f64 = 0.05;
-const DEFAULT_BLEND_MIN_SCORE_GATE: f64 = 0.0;
-
-#[derive(Debug, Clone)]
+#[derive(confique::Config, Debug, Clone)]
+#[config(validate = Self::validate)]
 pub struct OnlineModelConfig {
+  #[config(default = 64)]
   pub embedding_dim: usize,
+  #[config(default = 16)]
   pub negatives: usize,
+  #[config(default = 10)]
   pub window: usize,
+  #[config(default = 131072)]
   pub bucket_count: u32,
+  #[config(nested)]
   pub replay: OnlineModelReplayConfig,
+  #[config(nested)]
   pub blend: OnlineModelBlendConfig,
 }
 
-#[derive(Debug, Clone)]
+#[derive(confique::Config, Debug, Clone)]
 pub struct OnlineModelReplayConfig {
+  #[config(default = 20000)]
   pub global_capacity: usize,
+  #[config(default = 5000)]
   pub workspace_capacity: usize,
+  #[config(default = 50)]
   pub max_workspaces: usize,
 }
 
-#[derive(Debug, Clone, Copy)]
+#[derive(confique::Config, Debug, Clone, Copy)]
 pub struct OnlineModelBlendConfig {
+  #[config(default = 0.25)]
   pub alpha: f64,
+  #[config(default = 0.05)]
   pub margin_gate: f64,
+  #[config(default = 0.0)]
   pub min_score_gate: f64,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct OnlineModelConfigFile {
-  embedding_dim: Option<usize>,
-  negatives: Option<usize>,
-  window: Option<usize>,
-  bucket_count: Option<u32>,
-  replay: Option<OnlineModelReplayConfigFile>,
-  blend: Option<OnlineModelBlendConfigFile>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct OnlineModelReplayConfigFile {
-  global_capacity: Option<usize>,
-  workspace_capacity: Option<usize>,
-  max_workspaces: Option<usize>,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct OnlineModelBlendConfigFile {
-  alpha: Option<f64>,
-  margin_gate: Option<f64>,
-  min_score_gate: Option<f64>,
 }
 
 impl Default for OnlineModelConfig {
   fn default() -> Self {
     Self {
-      embedding_dim: DEFAULT_ONLINE_DIM,
-      negatives: DEFAULT_ONLINE_NEGATIVES,
-      window: DEFAULT_ONLINE_WINDOW,
-      bucket_count: DEFAULT_ONLINE_BUCKETS,
-      replay: OnlineModelReplayConfig {
-        global_capacity: DEFAULT_REPLAY_GLOBAL,
-        workspace_capacity: DEFAULT_REPLAY_WORKSPACE,
-        max_workspaces: DEFAULT_REPLAY_MAX_WORKSPACES,
-      },
-      blend: OnlineModelBlendConfig {
-        alpha: DEFAULT_BLEND_ALPHA,
-        margin_gate: DEFAULT_BLEND_MARGIN_GATE,
-        min_score_gate: DEFAULT_BLEND_MIN_SCORE_GATE,
-      },
+      embedding_dim: 64,
+      negatives: 16,
+      window: 10,
+      bucket_count: crate::hash_util::SUBWORD_BUCKETS,
+      replay: OnlineModelReplayConfig::default(),
+      blend: OnlineModelBlendConfig::default(),
     }
+  }
+}
+
+impl Default for OnlineModelReplayConfig {
+  fn default() -> Self {
+    Self {
+      global_capacity: 20_000,
+      workspace_capacity: 5_000,
+      max_workspaces: 50,
+    }
+  }
+}
+
+impl Default for OnlineModelBlendConfig {
+  fn default() -> Self {
+    Self {
+      alpha: 0.25,
+      margin_gate: 0.05,
+      min_score_gate: 0.0,
+    }
+  }
+}
+
+impl AppConfig {
+  pub fn load() -> Result<Self> {
+    Self::load_with_args(None)
+  }
+
+  pub fn load_with_args(args: Option<&ConfigArgs>) -> Result<Self> {
+    let cli_layer = cli_layer(args);
+    let mut builder = AppConfig::builder().preloaded(cli_layer).env();
+
+    if let Some(path) = explicit_config_path(args) {
+      builder = builder.file(path);
+    }
+
+    if let Some(dir) = dirs::config_dir() {
+      builder = add_existing_files(builder, xdg_config_candidates(&dir));
+    }
+
+    builder = builder.preloaded(dynamic_defaults()?);
+
+    builder
+      .load()
+      .map_err(|err| ZageError::ConfigError(err.to_string()))
+  }
+
+  fn from_str(contents: &str) -> Result<Self> {
+    let layer: <AppConfig as confique::Config>::Layer =
+      toml::from_str(contents).map_err(|err| ZageError::ConfigError(err.to_string()))?;
+    AppConfig::builder()
+      .preloaded(layer)
+      .preloaded(dynamic_defaults()?)
+      .load()
+      .map_err(|err| ZageError::ConfigError(err.to_string()))
   }
 }
 
 impl OnlineModelConfig {
   pub fn load() -> Result<Self> {
-    let config = AppConfig::load()?.online_model;
-    config.validate()?;
-    Ok(config)
-  }
-
-  fn apply_file(&mut self, parsed: OnlineModelConfigFile) {
-    if let Some(dim) = parsed.embedding_dim {
-      self.embedding_dim = dim;
-    }
-    if let Some(negatives) = parsed.negatives {
-      self.negatives = negatives;
-    }
-    if let Some(window) = parsed.window {
-      self.window = window;
-    }
-    if let Some(bucket_count) = parsed.bucket_count {
-      self.bucket_count = bucket_count;
-    }
-    if let Some(replay) = parsed.replay {
-      if let Some(global_capacity) = replay.global_capacity {
-        self.replay.global_capacity = global_capacity;
-      }
-      if let Some(workspace_capacity) = replay.workspace_capacity {
-        self.replay.workspace_capacity = workspace_capacity;
-      }
-      if let Some(max_workspaces) = replay.max_workspaces {
-        self.replay.max_workspaces = max_workspaces;
-      }
-    }
-    if let Some(blend) = parsed.blend {
-      if let Some(alpha) = blend.alpha {
-        self.blend.alpha = alpha;
-      }
-      if let Some(margin_gate) = blend.margin_gate {
-        self.blend.margin_gate = margin_gate;
-      }
-      if let Some(min_score_gate) = blend.min_score_gate {
-        self.blend.min_score_gate = min_score_gate;
-      }
-    }
-    self.blend.margin_gate = self.blend.margin_gate.max(0.0);
+    Ok(AppConfig::load()?.online_model)
   }
 
   pub fn model_version(&self) -> String {
     format!("v1-d{}-b{}", self.embedding_dim, self.bucket_count)
   }
 
-  fn validate(&self) -> Result<()> {
+  fn validate(&self) -> std::result::Result<(), String> {
     if self.embedding_dim == 0 {
-      return Err(ZageError::ConfigError(
-        "online_model.embedding_dim must be > 0".to_string(),
-      ));
+      return Err("online_model.embedding_dim must be > 0".to_string());
     }
     if self.negatives == 0 {
-      return Err(ZageError::ConfigError(
-        "online_model.negatives must be > 0".to_string(),
-      ));
+      return Err("online_model.negatives must be > 0".to_string());
     }
     if self.window == 0 {
-      return Err(ZageError::ConfigError(
-        "online_model.window must be > 0".to_string(),
-      ));
+      return Err("online_model.window must be > 0".to_string());
     }
     if self.bucket_count == 0 || !self.bucket_count.is_power_of_two() {
-      return Err(ZageError::ConfigError(
-        "online_model.bucket_count must be a power of two".to_string(),
-      ));
+      return Err("online_model.bucket_count must be a power of two".to_string());
     }
     if self.replay.global_capacity == 0
       || self.replay.workspace_capacity == 0
       || self.replay.max_workspaces == 0
     {
-      return Err(ZageError::ConfigError(
-        "online_model.replay capacities must be > 0".to_string(),
-      ));
+      return Err("online_model.replay capacities must be > 0".to_string());
     }
     Ok(())
   }
 }
 
-fn default_db_path() -> Result<PathBuf> {
-  if let Ok(path) = env::var("ZAGE_DB_PATH") {
-    return Ok(PathBuf::from(path));
+fn cli_layer(args: Option<&ConfigArgs>) -> <AppConfig as confique::Config>::Layer {
+  let mut layer = <AppConfig as confique::Config>::Layer::empty();
+  if let Some(args) = args
+    && let Some(path) = args.db_path.clone()
+  {
+    layer.db.path = Some(path);
   }
+  layer
+}
+
+fn explicit_config_path(args: Option<&ConfigArgs>) -> Option<PathBuf> {
+  if let Some(args) = args
+    && let Some(path) = args.config_file.clone()
+  {
+    return Some(path);
+  }
+  env::var("ZAGE_CONFIG").ok().map(PathBuf::from)
+}
+
+fn add_existing_files(
+  mut builder: confique::Builder<AppConfig>,
+  paths: Vec<PathBuf>,
+) -> confique::Builder<AppConfig> {
+  for path in paths {
+    if path.exists() {
+      builder = builder.file(path);
+    }
+  }
+  builder
+}
+
+fn xdg_config_candidates(dir: &Path) -> Vec<PathBuf> {
+  vec![dir.join("zage").join("config.toml")]
+}
+
+fn dynamic_defaults() -> Result<<AppConfig as confique::Config>::Layer> {
+  let mut layer = <AppConfig as confique::Config>::Layer::empty();
+  layer.db.path = Some(default_db_path()?);
+  Ok(layer)
+}
+
+fn default_db_path() -> Result<PathBuf> {
   dirs::data_dir()
     .map(|v| v.join("zage/zage.db"))
     .ok_or_else(|| ZageError::ConfigError("Could not determine data directory".to_string()))

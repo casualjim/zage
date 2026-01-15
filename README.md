@@ -226,10 +226,12 @@ This is why suggestions can improve in subtle ways over time: it’s learning pa
 
 Zage can read a config file to set the default backend and database connection.
 
-Load order:
+Load order (highest priority first):
 
+- CLI flags
+- Environment variables
+- `--config-file /path/to/zage.toml`
 - `ZAGE_CONFIG=/path/to/zage.toml`
-- `config/zage.toml` (repo-local)
 - `~/.config/zage/config.toml`
 
 Example:
@@ -238,7 +240,7 @@ Example:
 backend = "embedded" # or "server"
 
 [db]
-type = "local"       # or "remote" or "remote_replica"
+kind = "local"       # or "remote" or "remote_replica"
 path = "/path/to/zage.db" # local/replica only
 
 # Remote libsql/sqld connection (optional for local)

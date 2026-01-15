@@ -8,7 +8,7 @@ use humantime::Duration as HumanDuration;
 use tracing::{debug, info};
 use tracing_subscriber::{EnvFilter, fmt};
 
-use crate::config::{AppConfig, DbConfig};
+use crate::config::{AppConfig, ConfigArgs, DbConfig};
 use crate::db::{Db, open_db_with_config};
 use crate::shell_history::Shell;
 
@@ -29,11 +29,10 @@ mod yank;
 #[derive(Parser)]
 #[clap(author, version, about)]
 pub struct Cli {
+  #[command(flatten)]
+  config: ConfigArgs,
   #[command(subcommand)]
   command: Option<Commands>,
-  /// Path to the SQLite database file (overrides default location)
-  #[clap(long, env = "ZAGE_DB_PATH")]
-  db_path: Option<PathBuf>,
 }
 
 #[derive(Subcommand, Debug)]
@@ -356,10 +355,10 @@ pub async fn run(cli: Cli) -> Result<()> {
     histfile, shell
   );
   info!("Starting application");
-  let app_config = AppConfig::load()?;
-  let db_config = app_config.db.with_cli_path(cli.db_path.as_ref());
+  let app_config = AppConfig::load_with_args(Some(&cli.config))?;
+  let db_config = &app_config.db;
 
-  let backend = resolve_backend(&app_config, &db_config, cli.command.as_ref()).await?;
+  let backend = resolve_backend(&app_config, db_config, cli.command.as_ref()).await?;
 
   match cli.command {
     Some(Commands::Import {
@@ -508,7 +507,7 @@ pub async fn run(cli: Cli) -> Result<()> {
       }
     },
     Some(Commands::Server {}) => {
-      server::run(&db_config).await?;
+      server::run(db_config).await?;
     }
     Some(Commands::Service { action }) => {
       service::run(action)?;
