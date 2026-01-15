@@ -192,6 +192,7 @@ impl AppConfig {
       .map_err(|err| ZageError::ConfigError(err.to_string()))
   }
 
+  #[cfg(test)]
   fn from_str(contents: &str) -> Result<Self> {
     let layer: <AppConfig as confique::Config>::Layer =
       toml::from_str(contents).map_err(|err| ZageError::ConfigError(err.to_string()))?;

@@ -893,11 +893,9 @@ async fn completion_candidates(
   )
   .await?
   {
-    let has_prefix_match = arg_suggestions
-      .iter()
-      .any(|suggestion| {
-        normalize_prefix_for_match(&suggestion.command).starts_with(&normalized_prefix)
-      });
+    let has_prefix_match = arg_suggestions.iter().any(|suggestion| {
+      normalize_prefix_for_match(&suggestion.command).starts_with(&normalized_prefix)
+    });
     if !has_prefix_match {
       // fall through to normal completion candidates
     } else {
@@ -1029,9 +1027,9 @@ async fn completion_candidates(
 
     let expanded = expand_alias(&command, aliases);
     let expanded_for_score = expanded.as_deref().unwrap_or(&command);
-    let matches_prefix = match_prefixes.iter().any(|variant| {
-      command.starts_with(variant) || expanded_for_score.starts_with(variant)
-    });
+    let matches_prefix = match_prefixes
+      .iter()
+      .any(|variant| command.starts_with(variant) || expanded_for_score.starts_with(variant));
     if !matches_prefix {
       continue;
     }
@@ -1175,13 +1173,13 @@ async fn completion_candidates(
       let frequency = (freq as f64).ln_1p();
       let score = 0.7 * similarity + 0.2 * recency + 0.1 * frequency;
 
-    let mut suggestion_command = command.clone();
-    for (alias, expansion) in aliases {
-      if let Some(alias_command) = alias_for_command(alias, expansion, &command)
-        && alias_command.starts_with(&normalized_match_prefix)
-      {
-        suggestion_command = alias_command;
-        break;
+      let mut suggestion_command = command.clone();
+      for (alias, expansion) in aliases {
+        if let Some(alias_command) = alias_for_command(alias, expansion, &command)
+          && alias_command.starts_with(&normalized_match_prefix)
+        {
+          suggestion_command = alias_command;
+          break;
         }
       }
       if !apply_env_prefix.is_empty() {
@@ -1239,7 +1237,11 @@ async fn completion_candidates(
               return false;
             }
             let rest = &normalized_command[match_prefix.len()..];
-            rest.chars().next().map(|ch| ch.is_whitespace()).unwrap_or(true)
+            rest
+              .chars()
+              .next()
+              .map(|ch| ch.is_whitespace())
+              .unwrap_or(true)
           });
         } else {
           scored.retain(|suggestion| {
@@ -1250,15 +1252,8 @@ async fn completion_candidates(
     }
   }
 
-  apply_online_model_for_completions(
-    conn,
-    config,
-    runtime,
-    aliases,
-    &repo_root,
-    &mut scored,
-  )
-  .await?;
+  apply_online_model_for_completions(conn, config, runtime, aliases, &repo_root, &mut scored)
+    .await?;
 
   if prefer_full_line && !scored.is_empty() {
     scored.sort_by(|a, b| b.score.total_cmp(&a.score));
@@ -1305,7 +1300,7 @@ async fn apply_online_model_for_completions(
   runtime: &SuggestRuntime,
   aliases: &HashMap<String, String>,
   repo_root: &str,
-  scored: &mut Vec<Suggestion>,
+  scored: &mut [Suggestion],
 ) -> Result<()> {
   if scored.is_empty() {
     return Ok(());
@@ -1535,7 +1530,11 @@ mod tests {
       .await
       .unwrap();
 
-    assert!(suggestions.iter().any(|s| s.command == format!("{prefix}locked")));
+    assert!(
+      suggestions
+        .iter()
+        .any(|s| s.command == format!("{prefix}locked"))
+    );
     assert!(suggestions.iter().all(|s| s.command.starts_with(prefix)));
   }
 

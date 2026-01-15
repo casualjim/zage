@@ -23,7 +23,7 @@ if [[ -z "$ZAGE_ALIASES" ]]; then
 fi
 
 # Optional debug log file: set ZAGE_BASH_DEBUG to a filepath to enable
-: ${ZAGE_BASH_DEBUG:=""}
+: "${ZAGE_BASH_DEBUG:=""}"
 
 # Variables to store command context
 _zage_cmd_start_time=""

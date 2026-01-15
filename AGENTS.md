@@ -6,7 +6,7 @@
 >
 > **CRITICAL: Do NOT run git mutations without explicit approval from the user** Do NOT ever run git checkout/revert/restore/reset without EXPLICIT APPROVAL from the USER
 >
-> **CRITICAL: DO NOT ASK KNOWABLE QUESTIONS** Do not ask the user for information that you can look up. 
+> **CRITICAL: DO NOT ASK KNOWABLE QUESTIONS** Do not ask the user for information that you can look up.
 
 
 ## Build, Test, and Development Commands

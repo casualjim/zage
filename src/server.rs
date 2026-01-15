@@ -610,9 +610,7 @@ async fn handle_request(
           ));
           lines.push(format!(
             "Blend: alpha={:.3}, margin_gate={:.3}, min_score_gate={:.3}",
-            config.blend.alpha,
-            config.blend.margin_gate,
-            config.blend.min_score_gate
+            config.blend.alpha, config.blend.margin_gate, config.blend.min_score_gate
           ));
           lines.push(format!(
             "Replay: global={}, workspace={}, workspaces={}",
