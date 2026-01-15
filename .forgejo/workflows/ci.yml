@@ -56,7 +56,7 @@ jobs:
         with:
           registry: git.wagyu.icu
           username: ${{ secrets.FORGEJO_REGISTRY_USERNAME }}
-          password: ${{ secrets.FORGEJO_REGISTRY_TOKEN }}
+          password: ${{ secrets.BUILDER_FORGEJO_TOKEN }}
 
       - name: Determine image tag
         id: meta
