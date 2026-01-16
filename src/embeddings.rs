@@ -83,7 +83,9 @@ pub async fn index_command_embeddings(
   conn: &Connection,
   max_commands: Option<usize>,
 ) -> Result<usize> {
-  let embedding_dim = DEFAULT_EMBEDDING_DIM;
+  let embedding_dim = command_embedding_dim(conn)
+    .await?
+    .unwrap_or(DEFAULT_EMBEDDING_DIM);
   ensure_command_embeddings_schema(conn, embedding_dim).await?;
 
   let now = unix_now();

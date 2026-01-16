@@ -26,7 +26,7 @@ use crate::db::{
 use crate::indexer::rebuild_stats;
 use crate::online_model::trainer::train_on_invocations as train_online_model;
 use crate::predict::aliases::{expand_alias, load_aliases};
-use crate::predict::{SuggestConfig, Suggestion as InternalSuggestion, suggest};
+use crate::predict::{SuggestConfig, Suggestion as InternalSuggestion};
 use crate::sequence::{SequenceConfig, analyze_sequences, analyze_token_sequences};
 use crate::shell_history::{
   Invocation, Shell, normalize_shellname, parse_bash_history, parse_zsh_history,
@@ -81,6 +81,7 @@ pub enum Request {
     username: Option<String>,
     session_id: Option<i64>,
     shellname: Option<String>,
+    aliases: Option<String>,
     limit: u32,
     recent_limit: usize,
     use_sequences: bool,
@@ -832,6 +833,7 @@ async fn handle_request(
       username,
       session_id,
       shellname,
+      aliases,
       limit,
       recent_limit,
       use_sequences,
@@ -851,14 +853,20 @@ async fn handle_request(
         prefer_full_line,
       };
       match pool.get().await {
-        Ok(conn) => match suggest(&conn, config).await {
-          Ok(suggestions) => Response::Suggestions {
-            items: map_suggestions(&suggestions),
-          },
-          Err(err) => Response::Error {
-            message: err.to_string(),
-          },
-        },
+        Ok(conn) => {
+          let runtime_aliases = aliases
+            .as_deref()
+            .map(crate::predict::aliases::parse_aliases)
+            .unwrap_or_else(crate::predict::aliases::load_aliases);
+          match crate::predict::suggest_with_aliases(&conn, config, runtime_aliases).await {
+            Ok(suggestions) => Response::Suggestions {
+              items: map_suggestions(&suggestions),
+            },
+            Err(err) => Response::Error {
+              message: err.to_string(),
+            },
+          }
+        }
         Err(err) => Response::Error {
           message: err.to_string(),
         },

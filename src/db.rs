@@ -7,7 +7,9 @@ use std::path::Path;
 
 use crate::config::{DbConfig, DbKind};
 use crate::repo::find_repo_root;
-use crate::tokenize::{extract_command_parts, normalize_token, tokenize_index};
+use crate::tokenize::{
+  extract_command_parts, normalize_command_whitespace, normalize_token, tokenize_index,
+};
 use crate::{Result, shell_history::Invocation};
 use serde_json;
 use tracing::info;
@@ -252,11 +254,15 @@ pub async fn delete_history_by_command(
   Ok(affected)
 }
 
-pub async fn get_recent_invocations(conn: &Connection, limit: usize) -> Result<Vec<Invocation>> {
+pub async fn get_recent_invocations(
+  conn: &Connection,
+  session_id: Option<i64>,
+  limit: usize,
+) -> Result<Vec<Invocation>> {
   let mut rows = conn
     .query(
       include_str!("db/get-recent-invocations.sql"),
-      libsql::params![limit as i64],
+      libsql::params![session_id, limit as i64],
     )
     .await?;
 
@@ -306,7 +312,8 @@ pub async fn update_stats_for_invocation(conn: &Connection, invocation: &Invocat
   } else {
     invocation.expanded_command.as_str()
   };
-  let tokens = tokenize_index(&invocation.shellname, stats_command);
+  let stats_command = normalize_command_whitespace(stats_command);
+  let tokens = tokenize_index(&invocation.shellname, &stats_command);
   let raw_tokens: Vec<String> = tokens.iter().map(|t| t.raw.clone()).collect();
   let norm_tokens: Vec<String> = tokens.iter().map(|t| t.normalized.clone()).collect();
 
@@ -351,14 +358,13 @@ pub async fn update_stats_for_invocation(conn: &Connection, invocation: &Invocat
       )
       .await?;
 
-    if let Some(prev) =
-      previous_invocation_for_session(conn, invocation.session_id, now).await?
-    {
+    if let Some(prev) = previous_invocation_for_session(conn, invocation).await? {
       let prev_command = if prev.expanded_command.is_empty() {
         prev.command.as_str()
       } else {
         prev.expanded_command.as_str()
       };
+      let prev_command = normalize_command_whitespace(prev_command);
       let prev_status = prev.exit_status;
       let prev_repo_root = prev
         .working_directory
@@ -441,7 +447,7 @@ pub async fn update_stats_for_invocation(conn: &Connection, invocation: &Invocat
       )
       .await?;
 
-    if let Some(parts) = extract_command_parts(stats_command, &tokens) {
+    if let Some(parts) = extract_command_parts(&stats_command, &tokens) {
       let mut flags = parts.flags;
       flags.sort();
       let flags_json = serde_json::to_string(&flags)?;
@@ -895,28 +901,41 @@ struct PrevInvocation {
 
 async fn previous_invocation_for_session(
   conn: &Connection,
-  session_id: i64,
-  before_ts: i64,
+  invocation: &Invocation,
 ) -> Result<Option<PrevInvocation>> {
   let mut rows = conn
     .query(
-      "SELECT command, expanded_command, exit_status, working_directory FROM shell_history
-       WHERE session_id = ? AND COALESCE(start_unix_timestamp, 0) < ?
-       ORDER BY COALESCE(start_unix_timestamp, 0) DESC, id DESC
-       LIMIT 1",
-      (session_id, before_ts),
+      "SELECT command, expanded_command, exit_status, working_directory,
+              start_unix_timestamp, end_unix_timestamp
+       FROM shell_history
+       WHERE session_id = ?
+       ORDER BY COALESCE(end_unix_timestamp, start_unix_timestamp, 0) DESC, id DESC
+       LIMIT 5",
+      libsql::params![invocation.session_id],
     )
     .await?;
-  if let Some(row) = rows.next().await? {
-    Ok(Some(PrevInvocation {
-      command: row.get(0)?,
-      expanded_command: row.get(1)?,
-      exit_status: row.get::<Option<i64>>(2)?,
-      working_directory: row.get::<Option<String>>(3)?,
-    }))
-  } else {
-    Ok(None)
+  while let Some(row) = rows.next().await? {
+    let command: String = row.get(0)?;
+    let expanded_command: String = row.get(1)?;
+    let exit_status: Option<i64> = row.get(2)?;
+    let working_directory: Option<String> = row.get(3)?;
+    let start_ts: Option<i64> = row.get(4)?;
+    let end_ts: Option<i64> = row.get(5)?;
+    let is_same = command == invocation.command
+      && expanded_command == invocation.expanded_command
+      && start_ts == invocation.start_unix_timestamp
+      && end_ts == invocation.end_unix_timestamp;
+    if is_same {
+      continue;
+    }
+    return Ok(Some(PrevInvocation {
+      command,
+      expanded_command,
+      exit_status,
+      working_directory,
+    }));
   }
+  Ok(None)
 }
 
 async fn execute_batch(conn: &Connection, sql: &str) -> Result<()> {
@@ -1214,6 +1233,100 @@ mod tests {
     let row = rows.next().await?.expect("row");
     let workspace_json: Option<String> = row.get(0)?;
     assert!(workspace_json.is_some());
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn get_recent_invocations_orders_by_end_timestamp() -> Result<()> {
+    let tmp = tempfile::NamedTempFile::new()?;
+    let db = open_db(tmp.path()).await?;
+    init(&db.conn).await?;
+
+    let inv_a = Invocation {
+      command: "cmd-a".to_string(),
+      expanded_command: "cmd-a".to_string(),
+      shellname: "zsh".to_string(),
+      working_directory: Some("/tmp".to_string()),
+      workspace: None,
+      hostname: Some("host".to_string()),
+      username: Some("user".to_string()),
+      exit_status: Some(0),
+      start_unix_timestamp: Some(10),
+      end_unix_timestamp: Some(11),
+      session_id: 1,
+    };
+    let inv_b = Invocation {
+      command: "cmd-b".to_string(),
+      expanded_command: "cmd-b".to_string(),
+      shellname: "zsh".to_string(),
+      working_directory: Some("/tmp".to_string()),
+      workspace: None,
+      hostname: Some("host".to_string()),
+      username: Some("user".to_string()),
+      exit_status: Some(0),
+      start_unix_timestamp: Some(10),
+      end_unix_timestamp: Some(12),
+      session_id: 1,
+    };
+
+    assert!(insert_invocation(&db.conn, &inv_a).await?);
+    assert!(insert_invocation(&db.conn, &inv_b).await?);
+
+    let recent = get_recent_invocations(&db.conn, None, 2).await?;
+    assert_eq!(recent.len(), 2);
+    assert_eq!(recent[0].command, "cmd-a");
+    assert_eq!(recent[1].command, "cmd-b");
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn transition_stats_use_previous_even_with_same_timestamp() -> Result<()> {
+    let tmp = tempfile::NamedTempFile::new()?;
+    let db = open_db(tmp.path()).await?;
+    init(&db.conn).await?;
+
+    let inv_a = Invocation {
+      command: "cmd-a".to_string(),
+      expanded_command: "cmd-a".to_string(),
+      shellname: "zsh".to_string(),
+      working_directory: Some("/tmp".to_string()),
+      workspace: None,
+      hostname: Some("host".to_string()),
+      username: Some("user".to_string()),
+      exit_status: Some(0),
+      start_unix_timestamp: Some(10),
+      end_unix_timestamp: Some(10),
+      session_id: 1,
+    };
+    let inv_b = Invocation {
+      command: "cmd-b".to_string(),
+      expanded_command: "cmd-b".to_string(),
+      shellname: "zsh".to_string(),
+      working_directory: Some("/tmp".to_string()),
+      workspace: None,
+      hostname: Some("host".to_string()),
+      username: Some("user".to_string()),
+      exit_status: Some(0),
+      start_unix_timestamp: Some(10),
+      end_unix_timestamp: Some(10),
+      session_id: 1,
+    };
+
+    assert!(insert_invocation(&db.conn, &inv_a).await?);
+    update_stats_for_invocation(&db.conn, &inv_a).await?;
+    assert!(insert_invocation(&db.conn, &inv_b).await?);
+    update_stats_for_invocation(&db.conn, &inv_b).await?;
+
+    let mut rows = db
+      .conn
+      .query(
+        "SELECT freq FROM transition_stats
+         WHERE prev_command = ? AND next_command = ? AND prev_exit_status IS ?",
+        ("cmd-a".to_string(), "cmd-b".to_string(), Some(0i64)),
+      )
+      .await?;
+    let row = rows.next().await?;
+    assert!(row.is_some());
     Ok(())
   }
 

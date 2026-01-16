@@ -4,6 +4,7 @@ use libsql::{Connection, Value};
 
 use crate::Result;
 use crate::sequence::candidates_from_sequences;
+use crate::tokenize::normalize_command_whitespace;
 
 use super::phase_support::{PhaseSignal, command_head_for_phase};
 use super::sql::query_prepared;
@@ -16,15 +17,52 @@ pub(crate) async fn add_transition_candidates(
   repo_root: &str,
   candidates: &mut HashMap<String, Candidate>,
 ) -> Result<()> {
-  if !repo_root.is_empty() {
+  let normalized = normalize_command_whitespace(last_command);
+  let mut variants: Vec<&str> = vec![last_command];
+  if normalized != last_command {
+    variants.push(normalized.as_str());
+  }
+
+  for last in variants {
+    if !repo_root.is_empty() {
+      let found = fetch_transition_candidates(
+        conn,
+        TransitionQuery::new(
+          "repo_transition_stats",
+          Some(repo_root),
+          last,
+          last_exit_status,
+          true,
+          last_exit_status.is_some(),
+        ),
+        candidates,
+      )
+      .await?;
+      if !found {
+        let _ = fetch_transition_candidates(
+          conn,
+          TransitionQuery::new(
+            "repo_transition_stats",
+            Some(repo_root),
+            last,
+            None,
+            true,
+            false,
+          ),
+          candidates,
+        )
+        .await?;
+      }
+    }
+
     let found = fetch_transition_candidates(
       conn,
       TransitionQuery::new(
-        "repo_transition_stats",
-        Some(repo_root),
-        last_command,
+        "transition_stats",
+        None,
+        last,
         last_exit_status,
-        true,
+        false,
         last_exit_status.is_some(),
       ),
       candidates,
@@ -33,40 +71,11 @@ pub(crate) async fn add_transition_candidates(
     if !found {
       let _ = fetch_transition_candidates(
         conn,
-        TransitionQuery::new(
-          "repo_transition_stats",
-          Some(repo_root),
-          last_command,
-          None,
-          true,
-          false,
-        ),
+        TransitionQuery::new("transition_stats", None, last, None, false, false),
         candidates,
       )
       .await?;
     }
-  }
-
-  let found = fetch_transition_candidates(
-    conn,
-    TransitionQuery::new(
-      "transition_stats",
-      None,
-      last_command,
-      last_exit_status,
-      false,
-      last_exit_status.is_some(),
-    ),
-    candidates,
-  )
-  .await?;
-  if !found {
-    let _ = fetch_transition_candidates(
-      conn,
-      TransitionQuery::new("transition_stats", None, last_command, None, false, false),
-      candidates,
-    )
-    .await?;
   }
   Ok(())
 }

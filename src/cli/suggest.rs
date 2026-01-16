@@ -1,5 +1,6 @@
 use std::collections::HashSet;
 use std::env;
+use std::fs;
 use std::time::Duration;
 
 use color_eyre::eyre::{Result, eyre};
@@ -48,6 +49,16 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
 
   let shellname = normalize_shellname(&shellname);
 
+  let aliases = env::var("ZAGE_ALIASES")
+    .ok()
+    .filter(|value| !value.trim().is_empty())
+    .or_else(|| {
+      env::var("ZAGE_ALIAS_FILE")
+        .ok()
+        .and_then(|path| fs::read_to_string(path).ok())
+        .filter(|value| !value.trim().is_empty())
+    });
+
   let has_prefix = current_line
     .as_ref()
     .map(|s| !s.is_empty())
@@ -66,6 +77,7 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
         username: username.clone(),
         session_id,
         shellname: Some(shellname.clone()),
+        aliases: aliases.clone(),
         limit: count as u32,
         recent_limit,
         use_sequences: !no_sequences,

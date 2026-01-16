@@ -7,7 +7,7 @@ mod tree_sitter;
 
 pub use command_parts::{CommandParts, extract_command_parts};
 pub use lexer::{token_strings, token_strings_index, tokenize, tokenize_index};
-pub use normalize::{normalize_token, normalized_tokens};
+pub use normalize::{normalize_command_whitespace, normalize_token, normalized_tokens};
 
 pub fn generalized_command_tokens(shellname: &str, command: &str, max_args: usize) -> Vec<String> {
   let tokens = tokenize_index(shellname, command);

@@ -13,6 +13,55 @@ pub fn normalize_token(raw: &str) -> String {
     .unwrap_or_else(|| raw.to_string())
 }
 
+pub fn normalize_command_whitespace(input: &str) -> String {
+  let mut out = String::with_capacity(input.len());
+  let mut chars = input.chars().peekable();
+  let mut in_single = false;
+  let mut in_double = false;
+  let mut last_was_space = false;
+
+  while let Some(ch) = chars.next() {
+    if ch == '\\' && !in_single {
+      out.push(ch);
+      if let Some(next) = chars.next() {
+        out.push(next);
+      }
+      last_was_space = false;
+      continue;
+    }
+
+    if ch == '\'' && !in_double {
+      in_single = !in_single;
+      out.push(ch);
+      last_was_space = false;
+      continue;
+    }
+    if ch == '"' && !in_single {
+      in_double = !in_double;
+      out.push(ch);
+      last_was_space = false;
+      continue;
+    }
+
+    if ch.is_whitespace() && !in_single && !in_double {
+      if !out.is_empty() && !last_was_space {
+        out.push(' ');
+        last_was_space = true;
+      }
+      continue;
+    }
+
+    out.push(ch);
+    last_was_space = false;
+  }
+
+  if last_was_space {
+    out.pop();
+  }
+
+  out
+}
+
 pub(crate) fn classify_word(raw: &str) -> TokenKind {
   if raw.starts_with('$') {
     return TokenKind::Variable;
@@ -117,4 +166,27 @@ fn is_ip(raw: &str) -> bool {
     }
   }
   true
+}
+
+#[cfg(test)]
+mod tests {
+  use super::normalize_command_whitespace;
+
+  #[test]
+  fn normalize_command_whitespace_collapses_unquoted_spaces() {
+    let input = "  cargo  install --path .  --force --locked ";
+    assert_eq!(
+      normalize_command_whitespace(input),
+      "cargo install --path . --force --locked"
+    );
+  }
+
+  #[test]
+  fn normalize_command_whitespace_preserves_quoted_and_escaped_spaces() {
+    let input = "echo  'a  b'  \"c  d\"  foo\\ bar";
+    assert_eq!(
+      normalize_command_whitespace(input),
+      "echo 'a  b' \"c  d\" foo\\ bar"
+    );
+  }
 }

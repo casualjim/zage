@@ -125,8 +125,17 @@ pub struct OnlineModelReplayConfig {
   pub max_workspaces: usize,
 }
 
+#[derive(Debug, Clone, Copy, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum OnlineModelBlendMode {
+  Additive,
+  Replace,
+}
+
 #[derive(confique::Config, Debug, Clone, Copy)]
 pub struct OnlineModelBlendConfig {
+  #[config(default = "additive")]
+  pub mode: OnlineModelBlendMode,
   #[config(default = 0.25)]
   pub alpha: f64,
   #[config(default = 0.05)]
@@ -161,6 +170,7 @@ impl Default for OnlineModelReplayConfig {
 impl Default for OnlineModelBlendConfig {
   fn default() -> Self {
     Self {
+      mode: OnlineModelBlendMode::Additive,
       alpha: 0.25,
       margin_gate: 0.05,
       min_score_gate: 0.0,
@@ -297,6 +307,7 @@ mod tests {
     assert_eq!(config.replay.global_capacity, 20_000);
     assert_eq!(config.replay.workspace_capacity, 5_000);
     assert_eq!(config.replay.max_workspaces, 50);
+    assert_eq!(config.blend.mode, OnlineModelBlendMode::Additive);
     assert_eq!(config.blend.alpha, 0.25);
     assert_eq!(config.blend.margin_gate, 0.05);
     assert_eq!(config.blend.min_score_gate, 0.0);
@@ -318,6 +329,7 @@ workspace_capacity = 200
 max_workspaces = 8
 
 [online_model.blend]
+mode = "replace"
 alpha = 0.5
 margin_gate = 0.1
 min_score_gate = 0.2
@@ -331,6 +343,7 @@ min_score_gate = 0.2
     assert_eq!(online.replay.global_capacity, 1000);
     assert_eq!(online.replay.workspace_capacity, 200);
     assert_eq!(online.replay.max_workspaces, 8);
+    assert_eq!(online.blend.mode, OnlineModelBlendMode::Replace);
     assert_eq!(online.blend.alpha, 0.5);
     assert_eq!(online.blend.margin_gate, 0.1);
     assert_eq!(online.blend.min_score_gate, 0.2);

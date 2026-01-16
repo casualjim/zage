@@ -342,6 +342,7 @@ async fn fetch_arg_candidates(
       score,
       breakdown: ScoreBreakdown {
         recency,
+        session_recency: 0.0,
         frequency,
         transition: 0.0,
         context,
@@ -403,6 +404,7 @@ async fn fetch_arg_candidates_any(
       score,
       breakdown: ScoreBreakdown {
         recency,
+        session_recency: 0.0,
         frequency,
         transition: 0.0,
         context,
@@ -480,6 +482,7 @@ async fn fetch_env_candidates(
       score,
       breakdown: ScoreBreakdown {
         recency,
+        session_recency: 0.0,
         frequency,
         transition: 0.0,
         context,
@@ -556,6 +559,7 @@ async fn fetch_env_key_candidates(
       score,
       breakdown: ScoreBreakdown {
         recency,
+        session_recency: 0.0,
         frequency,
         transition: 0.0,
         context,
@@ -632,6 +636,7 @@ async fn fetch_flag_candidates(
       score,
       breakdown: ScoreBreakdown {
         recency,
+        session_recency: 0.0,
         frequency,
         transition: 0.0,
         context: context_score,

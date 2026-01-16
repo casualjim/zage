@@ -9,7 +9,9 @@ use crate::Result;
 use crate::phase::{PhaseConfig, PhaseSample, features_from_tokens, train_phase_predictor};
 use crate::predict::aliases::{expand_alias, load_aliases};
 use crate::repo::find_repo_root;
-use crate::tokenize::{extract_command_parts, normalize_token, tokenize_index};
+use crate::tokenize::{
+  extract_command_parts, normalize_command_whitespace, normalize_token, tokenize_index,
+};
 
 #[derive(Debug, Default)]
 pub struct IndexReport {
@@ -118,6 +120,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
     } else {
       expand_alias(&command, &aliases).unwrap_or(command.clone())
     };
+    let stats_command = normalize_command_whitespace(&stats_command);
 
     update_stat(&mut command_stats, &stats_command, ts);
     update_stat_key(

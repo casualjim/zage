@@ -8,6 +8,7 @@ pub struct Suggestion {
 #[derive(Debug, Clone, Default)]
 pub struct ScoreBreakdown {
   pub recency: f64,
+  pub session_recency: f64,
   pub frequency: f64,
   pub transition: f64,
   pub context: f64,

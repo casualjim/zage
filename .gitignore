@@ -5,3 +5,4 @@ data/pretrain/
 dist/
 .intentionally-empty-file.o
 target/
+docs/check-out.md

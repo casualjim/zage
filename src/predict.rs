@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use libsql::{Connection, Value};
 
 use crate::Result;
-use crate::config::{OnlineModelBlendConfig, OnlineModelConfig};
+use crate::config::{OnlineModelBlendConfig, OnlineModelBlendMode, OnlineModelConfig};
 use crate::core::{Candidate, SystemTimeProvider, TimeProvider};
 pub use crate::core::{ScoreBreakdown, Suggestion};
 use crate::db::{get_recent_invocations, online_model_status};
@@ -11,7 +11,7 @@ use crate::err::ZageError;
 use crate::online_model::trainer::{OnlineScoreContext, score_commands as online_score_commands};
 use crate::phase::PhaseConfig;
 use crate::repo::find_repo_root;
-use crate::shell_history::normalize_shellname;
+use crate::shell_history::{Invocation, normalize_shellname};
 use crate::tokenize::{TokenKind, extract_command_parts, normalized_tokens, tokenize_index};
 pub use config::{RankingWeights, SuggestConfig};
 
@@ -107,6 +107,84 @@ fn apply_prefix_spacing(prefix: &str, normalized_prefix: &str, suggestions: &mut
   }
 }
 
+async fn fetch_command_counts(
+  conn: &Connection,
+  commands: &[String],
+) -> Result<HashMap<String, i64>> {
+  let mut out = HashMap::new();
+  if commands.is_empty() {
+    return Ok(out);
+  }
+
+  let mut placeholders = String::new();
+  for (idx, _) in commands.iter().enumerate() {
+    if idx > 0 {
+      placeholders.push(',');
+    }
+    placeholders.push('?');
+  }
+  let sql = format!(
+    "SELECT command, COUNT(*) FROM shell_history WHERE command IN ({}) GROUP BY command",
+    placeholders
+  );
+  let params = commands
+    .iter()
+    .map(|cmd| Value::from(cmd.clone()))
+    .collect::<Vec<_>>();
+  let mut rows = query_prepared(conn, &sql, libsql::params_from_iter(params)).await?;
+  while let Some(row) = rows.next().await? {
+    let cmd = row.get::<String>(0)?;
+    let count = row.get::<i64>(1)?;
+    out.insert(cmd, count);
+  }
+  Ok(out)
+}
+
+async fn apply_alias_preference(
+  conn: &Connection,
+  suggestions: &mut Vec<Suggestion>,
+  aliases: &HashMap<String, String>,
+) -> Result<()> {
+  if suggestions.is_empty() || aliases.is_empty() {
+    return Ok(());
+  }
+
+  let mut mappings: Vec<(usize, String, String)> = Vec::new();
+  let mut command_set: HashSet<String> = HashSet::new();
+
+  for (idx, suggestion) in suggestions.iter().enumerate() {
+    for (alias, expansion) in aliases {
+      if let Some(alias_command) = alias_for_command(alias, expansion, &suggestion.command) {
+        mappings.push((idx, alias_command.clone(), suggestion.command.clone()));
+        command_set.insert(alias_command);
+        command_set.insert(suggestion.command.clone());
+        break;
+      }
+    }
+  }
+
+  if mappings.is_empty() {
+    return Ok(());
+  }
+
+  let commands = command_set.into_iter().collect::<Vec<_>>();
+  let counts = fetch_command_counts(conn, &commands).await?;
+
+  for (idx, alias_command, expanded_command) in mappings {
+    let alias_count = counts.get(&alias_command).copied().unwrap_or(0);
+    let expanded_count = counts.get(&expanded_command).copied().unwrap_or(0);
+    if alias_count > expanded_count
+      && let Some(suggestion) = suggestions.get_mut(idx)
+    {
+      suggestion.command = alias_command;
+    }
+  }
+
+  let mut seen = HashSet::new();
+  suggestions.retain(|suggestion| seen.insert(suggestion.command.clone()));
+  Ok(())
+}
+
 fn resolve_shellname(config: &SuggestConfig) -> Result<String> {
   let Some(shellname) = config.shellname.as_deref() else {
     return Err(ZageError::ConfigError(
@@ -122,10 +200,29 @@ fn resolve_shellname(config: &SuggestConfig) -> Result<String> {
   Ok(normalized)
 }
 
+async fn load_recent_invocations(
+  conn: &Connection,
+  config: &SuggestConfig,
+) -> Result<Vec<Invocation>> {
+  let mut recent = get_recent_invocations(conn, config.session_id, config.recent_limit).await?;
+  if recent.is_empty() && config.session_id.is_some() {
+    recent = get_recent_invocations(conn, None, config.recent_limit).await?;
+  }
+  Ok(recent)
+}
+
 pub async fn suggest(conn: &Connection, config: SuggestConfig) -> Result<Vec<Suggestion>> {
+  suggest_with_aliases(conn, config, load_aliases()).await
+}
+
+pub async fn suggest_with_aliases(
+  conn: &Connection,
+  config: SuggestConfig,
+  aliases: HashMap<String, String>,
+) -> Result<Vec<Suggestion>> {
   let time_provider = SystemTimeProvider;
   let runtime = SuggestRuntime {
-    aliases: load_aliases(),
+    aliases,
     weights: RankingWeights::default(),
     recency_half_life: DEFAULT_RECENCY_HALF_LIFE_SECONDS,
     now: time_provider.now(),
@@ -171,12 +268,14 @@ pub(crate) async fn suggest_with_runtime(
   let feature_context = build_feature_matrix(&feature_args);
   let scored = model_score(&feature_context).await?;
 
-  Ok(final_filter(
+  let mut filtered = final_filter(
     scored,
     &config,
     &runtime.weights,
     context.last_command.as_ref(),
-  ))
+  );
+  apply_alias_preference(conn, &mut filtered, aliases).await?;
+  Ok(filtered)
 }
 
 struct PipelineContext {
@@ -200,7 +299,7 @@ async fn build_pipeline_context(
   override_prev: Option<&(String, Option<i64>)>,
   aliases: &HashMap<String, String>,
 ) -> Result<Option<PipelineContext>> {
-  let recent = get_recent_invocations(conn, config.recent_limit).await?;
+  let recent = load_recent_invocations(conn, config).await?;
   if recent.is_empty() {
     return Ok(None);
   }
@@ -538,6 +637,8 @@ fn apply_online_model_blend(
 
   let mut top1 = f32::NEG_INFINITY;
   let mut top2 = f32::NEG_INFINITY;
+  let mut min_model = f32::INFINITY;
+  let mut max_model = f32::NEG_INFINITY;
   for &score in model_scores {
     if !score.is_finite() {
       continue;
@@ -548,6 +649,8 @@ fn apply_online_model_blend(
     } else if score > top2 {
       top2 = score;
     }
+    min_model = min_model.min(score);
+    max_model = max_model.max(score);
   }
 
   if !top1.is_finite() {
@@ -571,14 +674,49 @@ fn apply_online_model_blend(
     return;
   }
 
-  for (idx, suggestion) in suggestions.iter_mut().enumerate() {
-    let model = model_scores[idx];
-    if !model.is_finite() {
-      continue;
+  match cfg.mode {
+    OnlineModelBlendMode::Additive => {
+      for (idx, suggestion) in suggestions.iter_mut().enumerate() {
+        let model = model_scores[idx];
+        if !model.is_finite() {
+          continue;
+        }
+        let contrib = cfg.alpha * gate * (model as f64);
+        suggestion.score += contrib;
+        suggestion.breakdown.online_model = contrib;
+      }
     }
-    let contrib = cfg.alpha * gate * (model as f64);
-    suggestion.score += contrib;
-    suggestion.breakdown.online_model = contrib;
+    OnlineModelBlendMode::Replace => {
+      let mut min_score = f64::INFINITY;
+      let mut max_score = f64::NEG_INFINITY;
+      for suggestion in suggestions.iter() {
+        if !suggestion.score.is_finite() {
+          continue;
+        }
+        min_score = min_score.min(suggestion.score);
+        max_score = max_score.max(suggestion.score);
+      }
+      if !min_score.is_finite() || !max_score.is_finite() {
+        return;
+      }
+
+      let alpha = (cfg.alpha * gate).clamp(0.0, 1.0);
+      let model_span = (max_model - min_model).max(1e-6);
+      let score_span = (max_score - min_score).max(1e-6);
+
+      for (idx, suggestion) in suggestions.iter_mut().enumerate() {
+        let model = model_scores[idx];
+        if !model.is_finite() {
+          continue;
+        }
+        let model_norm = ((model - min_model) / model_span) as f64;
+        let model_scaled = min_score + model_norm * score_span;
+        let blended = (1.0 - alpha) * suggestion.score + alpha * model_scaled;
+        let delta = blended - suggestion.score;
+        suggestion.score = blended;
+        suggestion.breakdown.online_model = delta;
+      }
+    }
   }
 }
 
@@ -708,6 +846,7 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
       score,
       breakdown: ScoreBreakdown {
         recency,
+        session_recency,
         frequency,
         transition,
         context: context_score,
@@ -748,12 +887,64 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
     apply_online_model_blend(&mut scored, &model_scores, blend);
   }
 
+  let use_fallback_rank = !matches!(online_cfg.blend.mode, OnlineModelBlendMode::Replace);
+  let weights = context.weights;
+  if use_fallback_rank {
+    for suggestion in scored.iter_mut() {
+      let intelligent = weights.transition * suggestion.breakdown.transition
+        + weights.context * suggestion.breakdown.context
+        + weights.sequence * suggestion.breakdown.sequence
+        + weights.similarity * suggestion.breakdown.similarity
+        + suggestion.breakdown.online_model;
+      let frecency = weights.recency * suggestion.breakdown.recency
+        + weights.frequency * suggestion.breakdown.frequency
+        + 0.1 * suggestion.breakdown.session_recency;
+      let rank_score = if intelligent > 0.0 {
+        intelligent
+      } else {
+        frecency
+      };
+      if rank_score.is_finite() {
+        suggestion.score = rank_score;
+      }
+    }
+  }
+
+  let score_parts = |suggestion: &Suggestion| {
+    if use_fallback_rank {
+      let intelligent = weights.transition * suggestion.breakdown.transition
+        + weights.context * suggestion.breakdown.context
+        + weights.sequence * suggestion.breakdown.sequence
+        + weights.similarity * suggestion.breakdown.similarity
+        + suggestion.breakdown.online_model;
+      let frecency = weights.recency * suggestion.breakdown.recency
+        + weights.frequency * suggestion.breakdown.frequency
+        + 0.1 * suggestion.breakdown.session_recency;
+      (intelligent, frecency)
+    } else {
+      (suggestion.score, 0.0)
+    }
+  };
+
   scored.sort_by(|a, b| {
-    let score_bucket_a = (a.score * 10_000.0).round() as i64;
-    let score_bucket_b = (b.score * 10_000.0).round() as i64;
-    let score_cmp = score_bucket_b.cmp(&score_bucket_a);
-    if score_cmp != std::cmp::Ordering::Equal {
-      return score_cmp;
+    let (int_a, frec_a) = score_parts(a);
+    let (int_b, frec_b) = score_parts(b);
+    let has_int_a = int_a > 0.0;
+    let has_int_b = int_b > 0.0;
+    let has_int_cmp = has_int_b.cmp(&has_int_a);
+    if has_int_cmp != std::cmp::Ordering::Equal {
+      return has_int_cmp;
+    }
+    if has_int_a {
+      let int_cmp = int_b.total_cmp(&int_a);
+      if int_cmp != std::cmp::Ordering::Equal {
+        return int_cmp;
+      }
+    } else {
+      let frec_cmp = frec_b.total_cmp(&frec_a);
+      if frec_cmp != std::cmp::Ordering::Equal {
+        return frec_cmp;
+      }
     }
     let recency_cmp = a.breakdown.recency.total_cmp(&b.breakdown.recency);
     if recency_cmp != std::cmp::Ordering::Equal {
@@ -1092,6 +1283,7 @@ async fn completion_candidates(
       score,
       breakdown: ScoreBreakdown {
         recency,
+        session_recency: 0.0,
         frequency,
         transition: 0.0,
         context,
@@ -1201,6 +1393,7 @@ async fn completion_candidates(
         score,
         breakdown: ScoreBreakdown {
           recency,
+          session_recency: 0.0,
           frequency,
           transition: 0.0,
           context: 0.0,
@@ -1313,7 +1506,7 @@ async fn apply_online_model_for_completions(
     return Ok(());
   }
 
-  let recent = get_recent_invocations(conn, config.recent_limit).await?;
+  let recent = load_recent_invocations(conn, config).await?;
   let recent_commands: Vec<String> = recent
     .iter()
     .map(|inv| expanded_command_for(inv, aliases))
@@ -1350,11 +1543,30 @@ async fn apply_online_model_for_completions(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::db::{init, open_db};
+  use crate::db::{init, insert_invocation, open_db};
+  use crate::shell_history::Invocation;
 
   use super::aliases::{add_alias_candidates, alias_for_command};
   use super::candidates::{add_head_candidates, add_phase_candidates};
   use super::phase_support::{PhaseSignal, detect_session_phase, phase_match_boost};
+
+  async fn insert_command(conn: &Connection, command: &str, expanded: &str, ts: i64) -> Result<()> {
+    let inv = Invocation {
+      command: command.to_string(),
+      expanded_command: expanded.to_string(),
+      shellname: "zsh".to_string(),
+      working_directory: Some("/tmp".to_string()),
+      workspace: None,
+      hostname: Some("host".to_string()),
+      username: Some("user".to_string()),
+      exit_status: Some(0),
+      start_unix_timestamp: Some(ts),
+      end_unix_timestamp: Some(ts + 1),
+      session_id: 1,
+    };
+    insert_invocation(conn, &inv).await?;
+    Ok(())
+  }
 
   #[test]
   fn detects_session_phase_from_phase_stats() {
@@ -1416,6 +1628,7 @@ mod tests {
       &mut suggestions,
       &model_scores,
       OnlineModelBlendConfig {
+        mode: OnlineModelBlendMode::Additive,
         alpha: 5.0,
         margin_gate: 0.05,
         min_score_gate: 0.0,
@@ -1445,6 +1658,7 @@ mod tests {
       &mut suggestions,
       &model_scores,
       OnlineModelBlendConfig {
+        mode: OnlineModelBlendMode::Additive,
         alpha: 5.0,
         margin_gate: 0.05,
         min_score_gate: 0.0,
@@ -1471,6 +1685,71 @@ mod tests {
   fn alias_for_command_rejects_mismatch() {
     let alias = alias_for_command("gst", "git status", "git diff");
     assert!(alias.is_none());
+  }
+
+  #[tokio::test]
+  async fn apply_alias_preference_prefers_alias_when_more_frequent() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db = open_db(tmp.path()).await.unwrap();
+    init(&db.conn).await.unwrap();
+
+    insert_command(&db.conn, "gst", "git status", 1)
+      .await
+      .unwrap();
+    insert_command(&db.conn, "gst", "git status", 3)
+      .await
+      .unwrap();
+    insert_command(&db.conn, "gst", "git status", 5)
+      .await
+      .unwrap();
+    insert_command(&db.conn, "git status", "git status", 7)
+      .await
+      .unwrap();
+
+    let mut suggestions = vec![Suggestion {
+      command: "git status".to_string(),
+      score: 1.0,
+      breakdown: ScoreBreakdown::default(),
+    }];
+    let mut aliases = HashMap::new();
+    aliases.insert("gst".to_string(), "git status".to_string());
+
+    apply_alias_preference(&db.conn, &mut suggestions, &aliases)
+      .await
+      .unwrap();
+
+    assert_eq!(suggestions[0].command, "gst");
+  }
+
+  #[tokio::test]
+  async fn apply_alias_preference_keeps_expanded_when_more_frequent() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db = open_db(tmp.path()).await.unwrap();
+    init(&db.conn).await.unwrap();
+
+    insert_command(&db.conn, "gst", "git status", 1)
+      .await
+      .unwrap();
+    insert_command(&db.conn, "git status", "git status", 3)
+      .await
+      .unwrap();
+    insert_command(&db.conn, "git status", "git status", 5)
+      .await
+      .unwrap();
+
+    let mut suggestions = vec![Suggestion {
+      command: "git status".to_string(),
+      score: 1.0,
+      breakdown: ScoreBreakdown::default(),
+    }];
+    let mut aliases = HashMap::new();
+    aliases.insert("gst".to_string(), "git status".to_string());
+
+    apply_alias_preference(&db.conn, &mut suggestions, &aliases)
+      .await
+      .unwrap();
+
+    assert_eq!(suggestions[0].command, "git status");
   }
 
   #[test]

@@ -64,6 +64,7 @@ async fn daemon_roundtrip_ping_record_suggest() -> zage::Result<()> {
     username: None,
     session_id: Some(42),
     shellname: Some("zsh".to_string()),
+    aliases: None,
     limit: 5,
     recent_limit: 10,
     use_sequences: true,

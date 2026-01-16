@@ -34,6 +34,12 @@ pub fn load_aliases() -> HashMap<String, String> {
   map
 }
 
+pub fn parse_aliases(input: &str) -> HashMap<String, String> {
+  let mut map = HashMap::new();
+  parse_aliases_into(input, &mut map);
+  map
+}
+
 fn parse_aliases_into(input: &str, map: &mut HashMap<String, String>) {
   for raw in input.lines() {
     if let Some((name, value)) = parse_alias_line(raw) {
