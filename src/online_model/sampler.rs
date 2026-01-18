@@ -23,7 +23,7 @@ impl GlobalCommandPool {
     // Global pool: top frequent commands.
     let mut rows = conn
       .query(
-        "SELECT command, freq FROM command_stats ORDER BY freq DESC LIMIT 5000",
+        "SELECT command, freq FROM command_stats ORDER BY freq DESC, command ASC LIMIT 5000",
         (),
       )
       .await?;
@@ -415,7 +415,7 @@ fn command_buckets(shellname: &str, command: &str, bucket_count: u32) -> Vec<(u3
 async fn load_workspace_commands(conn: &Connection, workspace_root: &str) -> Result<Vec<String>> {
   let mut rows = conn
     .query(
-      "SELECT command FROM workspace_command_stats WHERE workspace_root = ? ORDER BY freq DESC LIMIT 2000",
+      "SELECT command FROM workspace_command_stats WHERE workspace_root = ? ORDER BY freq DESC, command ASC LIMIT 2000",
       libsql::params![workspace_root.to_string()],
     )
     .await?;
@@ -430,7 +430,7 @@ async fn load_workspace_commands(conn: &Connection, workspace_root: &str) -> Res
 async fn load_workspace_cwd_commands(conn: &Connection, cwd: &str) -> Result<Vec<String>> {
   let mut rows = conn
     .query(
-      "SELECT command FROM context_stats WHERE working_directory = ? ORDER BY freq DESC LIMIT 2000",
+      "SELECT command FROM context_stats WHERE working_directory = ? ORDER BY freq DESC, command ASC LIMIT 2000",
       libsql::params![cwd.to_string()],
     )
     .await?;
