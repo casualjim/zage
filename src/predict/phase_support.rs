@@ -3,7 +3,7 @@ use std::collections::{HashMap, HashSet};
 use libsql::{Connection, Value};
 
 use crate::Result;
-use crate::phase::PhaseConfig;
+use crate::phase::{PhaseConfig, detect_phase_from_commands};
 use crate::tokenize::{extract_command_parts, tokenize_index};
 
 use super::sql::query_prepared;
@@ -99,27 +99,8 @@ pub(crate) fn detect_session_phase_from_commands(
   recent_commands: &[String],
   phase_config: &PhaseConfig,
 ) -> Option<PhaseSignal> {
-  if phase_config.labels().len() <= 1 {
-    return None;
-  }
-  let mut scores: HashMap<String, f64> = HashMap::new();
-  let mut total = 0.0f64;
-  for (idx, command) in recent_commands.iter().rev().take(6).enumerate() {
-    let weight = 0.5_f64.powi(idx as i32);
-    let label_idx = phase_config
-      .match_label(command)
-      .unwrap_or_else(|| phase_config.default_idx());
-    let Some(phase) = phase_config.labels().get(label_idx).cloned() else {
-      continue;
-    };
-    *scores.entry(phase).or_insert(0.0) += weight;
-    total += weight;
-  }
-  let (phase, score) = scores
-    .into_iter()
-    .max_by(|a, b| a.1.partial_cmp(&b.1).unwrap_or(std::cmp::Ordering::Equal))?;
-  let confidence = if total > 0.0 { score / total } else { 0.0 };
-  Some(PhaseSignal { phase, confidence })
+  detect_phase_from_commands(recent_commands, phase_config)
+    .map(|(phase, confidence)| PhaseSignal { phase, confidence })
 }
 
 pub(crate) fn phase_match_boost(

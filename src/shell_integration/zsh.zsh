@@ -26,9 +26,6 @@ export ZAGE_COMPLETION_FORMAT="zsh"
 # Force zage to be the only autosuggest strategy when set to 1
 : ${ZAGE_AUTOSUGGEST_ONLY:="0"}
 
-# Feedback logging (best-effort, non-blocking).
-: ${ZAGE_FEEDBACK_WINDOW_SECONDS:="5"}
-
 # State for suggestion feedback.
 _ZAGE_LAST_SUGGESTION=""
 _ZAGE_LAST_SUGGESTION_AT=""
@@ -164,14 +161,9 @@ _zage_preexec() {
     # Emit best-effort feedback if we recently showed a suggestion.
     if [[ "$ZAGE_FEEDBACK_DISABLE" != "1" && -n "$_ZAGE_LAST_SUGGESTION_ID" && -n "$_ZAGE_LAST_SUGGESTION_AT" ]]; then
       if [[ -n "$_zage_cmd_string" && "$_zage_cmd_string" != zage\ * ]]; then
-        local shown_at="$_ZAGE_LAST_SUGGESTION_AT"
-        local now="$_zage_cmd_start_time"
-        local delta=$(( now - shown_at ))
-        if (( delta >= 0 && delta <= ZAGE_FEEDBACK_WINDOW_SECONDS )); then
-          local outcome="rejected"
-          if [[ "$_zage_cmd_string" == "$_ZAGE_LAST_SUGGESTION" ]]; then
-            outcome="accepted"
-          fi
+        if [[ "$_zage_cmd_string" == "$_ZAGE_LAST_SUGGESTION" ]]; then
+          local shown_at="$_ZAGE_LAST_SUGGESTION_AT"
+          local now="$_zage_cmd_start_time"
 
           local cwd="$_ZAGE_LAST_SUGGESTION_PWD"
           if [[ -z "$cwd" ]]; then
@@ -186,7 +178,7 @@ _zage_preexec() {
               --suggestion "$_ZAGE_LAST_SUGGESTION" \
               --accepted-command "$_zage_cmd_string" \
               --accepted-at "$now" \
-              --outcome "$outcome" >> "$ZAGE_ZSH_DEBUG" 2>&1 &
+              --outcome "accepted" >> "$ZAGE_ZSH_DEBUG" 2>&1 &
           else
             zage feedback \
               --shown-id "$_ZAGE_LAST_SUGGESTION_ID" \
@@ -195,7 +187,7 @@ _zage_preexec() {
               --suggestion "$_ZAGE_LAST_SUGGESTION" \
               --accepted-command "$_zage_cmd_string" \
               --accepted-at "$now" \
-              --outcome "$outcome" > /dev/null 2>&1 &!
+              --outcome "accepted" > /dev/null 2>&1 &!
           fi
         fi
       fi

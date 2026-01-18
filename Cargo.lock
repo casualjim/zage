@@ -4535,6 +4535,7 @@ dependencies = [
  "pprof",
  "predicates",
  "rand 0.9.2",
+ "rayon",
  "rkyv",
  "serde",
  "serde_json",

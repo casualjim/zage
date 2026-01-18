@@ -10,6 +10,14 @@ pub struct CommandParts {
   pub args: Vec<Token>,
 }
 
+#[derive(Debug, Clone)]
+pub struct CommandStatsParts {
+  pub head: String,
+  pub env: Vec<Token>,
+  pub flags: Vec<String>,
+  pub args: Vec<Token>,
+}
+
 pub fn extract_command_parts(input: &str, tokens: &[Token]) -> Option<CommandParts> {
   let spans = token_spans(input, tokens);
   let mut env: Vec<Token> = Vec::new();
@@ -184,6 +192,198 @@ pub fn extract_command_parts(input: &str, tokens: &[Token]) -> Option<CommandPar
   })
 }
 
+pub fn extract_command_stats_parts(input: &str, tokens: &[Token]) -> Option<CommandStatsParts> {
+  let spans = token_spans(input, tokens);
+  let mut env: Vec<Token> = Vec::new();
+  let mut idx = 0usize;
+  let mut skip_next = false;
+  while idx < tokens.len() {
+    let token = &tokens[idx];
+    if skip_next {
+      skip_next = false;
+      idx += 1;
+      continue;
+    }
+    if matches!(token.kind, TokenKind::Redirect) {
+      if redirect_needs_target(&token.raw) {
+        skip_next = true;
+      }
+      idx += 1;
+      continue;
+    }
+    if is_number(&token.raw)
+      && let Some(next) = tokens.get(idx + 1)
+      && matches!(next.kind, TokenKind::Redirect)
+    {
+      if redirect_needs_target(&next.raw) {
+        skip_next = true;
+      }
+      idx += 2;
+      continue;
+    }
+    if matches!(token.kind, TokenKind::Assignment) {
+      if token.raw.ends_with('=')
+        && let Some(val) = tokens.get(idx + 1)
+        && matches!(
+          val.kind,
+          TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment
+        )
+      {
+        let cur_span = spans.get(idx);
+        let val_span = spans.get(idx + 1);
+        if let (Some(cur), Some(val_span)) = (cur_span, val_span)
+          && is_adjacent_or_quoted(input, cur.end, val_span.start)
+        {
+          let raw = format!("{}{}", token.raw, val.raw);
+          env.push(make_assignment_token(raw));
+          idx += 2;
+          continue;
+        }
+      }
+      env.push(token.clone());
+      idx += 1;
+      continue;
+    }
+    if looks_like_assignment_lhs(token.raw.as_str())
+      && let Some(next) = tokens.get(idx + 1)
+    {
+      if next.raw == "=" {
+        let lhs_span = spans.get(idx);
+        let eq_span = spans.get(idx + 1);
+        let adjacent = matches!((lhs_span, eq_span), (Some(lhs), Some(eq)) if lhs.end == eq.start);
+        if adjacent {
+          let mut raw = token.raw.clone();
+          raw.push('=');
+          if let Some(val) = tokens.get(idx + 2)
+            && matches!(
+              val.kind,
+              TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment
+            )
+          {
+            let val_span = spans.get(idx + 2);
+            let adjacent_val = match (eq_span, val_span) {
+              (Some(eq), Some(val)) => is_adjacent_or_quoted(input, eq.end, val.start),
+              _ => false,
+            };
+            if adjacent_val {
+              raw.push_str(&val.raw);
+              env.push(make_assignment_token(raw));
+              idx += 3;
+              continue;
+            }
+          }
+          env.push(make_assignment_token(raw));
+          idx += 2;
+          continue;
+        }
+      }
+      if next.raw.starts_with('=') {
+        let lhs_span = spans.get(idx);
+        let eq_span = spans.get(idx + 1);
+        let adjacent = matches!(
+          (lhs_span, eq_span),
+          (Some(lhs), Some(eq)) if is_adjacent_or_quoted(input, lhs.end, eq.start)
+        );
+        if adjacent {
+          let raw = format!("{}{}", token.raw, next.raw);
+          env.push(make_assignment_token(raw));
+          idx += 2;
+          continue;
+        }
+      }
+    }
+    break;
+  }
+
+  if idx >= tokens.len() {
+    return None;
+  }
+  let head_idx = idx;
+
+  let base_head_raw = tokens[head_idx].raw.trim();
+  if base_head_raw.is_empty() {
+    return None;
+  }
+
+  let base_head = base_head_raw.to_string();
+  let start_idx = head_idx + 1;
+
+  let mut head = base_head.clone();
+  let mut flags = Vec::new();
+  let mut args = Vec::new();
+  let mut end_of_options = false;
+  let mut skip_next = false;
+  let mut saw_flag_before_first_word = false;
+  let mut promoted_subcommand = false;
+
+  for idx in start_idx..tokens.len() {
+    let token = &tokens[idx];
+    if matches!(token.kind, TokenKind::Operator) {
+      if is_command_separator(&token.raw) {
+        break;
+      }
+      continue;
+    }
+    if matches!(token.kind, TokenKind::Redirect) {
+      skip_next = true;
+      continue;
+    }
+    if is_number(&token.raw)
+      && let Some(next) = tokens.get(idx + 1)
+      && matches!(next.kind, TokenKind::Redirect)
+    {
+      skip_next = true;
+      continue;
+    }
+    if skip_next {
+      if matches!(
+        token.kind,
+        TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment
+      ) {
+        skip_next = false;
+      }
+      continue;
+    }
+    if token.raw == "--" {
+      end_of_options = true;
+      continue;
+    }
+    if !end_of_options && is_flag_token(&token.raw) {
+      if !promoted_subcommand && args.is_empty() {
+        saw_flag_before_first_word = true;
+      }
+      flags.push(token.raw.clone());
+      continue;
+    }
+    if matches!(token.kind, TokenKind::Word)
+      && !promoted_subcommand
+      && !saw_flag_before_first_word
+      && args.is_empty()
+      && should_promote_subcommand(&base_head, token.raw.as_str())
+    {
+      head.push(' ');
+      head.push_str(&token.raw);
+      promoted_subcommand = true;
+      continue;
+    }
+    if matches!(
+      token.kind,
+      TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment
+    ) {
+      args.push(token.clone());
+    }
+  }
+
+  let args = merge_url_tokens(args);
+
+  Some(CommandStatsParts {
+    head,
+    env,
+    flags,
+    args,
+  })
+}
+
 pub(crate) fn merge_special_tokens(input: &str, tokens: Vec<Token>) -> Vec<Token> {
   let spans = token_spans(input, &tokens);
   if spans.is_empty() {
@@ -246,6 +446,50 @@ fn is_flag_token(raw: &str) -> bool {
 
 fn is_command_separator(raw: &str) -> bool {
   matches!(raw, "|" | "||" | "&&" | ";")
+}
+
+fn should_promote_subcommand(base_head: &str, raw: &str) -> bool {
+  if !matches!(
+    base_head,
+    "zage"
+      | "git"
+      | "cargo"
+      | "docker"
+      | "podman"
+      | "kubectl"
+      | "helm"
+      | "gh"
+      | "aws"
+      | "gcloud"
+      | "az"
+      | "npm"
+      | "yarn"
+      | "pnpm"
+      | "bun"
+      | "go"
+      | "dotnet"
+      | "systemctl"
+      | "journalctl"
+      | "mise"
+  ) {
+    return false;
+  }
+
+  if raw.is_empty() || raw.len() > 32 {
+    return false;
+  }
+  if raw.starts_with('-') || raw.starts_with('.') || raw.starts_with('~') || raw.contains('=') {
+    return false;
+  }
+  if raw.contains('/') || raw.contains('.') || raw.contains(':') {
+    return false;
+  }
+  if raw.chars().all(|c| c.is_ascii_digit()) {
+    return false;
+  }
+  raw
+    .chars()
+    .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_'))
 }
 
 fn make_assignment_token(raw: String) -> Token {

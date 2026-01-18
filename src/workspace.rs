@@ -6,12 +6,6 @@ use serde::{Deserialize, Serialize};
 use toml_edit::DocumentMut;
 
 use crate::Result;
-use crate::repo::find_repo_root;
-
-fn find_git_root(start: &Path) -> Option<PathBuf> {
-  let path = start.to_string_lossy();
-  find_repo_root(path.as_ref()).map(PathBuf::from)
-}
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct WorkspacePackage {
@@ -52,19 +46,41 @@ pub struct WorkspaceInfo {
   pub packages: Vec<WorkspacePackage>,
   pub ecosystems: BTreeSet<String>,
   pub kind: WorkspaceKind,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub git_root: Option<String>,
+  #[serde(default, skip_serializing_if = "Option::is_none")]
+  pub git_branch: Option<String>,
 }
 
 pub fn format_workspace_summary(info: &WorkspaceInfo) -> String {
   let ecosystem = ecosystem_label(&info.ecosystems);
   let root = info.root.trim();
   let root = if root.is_empty() { "." } else { root };
-  format!(
-    "workspace: {} packages={} ecosystems={} root={}",
-    info.kind.label(),
-    info.packages.len(),
-    ecosystem,
-    root
-  )
+  let git = if info.git_root.as_deref().filter(|v| !v.is_empty()).is_some() {
+    "1"
+  } else {
+    "0"
+  };
+  if let Some(branch) = info.git_branch.as_deref().filter(|v| !v.is_empty()) {
+    format!(
+      "workspace: {} packages={} ecosystems={} root={} git={} branch={}",
+      info.kind.label(),
+      info.packages.len(),
+      ecosystem,
+      root,
+      git,
+      branch
+    )
+  } else {
+    format!(
+      "workspace: {} packages={} ecosystems={} root={} git={}",
+      info.kind.label(),
+      info.packages.len(),
+      ecosystem,
+      root,
+      git
+    )
+  }
 }
 
 pub struct WorkspaceDetector;
@@ -760,20 +776,7 @@ impl WorkspaceDetector {
 }
 
 pub fn detect_workspace_info(start: &Path, files: &[String]) -> Result<WorkspaceInfo> {
-  let repo_root = find_git_root(start).unwrap_or_else(|| start.to_path_buf());
-  let workspace_root = find_workspace_root(&repo_root, start);
-  let files_are_absolute = files.iter().any(|path| Path::new(path).is_absolute());
-  let workspace_label = if files_are_absolute {
-    workspace_root.clone()
-  } else if let Ok(relative) = workspace_root.strip_prefix(&repo_root) {
-    if relative.as_os_str().is_empty() {
-      PathBuf::from(".")
-    } else {
-      relative.to_path_buf()
-    }
-  } else {
-    workspace_root.clone()
-  };
+  let workspace_root = find_workspace_root(start).unwrap_or_else(|| start.to_path_buf());
   let mut ecosystems = BTreeSet::new();
   let mut packages = Vec::new();
   let mut seen = HashMap::new();
@@ -790,7 +793,7 @@ pub fn detect_workspace_info(start: &Path, files: &[String]) -> Result<Workspace
   }
 
   let (detected_packages, detected_ecosystems) =
-    detect_workspace_packages_from_files(&repo_root, files);
+    detect_workspace_packages_from_files(&workspace_root, files);
   for ecosystem in detected_ecosystems {
     ecosystems.insert(ecosystem);
   }
@@ -809,10 +812,10 @@ pub fn detect_workspace_info(start: &Path, files: &[String]) -> Result<Workspace
   let ecosystem = infer_ecosystem_from_stack(&stack);
   if packages.is_empty() {
     ecosystems.insert(ecosystem.clone());
-    packages.push(default_package(&repo_root, &ecosystem));
+    packages.push(default_package(&workspace_root, &ecosystem));
   }
 
-  Ok(build_workspace_info(workspace_label, packages, ecosystems))
+  Ok(build_workspace_info(workspace_root, packages, ecosystems))
 }
 
 pub fn detect_stack_from_path(path: &Path, stack: &mut BTreeSet<String>) {
@@ -960,7 +963,11 @@ pub fn detect_stack_from_path(path: &Path, stack: &mut BTreeSet<String>) {
   }
 }
 
-pub fn detect_stack_from_compose(repo_root: &Path, file_path: &str, stack: &mut BTreeSet<String>) {
+pub fn detect_stack_from_compose(
+  workspace_root: &Path,
+  file_path: &str,
+  stack: &mut BTreeSet<String>,
+) {
   let file_name = Path::new(file_path)
     .file_name()
     .and_then(|name| name.to_str())
@@ -977,7 +984,7 @@ pub fn detect_stack_from_compose(repo_root: &Path, file_path: &str, stack: &mut 
   let absolute = if path.is_absolute() {
     path.to_path_buf()
   } else {
-    repo_root.join(file_path)
+    workspace_root.join(file_path)
   };
   let content = match std::fs::read_to_string(&absolute) {
     Ok(content) => content,
@@ -1001,7 +1008,7 @@ pub fn detect_stack_from_compose(repo_root: &Path, file_path: &str, stack: &mut 
 }
 
 fn detect_workspace_packages_from_files(
-  repo_root: &Path,
+  workspace_root: &Path,
   files: &[String],
 ) -> (Vec<WorkspacePackage>, BTreeSet<String>) {
   let mut packages = Vec::new();
@@ -1009,7 +1016,7 @@ fn detect_workspace_packages_from_files(
   let mut seen = HashMap::new();
 
   for file in files {
-    let normalized = normalize_repo_path(repo_root, file);
+    let normalized = normalize_workspace_path(workspace_root, file);
     let file_name = Path::new(&normalized)
       .file_name()
       .and_then(|name| name.to_str())
@@ -1032,7 +1039,7 @@ fn detect_workspace_packages_from_files(
       continue;
     }
     seen.insert(key, ());
-    let name = package_name_for_dir(repo_root, &dir_key);
+    let name = package_name_for_dir(workspace_root, &dir_key);
     packages.push(WorkspacePackage {
       name,
       path: dir_key,
@@ -1045,15 +1052,15 @@ fn detect_workspace_packages_from_files(
 
 fn push_workspace_package(
   packages: &mut Vec<WorkspacePackage>,
-  repo_root: &Path,
+  workspace_root: &Path,
   pattern: &str,
   ecosystem: &str,
 ) {
-  for path in expand_workspace_pattern(repo_root, pattern) {
+  for path in expand_workspace_pattern(workspace_root, pattern) {
     if path.is_empty() {
       continue;
     }
-    let pkg_path = repo_root.join(&path);
+    let pkg_path = workspace_root.join(&path);
     if !pkg_path.exists() {
       continue;
     }
@@ -1070,7 +1077,7 @@ fn push_workspace_package(
   }
 }
 
-fn expand_workspace_pattern(repo_root: &Path, pattern: &str) -> Vec<String> {
+fn expand_workspace_pattern(workspace_root: &Path, pattern: &str) -> Vec<String> {
   let mut pattern = pattern.trim().replace('\\', "/");
   if pattern.starts_with('!') {
     return Vec::new();
@@ -1089,9 +1096,9 @@ fn expand_workspace_pattern(repo_root: &Path, pattern: &str) -> Vec<String> {
   let prefix = pattern[..wildcard_index].trim_end_matches('/');
   let suffix = pattern[wildcard_index..].trim_start_matches('*');
   let base_dir = if prefix.is_empty() {
-    repo_root.to_path_buf()
+    workspace_root.to_path_buf()
   } else {
-    repo_root.join(prefix)
+    workspace_root.join(prefix)
   };
   let mut expanded = Vec::new();
   let entries = match std::fs::read_dir(&base_dir) {
@@ -1266,7 +1273,7 @@ fn strip_json_comments(content: &str) -> String {
   out
 }
 
-fn parse_cabal_packages(content: &str, repo_root: &Path) -> Vec<WorkspacePackage> {
+fn parse_cabal_packages(content: &str, workspace_root: &Path) -> Vec<WorkspacePackage> {
   let mut packages = Vec::new();
   let mut in_packages = false;
   for line in content.lines() {
@@ -1279,7 +1286,7 @@ fn parse_cabal_packages(content: &str, repo_root: &Path) -> Vec<WorkspacePackage
       let rest = trimmed.trim_start_matches("packages:").trim();
       if !rest.is_empty() {
         for entry in rest.split_whitespace() {
-          push_workspace_package(&mut packages, repo_root, entry, "haskell");
+          push_workspace_package(&mut packages, workspace_root, entry, "haskell");
         }
       }
       continue;
@@ -1293,7 +1300,7 @@ fn parse_cabal_packages(content: &str, repo_root: &Path) -> Vec<WorkspacePackage
         continue;
       }
       for entry in trimmed.split_whitespace() {
-        push_workspace_package(&mut packages, repo_root, entry, "haskell");
+        push_workspace_package(&mut packages, workspace_root, entry, "haskell");
       }
     }
   }
@@ -1461,10 +1468,10 @@ fn stack_marker_ecosystem(file_name: &str) -> Option<&'static str> {
   }
 }
 
-fn normalize_repo_path(repo_root: &Path, file_path: &str) -> String {
+fn normalize_workspace_path(workspace_root: &Path, file_path: &str) -> String {
   let path = Path::new(file_path);
   if path.is_absolute()
-    && let Ok(stripped) = path.strip_prefix(repo_root)
+    && let Ok(stripped) = path.strip_prefix(workspace_root)
     && let Some(rel) = stripped.to_str()
     && !rel.is_empty()
   {
@@ -1473,12 +1480,12 @@ fn normalize_repo_path(repo_root: &Path, file_path: &str) -> String {
   file_path.replace('\\', "/")
 }
 
-fn package_name_for_dir(repo_root: &Path, dir: &str) -> String {
+fn package_name_for_dir(workspace_root: &Path, dir: &str) -> String {
   if dir == "." || dir.is_empty() {
-    return repo_root
+    return workspace_root
       .file_name()
       .and_then(|name| name.to_str())
-      .unwrap_or("repo")
+      .unwrap_or("workspace")
       .to_string();
   }
   Path::new(dir)
@@ -1635,11 +1642,11 @@ fn infer_ecosystem_from_stack(stack: &BTreeSet<String>) -> String {
   "unknown".to_string()
 }
 
-fn default_package(repo_root: &Path, ecosystem: &str) -> WorkspacePackage {
-  let name = repo_root
+fn default_package(workspace_root: &Path, ecosystem: &str) -> WorkspacePackage {
+  let name = workspace_root
     .file_name()
     .and_then(|name| name.to_str())
-    .unwrap_or("repo")
+    .unwrap_or("workspace")
     .to_string();
   WorkspacePackage {
     name,
@@ -1663,12 +1670,68 @@ fn build_workspace_info(
     (false, true) => WorkspaceKind::PolyglotRepo,
     (true, true) => WorkspaceKind::PolyglotMonorepo,
   };
+  let git_root = find_git_repo_root(&root);
+  let git_branch = git_root.as_deref().and_then(read_git_branch);
   WorkspaceInfo {
     root: root.to_string_lossy().to_string(),
     packages,
     ecosystems,
     kind,
+    git_root: git_root.map(|path| path.to_string_lossy().to_string()),
+    git_branch,
   }
+}
+
+fn find_git_repo_root(start: &Path) -> Option<PathBuf> {
+  let mut current = start.to_path_buf();
+  loop {
+    let git_dir = current.join(".git");
+    if git_dir.is_dir() || git_dir.is_file() {
+      return Some(current);
+    }
+    if !current.pop() {
+      break;
+    }
+  }
+  None
+}
+
+fn git_dir_for_repo_root(repo_root: &Path) -> Option<PathBuf> {
+  let git_dir = repo_root.join(".git");
+  if git_dir.is_dir() {
+    return Some(git_dir);
+  }
+  if !git_dir.is_file() {
+    return None;
+  }
+
+  let contents = std::fs::read_to_string(&git_dir).ok()?;
+  let rest = contents.trim().strip_prefix("gitdir:")?;
+  let path = rest.trim();
+  let resolved = repo_root.join(path);
+  if resolved.is_dir() {
+    Some(resolved)
+  } else {
+    None
+  }
+}
+
+fn read_git_branch(repo_root: &Path) -> Option<String> {
+  let git_dir = git_dir_for_repo_root(repo_root)?;
+  let head_path = git_dir.join("HEAD");
+  let head = std::fs::read_to_string(head_path).ok()?;
+  let head = head.trim();
+  let rest = head.strip_prefix("ref:")?;
+  let reference = rest.trim();
+  if let Some(branch) = reference.strip_prefix("refs/heads/")
+    && !branch.is_empty()
+  {
+    return Some(branch.to_string());
+  }
+  if !reference.is_empty() {
+    return Some(reference.to_string());
+  }
+  None
 }
 
 fn ecosystem_label(ecosystems: &BTreeSet<String>) -> String {
@@ -1683,23 +1746,25 @@ fn ecosystem_label(ecosystems: &BTreeSet<String>) -> String {
   }
 }
 
-fn find_workspace_root(repo_root: &Path, start: &Path) -> PathBuf {
+fn find_workspace_root(start: &Path) -> Option<PathBuf> {
   let mut current = start.to_path_buf();
   loop {
     if has_workspace_marker(&current) {
-      return current;
-    }
-    if current == repo_root {
-      break;
+      return Some(current);
     }
     if !current.pop() {
       break;
     }
   }
-  repo_root.to_path_buf()
+  None
 }
 
 fn has_workspace_marker(dir: &Path) -> bool {
+  let git_dir = dir.join(".git");
+  if git_dir.is_dir() || git_dir.is_file() {
+    return true;
+  }
+
   let cargo_toml = dir.join("Cargo.toml");
   if cargo_toml.exists()
     && let Ok(content) = std::fs::read_to_string(&cargo_toml)
@@ -1853,9 +1918,25 @@ pub fn detect_workspace_for_cwd(cwd: &str) -> Result<Option<WorkspaceInfo>> {
   if !path.exists() {
     return Ok(None);
   }
+  if find_workspace_root(path).is_none() {
+    return Ok(None);
+  }
   let files: Vec<String> = Vec::new();
   let info = detect_workspace_info(path, &files)?;
   Ok(Some(info))
+}
+
+pub fn workspace_root_for_cwd(cwd: &str) -> Option<String> {
+  let path = Path::new(cwd);
+  if !path.exists() {
+    return None;
+  }
+  let root = find_workspace_root(path)?;
+  let root_str = root.to_string_lossy();
+  if root_str.trim().is_empty() {
+    return None;
+  }
+  Some(root_str.to_string())
 }
 
 #[cfg(test)]

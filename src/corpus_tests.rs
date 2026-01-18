@@ -71,11 +71,12 @@ fn run_corpus(corpus_dir: &Path, shell: &str, language: tree_sitter::Language) {
         let tokens = tokenize_index(shell, text);
         let parts = extract_command_parts(text, &tokens).unwrap_or_else(|| {
           panic!(
-            "failed to extract command parts for {} case {}:{}\ninput: {}\ncommand: {}",
+            "failed to extract command parts for {} case {}:{}\ninput: {}\noutput: {}\ncommand: {}",
             shell,
             path.display(),
             idx,
             case.input,
+            case.output,
             text
           )
         });
@@ -246,7 +247,6 @@ fn open_nl2sh_reader(path: &Path) -> csv::Reader<Box<dyn std::io::Read>> {
 #[derive(Debug)]
 struct CorpusCase {
   input: String,
-  #[allow(dead_code)]
   output: String,
 }
 

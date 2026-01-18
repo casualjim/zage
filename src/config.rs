@@ -121,7 +121,7 @@ pub struct OnlineModelReplayConfig {
   pub global_capacity: usize,
   #[config(default = 5000)]
   pub workspace_capacity: usize,
-  #[config(default = 50)]
+  #[config(default = 32)]
   pub max_workspaces: usize,
 }
 
@@ -162,7 +162,7 @@ impl Default for OnlineModelReplayConfig {
     Self {
       global_capacity: 20_000,
       workspace_capacity: 5_000,
-      max_workspaces: 50,
+      max_workspaces: 32,
     }
   }
 }
@@ -306,7 +306,7 @@ mod tests {
     assert_eq!(config.bucket_count, 1 << 17);
     assert_eq!(config.replay.global_capacity, 20_000);
     assert_eq!(config.replay.workspace_capacity, 5_000);
-    assert_eq!(config.replay.max_workspaces, 50);
+    assert_eq!(config.replay.max_workspaces, 32);
     assert_eq!(config.blend.mode, OnlineModelBlendMode::Additive);
     assert_eq!(config.blend.alpha, 0.25);
     assert_eq!(config.blend.margin_gate, 0.05);

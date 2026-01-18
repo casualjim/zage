@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use std::sync::Arc;
 
 use libsql::Connection;
 use rand::Rng;
@@ -92,20 +93,29 @@ impl GlobalCommandPool {
 }
 
 pub(crate) struct SamplerPools {
-  pub workspace: Vec<String>,
-  pub workspace_hashes: HashSet<u64>,
+  pub workspace: Arc<Vec<String>>,
+  pub workspace_hashes: Arc<HashSet<u64>>,
   pub head: Vec<String>,
   pub head_hashes: HashSet<u64>,
   pub recent: Vec<String>,
   pub recent_hashes: HashSet<u64>,
 }
 
+#[derive(Clone)]
+struct CachedCommandPool {
+  commands: Arc<Vec<String>>,
+  hashes: Arc<HashSet<u64>>,
+}
+
 pub(crate) struct NegativeSampler<'a> {
   global: &'a GlobalCommandPool,
   bucket_count: u32,
+  workspace_cache: HashMap<String, CachedCommandPool>,
+  cwd_cache: HashMap<String, CachedCommandPool>,
 }
 
 pub(crate) struct NegativeSample {
+  pub command: String,
   pub cmd_buckets: Vec<(u32, f32)>,
   pub log_q: f32,
 }
@@ -115,29 +125,72 @@ impl<'a> NegativeSampler<'a> {
     Self {
       global,
       bucket_count,
+      workspace_cache: HashMap::new(),
+      cwd_cache: HashMap::new(),
     }
+  }
+
+  async fn load_workspace_pool(
+    &mut self,
+    conn: &Connection,
+    workspace_root: &str,
+  ) -> Result<CachedCommandPool> {
+    if let Some(found) = self.workspace_cache.get(workspace_root) {
+      return Ok(found.clone());
+    }
+    let commands = load_workspace_commands(conn, workspace_root).await?;
+    let hashes = commands
+      .iter()
+      .map(|c| stable_hash(c))
+      .collect::<HashSet<_>>();
+    let pool = CachedCommandPool {
+      commands: Arc::new(commands),
+      hashes: Arc::new(hashes),
+    };
+    self
+      .workspace_cache
+      .insert(workspace_root.to_string(), pool.clone());
+    Ok(pool)
+  }
+
+  async fn load_cwd_pool(&mut self, conn: &Connection, cwd: &str) -> Result<CachedCommandPool> {
+    if let Some(found) = self.cwd_cache.get(cwd) {
+      return Ok(found.clone());
+    }
+    let commands = load_workspace_cwd_commands(conn, cwd).await?;
+    let hashes = commands
+      .iter()
+      .map(|c| stable_hash(c))
+      .collect::<HashSet<_>>();
+    let pool = CachedCommandPool {
+      commands: Arc::new(commands),
+      hashes: Arc::new(hashes),
+    };
+    self.cwd_cache.insert(cwd.to_string(), pool.clone());
+    Ok(pool)
   }
 
   pub(crate) async fn build_pools(
     &mut self,
     conn: &Connection,
     shellname: &str,
-    repo_root: &str,
+    workspace_root: &str,
     cwd: Option<&str>,
     recent_commands: &[String],
     positive_head_hash: u64,
   ) -> Result<SamplerPools> {
-    let workspace = if !repo_root.is_empty() {
-      load_workspace_repo_commands(conn, repo_root).await?
+    let workspace_pool = if !workspace_root.is_empty() {
+      self.load_workspace_pool(conn, workspace_root).await?
     } else if let Some(cwd) = cwd.filter(|v| !v.is_empty()) {
-      load_workspace_cwd_commands(conn, cwd).await?
+      self.load_cwd_pool(conn, cwd).await?
     } else {
-      Vec::new()
+      CachedCommandPool {
+        commands: Arc::new(Vec::new()),
+        hashes: Arc::new(HashSet::new()),
+      }
     };
-    let workspace_hashes = workspace
-      .iter()
-      .map(|c| stable_hash(c))
-      .collect::<HashSet<_>>();
+    let workspace = workspace_pool.commands;
+    let workspace_hashes = workspace_pool.hashes;
 
     // Head pool: filter a bounded candidate set by head hash.
     let mut head = Vec::new();
@@ -244,7 +297,7 @@ impl<'a> NegativeSampler<'a> {
 
       let (cmd, hash) = match component {
         Component::Workspace => {
-          sample_uniform(&pools.workspace, rng).map(|c| (c.clone(), stable_hash(c)))
+          sample_uniform(pools.workspace.as_slice(), rng).map(|c| (c.clone(), stable_hash(c)))
         }
         Component::Head => sample_uniform(&pools.head, rng).map(|c| (c.clone(), stable_hash(c))),
         Component::Recent => {
@@ -259,12 +312,16 @@ impl<'a> NegativeSampler<'a> {
       }
       selected.insert(hash);
 
+      let log_q = log_q_for_hash(hash, pools, &weights, &components, self.global);
       let cmd_buckets = command_buckets(shellname, &cmd, self.bucket_count);
       if cmd_buckets.is_empty() {
         continue;
       }
-      let log_q = log_q_for_hash(hash, pools, &weights, &components, self.global);
-      out.push(NegativeSample { cmd_buckets, log_q });
+      out.push(NegativeSample {
+        command: cmd,
+        cmd_buckets,
+        log_q,
+      });
     }
 
     Ok((out, log_q_pos))
@@ -355,11 +412,11 @@ fn command_buckets(shellname: &str, command: &str, bucket_count: u32) -> Vec<(u3
   out
 }
 
-async fn load_workspace_repo_commands(conn: &Connection, repo_root: &str) -> Result<Vec<String>> {
+async fn load_workspace_commands(conn: &Connection, workspace_root: &str) -> Result<Vec<String>> {
   let mut rows = conn
     .query(
-      "SELECT command FROM repo_command_stats WHERE repo_root = ? ORDER BY freq DESC LIMIT 2000",
-      libsql::params![repo_root.to_string()],
+      "SELECT command FROM workspace_command_stats WHERE workspace_root = ? ORDER BY freq DESC LIMIT 2000",
+      libsql::params![workspace_root.to_string()],
     )
     .await?;
   let mut out = Vec::new();
@@ -388,12 +445,13 @@ async fn load_workspace_cwd_commands(conn: &Connection, cwd: &str) -> Result<Vec
 #[cfg(test)]
 mod tests {
   use super::*;
+  use std::sync::Arc;
 
   #[test]
   fn logq_is_finite_and_negative() {
     let pools = SamplerPools {
-      workspace: vec!["a".to_string()],
-      workspace_hashes: vec![stable_hash("a")].into_iter().collect(),
+      workspace: Arc::new(vec!["a".to_string()]),
+      workspace_hashes: Arc::new(vec![stable_hash("a")].into_iter().collect()),
       head: vec!["b".to_string()],
       head_hashes: vec![stable_hash("b")].into_iter().collect(),
       recent: vec!["c".to_string()],

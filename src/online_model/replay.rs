@@ -303,9 +303,11 @@ mod tests {
   fn example(now: i64, workspace: Option<&str>) -> OnlineExample {
     OnlineExample {
       shellname: "zsh".to_string(),
-      repo_root: workspace.unwrap_or_default().to_string(),
+      workspace_root: workspace.unwrap_or_default().to_string(),
       cwd: workspace.map(|s| s.to_string()),
       workspace_key: workspace.map(|s| s.to_string()),
+      positive_command: "echo test".to_string(),
+      positive_head: Some("echo".to_string()),
       positive_command_hash: 1,
       positive_head_hash: 2,
       now,
@@ -316,6 +318,7 @@ mod tests {
       ctx_user: Vec::new(),
       ctx_timebucket: Vec::new(),
       ctx_session: Vec::new(),
+      ctx_phase: Vec::new(),
       recent_heads: Vec::new(),
       recent_flags: Vec::new(),
       recent_args: Vec::new(),

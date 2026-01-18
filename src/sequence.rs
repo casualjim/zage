@@ -1,6 +1,7 @@
-use std::collections::{HashMap, VecDeque};
+use std::collections::HashMap;
 
 use libsql::Connection;
+use rayon::prelude::*;
 use serde_json;
 use tracing::info;
 
@@ -66,7 +67,7 @@ fn command_signature(shellname: &str, command: &str) -> Option<String> {
   Some(signature)
 }
 
-fn normalize_sequence_command(shellname: &str, command: &str) -> String {
+pub(crate) fn normalize_sequence_command(shellname: &str, command: &str) -> String {
   command_signature(shellname, command).unwrap_or_else(|| command.to_string())
 }
 
@@ -74,12 +75,7 @@ pub async fn analyze_sequences(
   conn: &Connection,
   config: SequenceConfig,
 ) -> Result<SequenceReport> {
-  let mut total: usize = 0;
   let max_len = config.max_len.max(2);
-  let mut unigram_counts: HashMap<String, usize> = HashMap::new();
-  let mut ngram_counts: Vec<HashMap<Vec<String>, usize>> = (0..max_len.saturating_sub(1))
-    .map(|_| HashMap::new())
-    .collect();
 
   let mut rows = conn
     .query(
@@ -87,41 +83,66 @@ pub async fn analyze_sequences(
       (),
     )
     .await?;
-  let mut window: VecDeque<String> = VecDeque::with_capacity(max_len);
+  let mut commands: Vec<String> = Vec::new();
   let progress_interval = 50_000usize;
+  let mut scanned: usize = 0;
 
   while let Some(row) = rows.next().await? {
     let raw_cmd = row.get::<String>(0)?;
     let shellname = row.get::<String>(1)?;
     let cmd = normalize_sequence_command(&shellname, &raw_cmd);
-    total += 1;
-    *unigram_counts.entry(cmd.clone()).or_insert(0) += 1;
-
-    window.push_back(cmd);
-    if window.len() > max_len {
-      window.pop_front();
-    }
-    for n in 2..=max_len {
-      if window.len() < n {
-        continue;
-      }
-      let start = window.len() - n;
-      let seq = window.iter().skip(start).cloned().collect::<Vec<_>>();
-      *ngram_counts[n - 2].entry(seq).or_insert(0) += 1;
-    }
-
-    if total.is_multiple_of(progress_interval) {
-      info!("Scanned {} commands for sequences so far", total);
+    commands.push(cmd);
+    scanned += 1;
+    if scanned.is_multiple_of(progress_interval) {
+      info!("Scanned {} commands for sequences so far", scanned);
     }
   }
 
-  if total < 2 {
+  let total = commands.len();
+  if total == 0 {
     return Ok(SequenceReport {
       sequences: 0,
       bigrams: 0,
       trigrams: 0,
     });
   }
+
+  let unigram_counts: HashMap<String, usize> = commands
+    .par_iter()
+    .fold(HashMap::new, |mut map, cmd| {
+      *map.entry(cmd.clone()).or_insert(0) += 1;
+      map
+    })
+    .reduce(HashMap::new, |mut left, right| {
+      for (cmd, count) in right {
+        *left.entry(cmd).or_insert(0) += count;
+      }
+      left
+    });
+
+  let ngram_counts: Vec<HashMap<Vec<String>, usize>> = (2..=max_len)
+    .into_par_iter()
+    .map(|n| {
+      commands
+        .par_iter()
+        .enumerate()
+        .fold(HashMap::new, |mut map, (idx, _)| {
+          if idx + 1 < n {
+            return map;
+          }
+          let start = idx + 1 - n;
+          let seq = commands[start..=idx].to_vec();
+          *map.entry(seq).or_insert(0) += 1;
+          map
+        })
+        .reduce(HashMap::new, |mut left, right| {
+          for (seq, count) in right {
+            *left.entry(seq).or_insert(0) += count;
+          }
+          left
+        })
+    })
+    .collect();
 
   let total_f = total as f64;
 
@@ -132,6 +153,16 @@ pub async fn analyze_sequences(
     let mut bigrams = 0usize;
     let mut trigrams = 0usize;
     conn.execute("DELETE FROM sequence_stats", ()).await?;
+    for (command, support) in &unigram_counts {
+      let sequence_json = serde_json::to_string(&vec![command.clone()])?;
+      conn
+        .execute(
+          "INSERT INTO sequence_stats (sequence_json, support, confidence, lift, sequence_len, prefix_json, last_command, context_json)
+           VALUES (?, ?, 0.0, 0.0, 1, NULL, ?, NULL)",
+          (sequence_json, *support as i64, command.clone()),
+        )
+        .await?;
+    }
 
     for (idx, counts) in ngram_counts.iter().enumerate() {
       let n = idx + 2;
@@ -166,11 +197,20 @@ pub async fn analyze_sequences(
           continue;
         }
         let sequence_json = serde_json::to_string(sequence)?;
+        let prefix_json = serde_json::to_string(&sequence[..n - 1])?;
         conn
           .execute(
-            "INSERT INTO sequence_stats (sequence_json, support, confidence, lift, context_json)
-             VALUES (?, ?, ?, ?, NULL)",
-            (sequence_json, support as i64, confidence, lift),
+            "INSERT INTO sequence_stats (sequence_json, support, confidence, lift, sequence_len, prefix_json, last_command, context_json)
+             VALUES (?, ?, ?, ?, ?, ?, ?, NULL)",
+            (
+              sequence_json,
+              support as i64,
+              confidence,
+              lift,
+              n as i64,
+              prefix_json,
+              last.clone(),
+            ),
           )
           .await?;
         inserted += 1;
@@ -207,12 +247,7 @@ pub async fn analyze_token_sequences(
   conn: &Connection,
   config: SequenceConfig,
 ) -> Result<TokenSequenceReport> {
-  let mut total: usize = 0;
   let max_len = config.max_len.max(2);
-  let mut unigram_counts: HashMap<String, usize> = HashMap::new();
-  let mut ngram_counts: Vec<HashMap<Vec<String>, usize>> = (0..max_len.saturating_sub(1))
-    .map(|_| HashMap::new())
-    .collect();
 
   let mut rows = conn
     .query(
@@ -221,35 +256,80 @@ pub async fn analyze_token_sequences(
     )
     .await?;
   let progress_interval = 50_000usize;
+  let mut scanned: usize = 0;
+  let mut history: Vec<(String, String)> = Vec::new();
 
   while let Some(row) = rows.next().await? {
     let command = row.get::<String>(0)?;
     let shellname = row.get::<String>(1)?;
-    let tokens = tokenize_index(&shellname, &command);
-    if tokens.len() < 2 {
-      continue;
-    }
-    let normalized: Vec<String> = tokens.into_iter().map(|t| t.normalized).collect();
-
-    total += normalized.len();
-    for tok in &normalized {
-      *unigram_counts.entry(tok.clone()).or_insert(0) += 1;
-    }
-
-    for n in 2..=max_len {
-      if normalized.len() < n {
-        continue;
-      }
-      for win in normalized.windows(n) {
-        let seq = win.to_vec();
-        *ngram_counts[n - 2].entry(seq).or_insert(0) += 1;
-      }
-    }
-
-    if total.is_multiple_of(progress_interval) {
-      info!("Scanned {} tokens for token sequences so far", total);
+    history.push((shellname, command));
+    scanned += 1;
+    if scanned.is_multiple_of(progress_interval) {
+      info!("Scanned {} commands for token sequences so far", scanned);
     }
   }
+
+  #[derive(Default)]
+  struct TokenSeqAcc {
+    total: usize,
+    unigram_counts: HashMap<String, usize>,
+    ngram_counts: Vec<HashMap<Vec<String>, usize>>,
+  }
+
+  let acc = history
+    .par_iter()
+    .fold(
+      || TokenSeqAcc {
+        total: 0,
+        unigram_counts: HashMap::new(),
+        ngram_counts: (0..max_len.saturating_sub(1))
+          .map(|_| HashMap::new())
+          .collect(),
+      },
+      |mut acc, (shellname, command)| {
+        let tokens = tokenize_index(shellname, command);
+        if tokens.len() < 2 {
+          return acc;
+        }
+        let normalized: Vec<String> = tokens.into_iter().map(|t| t.normalized).collect();
+        acc.total += normalized.len();
+        for tok in &normalized {
+          *acc.unigram_counts.entry(tok.clone()).or_insert(0) += 1;
+        }
+        for n in 2..=max_len {
+          if normalized.len() < n {
+            continue;
+          }
+          for win in normalized.windows(n) {
+            let seq = win.to_vec();
+            *acc.ngram_counts[n - 2].entry(seq).or_insert(0) += 1;
+          }
+        }
+        acc
+      },
+    )
+    .reduce(TokenSeqAcc::default, |mut left, right| {
+      left.total += right.total;
+      for (tok, count) in right.unigram_counts {
+        *left.unigram_counts.entry(tok).or_insert(0) += count;
+      }
+      if left.ngram_counts.is_empty() {
+        left.ngram_counts = right.ngram_counts;
+      } else {
+        for (idx, right_map) in right.ngram_counts.into_iter().enumerate() {
+          if let Some(left_map) = left.ngram_counts.get_mut(idx) {
+            for (seq, count) in right_map {
+              *left_map.entry(seq).or_insert(0) += count;
+            }
+          }
+        }
+      }
+      left
+    });
+
+  let total = acc.total;
+  let unigram_counts = acc.unigram_counts;
+  let ngram_counts = acc.ngram_counts;
 
   if total < 2 {
     return Ok(TokenSequenceReport {
@@ -344,9 +424,14 @@ pub async fn candidates_from_sequences(
   recent_commands: &[String],
   limit: usize,
 ) -> Result<Vec<SequenceCandidate>> {
+  let config = SequenceConfig::default();
   let mut rows = conn
     .query(
-      "SELECT sequence_json, support, confidence, lift FROM sequence_stats ORDER BY lift DESC LIMIT ?",
+      "SELECT sequence_json, support, confidence, lift, sequence_len
+       FROM sequence_stats
+       WHERE sequence_len >= 2
+       ORDER BY lift DESC
+       LIMIT ?",
       libsql::params![limit as i64],
     )
     .await?;
@@ -366,12 +451,17 @@ pub async fn candidates_from_sequences(
     let support = row.get::<i64>(1)? as usize;
     let confidence = row.get::<f64>(2)?;
     let lift = row.get::<f64>(3)?;
-
-    let sequence: Vec<String> = serde_json::from_str(&sequence_json)?;
-    if sequence.len() < 2 {
+    let sequence_len = row.get::<i64>(4)? as usize;
+    if support < config.min_support || confidence < config.min_confidence || lift < config.min_lift
+    {
       continue;
     }
-    let prefix_len = sequence.len() - 1;
+
+    let sequence: Vec<String> = serde_json::from_str(&sequence_json)?;
+    if sequence_len < 2 || sequence.len() < 2 {
+      continue;
+    }
+    let prefix_len = sequence_len.saturating_sub(1);
     if prefix_len == 0 || recent_len < prefix_len {
       continue;
     }
@@ -407,7 +497,7 @@ pub async fn candidates_from_sequences(
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::db::{init, insert_invocation, open_db};
+  use crate::db::{init, insert_invocation, open_db, update_stats_for_invocation};
   use crate::shell_history::Invocation;
 
   async fn insert_cmd(conn: &libsql::Connection, command: &str, ts: i64) {
@@ -456,5 +546,63 @@ mod tests {
     let row = rows.next().await.unwrap().expect("expected row");
     let count: i64 = row.get(0).unwrap();
     assert!(count > 0);
+  }
+
+  #[tokio::test]
+  async fn test_sequence_stats_update_online() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db = open_db(tmp.path()).await.unwrap();
+    init(&db.conn).await.unwrap();
+
+    let invs = [
+      ("git status", 1),
+      ("git add .", 2),
+      ("git status", 3),
+      ("git add .", 4),
+    ];
+
+    for (cmd, ts) in invs {
+      let inv = Invocation {
+        command: cmd.to_string(),
+        expanded_command: cmd.to_string(),
+        shellname: "zsh".to_string(),
+        working_directory: Some("/tmp".to_string()),
+        workspace: None,
+        hostname: Some("host".to_string()),
+        username: Some("user".to_string()),
+        exit_status: Some(0),
+        start_unix_timestamp: Some(ts),
+        end_unix_timestamp: Some(ts + 1),
+        session_id: 1,
+      };
+      assert!(insert_invocation(&db.conn, &inv).await.unwrap());
+      update_stats_for_invocation(&db.conn, &inv).await.unwrap();
+    }
+
+    let expected_sequence = vec![
+      normalize_sequence_command("zsh", "git status"),
+      normalize_sequence_command("zsh", "git add ."),
+    ];
+    let sequence_json = serde_json::to_string(&expected_sequence).unwrap();
+    let mut rows = db
+      .conn
+      .query(
+        "SELECT support, sequence_len FROM sequence_stats WHERE sequence_json = ?",
+        libsql::params![sequence_json],
+      )
+      .await
+      .unwrap();
+    let row = rows.next().await.unwrap().expect("expected row");
+    let support = row.get::<i64>(0).unwrap();
+    let sequence_len = row.get::<i64>(1).unwrap();
+    assert!(support >= 2);
+    assert_eq!(sequence_len, 2);
+
+    let recent = vec!["git status".to_string()];
+    let candidates = candidates_from_sequences(&db.conn, "zsh", &recent, 10)
+      .await
+      .unwrap();
+    let expected_next = normalize_sequence_command("zsh", "git add .");
+    assert!(candidates.iter().any(|cand| cand.command == expected_next));
   }
 }

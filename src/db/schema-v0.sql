@@ -4,7 +4,6 @@ CREATE TABLE IF NOT EXISTS shell_history (
   expanded_command TEXT NOT NULL,
   shellname TEXT NOT NULL,
   working_directory TEXT,
-  workspace_json TEXT,
   hostname TEXT,
   username TEXT,
   exit_status INTEGER,
@@ -62,6 +61,9 @@ CREATE TABLE IF NOT EXISTS sequence_stats (
   support INTEGER NOT NULL,
   confidence REAL NOT NULL,
   lift REAL NOT NULL,
+  sequence_len INTEGER NOT NULL,
+  prefix_json TEXT,
+  last_command TEXT,
   context_json TEXT
 );
 
@@ -86,30 +88,30 @@ CREATE TABLE IF NOT EXISTS transition_stats (
 CREATE INDEX IF NOT EXISTS idx_transition_prev ON transition_stats(prev_command, prev_exit_status);
 CREATE INDEX IF NOT EXISTS idx_transition_next ON transition_stats(next_command);
 
-CREATE TABLE IF NOT EXISTS repo_command_stats (
-  repo_root TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS workspace_command_stats (
+  workspace_root TEXT NOT NULL,
   command TEXT NOT NULL,
   freq INTEGER NOT NULL,
   last_seen INTEGER NOT NULL,
-  PRIMARY KEY (repo_root, command)
+  PRIMARY KEY (workspace_root, command)
 );
 
-CREATE INDEX IF NOT EXISTS idx_repo_command_root ON repo_command_stats(repo_root);
+CREATE INDEX IF NOT EXISTS idx_workspace_command_root ON workspace_command_stats(workspace_root);
 
-CREATE TABLE IF NOT EXISTS repo_transition_stats (
-  repo_root TEXT NOT NULL,
+CREATE TABLE IF NOT EXISTS workspace_transition_stats (
+  workspace_root TEXT NOT NULL,
   prev_command TEXT NOT NULL,
   prev_exit_status INTEGER,
   next_command TEXT NOT NULL,
   freq INTEGER NOT NULL,
   last_seen INTEGER NOT NULL,
-  PRIMARY KEY (repo_root, prev_command, prev_exit_status, next_command)
+  PRIMARY KEY (workspace_root, prev_command, prev_exit_status, next_command)
 );
 
-CREATE INDEX IF NOT EXISTS idx_repo_transition_root_prev ON repo_transition_stats(repo_root, prev_command, prev_exit_status);
+CREATE INDEX IF NOT EXISTS idx_workspace_transition_root_prev ON workspace_transition_stats(workspace_root, prev_command, prev_exit_status);
 
 CREATE TABLE IF NOT EXISTS arg_stats (
-  repo_root TEXT NOT NULL,
+  workspace_root TEXT NOT NULL,
   command_head TEXT NOT NULL,
   flags_json TEXT NOT NULL,
   arg_index INTEGER NOT NULL,
@@ -117,52 +119,52 @@ CREATE TABLE IF NOT EXISTS arg_stats (
   arg_norm TEXT NOT NULL,
   freq INTEGER NOT NULL,
   last_seen INTEGER NOT NULL,
-  PRIMARY KEY (repo_root, command_head, flags_json, arg_index, arg_raw)
+  PRIMARY KEY (workspace_root, command_head, flags_json, arg_index, arg_raw)
 );
 
 CREATE INDEX IF NOT EXISTS idx_arg_stats_lookup ON arg_stats(command_head, flags_json, arg_index);
-CREATE INDEX IF NOT EXISTS idx_arg_stats_repo ON arg_stats(repo_root, command_head);
+CREATE INDEX IF NOT EXISTS idx_arg_stats_workspace ON arg_stats(workspace_root, command_head);
 
 CREATE TABLE IF NOT EXISTS arg_stats_any (
-  repo_root TEXT NOT NULL,
+  workspace_root TEXT NOT NULL,
   command_head TEXT NOT NULL,
   flags_json TEXT NOT NULL,
   arg_raw TEXT NOT NULL,
   arg_norm TEXT NOT NULL,
   freq INTEGER NOT NULL,
   last_seen INTEGER NOT NULL,
-  PRIMARY KEY (repo_root, command_head, flags_json, arg_raw)
+  PRIMARY KEY (workspace_root, command_head, flags_json, arg_raw)
 );
 
 CREATE INDEX IF NOT EXISTS idx_arg_stats_any_lookup ON arg_stats_any(command_head, flags_json);
-CREATE INDEX IF NOT EXISTS idx_arg_stats_any_repo ON arg_stats_any(repo_root, command_head);
+CREATE INDEX IF NOT EXISTS idx_arg_stats_any_workspace ON arg_stats_any(workspace_root, command_head);
 
 CREATE TABLE IF NOT EXISTS flag_stats (
-  repo_root TEXT NOT NULL,
+  workspace_root TEXT NOT NULL,
   command_head TEXT NOT NULL,
   flag_raw TEXT NOT NULL,
   flag_norm TEXT NOT NULL,
   freq INTEGER NOT NULL,
   last_seen INTEGER NOT NULL,
-  PRIMARY KEY (repo_root, command_head, flag_raw)
+  PRIMARY KEY (workspace_root, command_head, flag_raw)
 );
 
 CREATE INDEX IF NOT EXISTS idx_flag_stats_lookup ON flag_stats(command_head, flag_raw);
-CREATE INDEX IF NOT EXISTS idx_flag_stats_repo ON flag_stats(repo_root, command_head);
+CREATE INDEX IF NOT EXISTS idx_flag_stats_workspace ON flag_stats(workspace_root, command_head);
 
 CREATE TABLE IF NOT EXISTS env_stats (
-  repo_root TEXT NOT NULL,
+  workspace_root TEXT NOT NULL,
   command_head TEXT NOT NULL,
   env_key TEXT NOT NULL,
   env_raw TEXT NOT NULL,
   env_norm TEXT NOT NULL,
   freq INTEGER NOT NULL,
   last_seen INTEGER NOT NULL,
-  PRIMARY KEY (repo_root, command_head, env_raw)
+  PRIMARY KEY (workspace_root, command_head, env_raw)
 );
 
 CREATE INDEX IF NOT EXISTS idx_env_stats_key ON env_stats(command_head, env_key);
-CREATE INDEX IF NOT EXISTS idx_env_stats_repo ON env_stats(repo_root, command_head);
+CREATE INDEX IF NOT EXISTS idx_env_stats_workspace ON env_stats(workspace_root, command_head);
 
 CREATE TABLE IF NOT EXISTS token_sequence_stats (
   sequence_json TEXT PRIMARY KEY,
@@ -201,6 +203,12 @@ CREATE TABLE IF NOT EXISTS online_token_embedding (
 
 CREATE TABLE IF NOT EXISTS online_command_bias (
   command TEXT PRIMARY KEY,
+  bias REAL NOT NULL,
+  updated_at INTEGER NOT NULL
+);
+
+CREATE TABLE IF NOT EXISTS online_context_bias (
+  bucket INTEGER PRIMARY KEY,
   bias REAL NOT NULL,
   updated_at INTEGER NOT NULL
 );

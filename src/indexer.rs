@@ -2,15 +2,16 @@ use std::collections::HashMap;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use libsql::Connection;
+use libsql::Value;
 use serde_json;
 use tracing::info;
 
 use crate::Result;
 use crate::phase::{PhaseConfig, PhaseSample, features_from_tokens, train_phase_predictor};
 use crate::predict::aliases::{expand_alias, load_aliases};
-use crate::repo::find_repo_root;
 use crate::tokenize::{
-  extract_command_parts, normalize_command_whitespace, normalize_token, tokenize_index,
+  extract_command_parts, extract_command_stats_parts, normalize_command_whitespace,
+  normalize_token, tokenize_index,
 };
 
 #[derive(Debug, Default)]
@@ -44,11 +45,112 @@ struct PhaseStat {
 
 type ContextKey = (String, Option<String>, Option<String>, Option<String>);
 
+fn resolve_workspace_root(cwd: Option<&str>, cache: &mut HashMap<String, String>) -> String {
+  let Some(cwd) = cwd else {
+    return String::new();
+  };
+  if let Some(root) = cache.get(cwd) {
+    return root.clone();
+  }
+  let root = crate::workspace::workspace_root_for_cwd(cwd).unwrap_or_default();
+  cache.insert(cwd.to_string(), root.clone());
+  root
+}
+
+fn append_multi_row_placeholders(sql: &mut String, rows: usize, cols_per_row: usize) {
+  for row_idx in 0..rows {
+    if row_idx > 0 {
+      sql.push(',');
+    }
+    sql.push('(');
+    for col_idx in 0..cols_per_row {
+      if col_idx > 0 {
+        sql.push(',');
+      }
+      sql.push('?');
+    }
+    sql.push(')');
+  }
+}
+
+fn opt_text_value(v: &Option<String>) -> Value {
+  match v {
+    Some(s) => Value::Text(s.clone()),
+    None => Value::Null,
+  }
+}
+
+fn opt_i64_value(v: &Option<i64>) -> Value {
+  match v {
+    Some(i) => Value::Integer(*i),
+    None => Value::Null,
+  }
+}
+
+struct BulkInserter<'a> {
+  conn: &'a Connection,
+  prefix: &'a str,
+  suffix: &'a str,
+  cols_per_row: usize,
+  max_rows: usize,
+  params: Vec<Value>,
+  rows: usize,
+}
+
+impl<'a> BulkInserter<'a> {
+  fn new(conn: &'a Connection, prefix: &'a str, cols_per_row: usize) -> Self {
+    Self::new_with_suffix(conn, prefix, cols_per_row, "")
+  }
+
+  fn new_with_suffix(
+    conn: &'a Connection,
+    prefix: &'a str,
+    cols_per_row: usize,
+    suffix: &'a str,
+  ) -> Self {
+    // SQLite default max variables is often 999; stay below it.
+    const MAX_SQL_VARS: usize = 900;
+    let max_rows = (MAX_SQL_VARS / cols_per_row).max(1);
+    Self {
+      conn,
+      prefix,
+      suffix,
+      cols_per_row,
+      max_rows,
+      params: Vec::with_capacity(max_rows * cols_per_row),
+      rows: 0,
+    }
+  }
+
+  async fn push_row(&mut self, row: impl IntoIterator<Item = Value>) -> crate::Result<()> {
+    if self.rows >= self.max_rows {
+      self.flush().await?;
+    }
+    self.params.extend(row);
+    self.rows += 1;
+    Ok(())
+  }
+
+  async fn flush(&mut self) -> crate::Result<u64> {
+    if self.rows == 0 {
+      return Ok(0);
+    }
+    let mut sql = String::from(self.prefix);
+    append_multi_row_placeholders(&mut sql, self.rows, self.cols_per_row);
+    sql.push_str(self.suffix);
+    let params = std::mem::take(&mut self.params);
+    self.rows = 0;
+    self.params = Vec::with_capacity(self.max_rows * self.cols_per_row);
+    let changed = self.conn.execute(&sql, params).await?;
+    Ok(changed)
+  }
+}
+
 pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Result<IndexReport> {
   let mut command_stats: HashMap<String, Stat> = HashMap::new();
   let mut transition_stats: HashMap<(String, Option<i64>, String), Stat> = HashMap::new();
-  let mut repo_command_stats: HashMap<(String, String), Stat> = HashMap::new();
-  let mut repo_transition_stats: HashMap<(String, String, Option<i64>, String), Stat> =
+  let mut workspace_command_stats: HashMap<(String, String), Stat> = HashMap::new();
+  let mut workspace_transition_stats: HashMap<(String, String, Option<i64>, String), Stat> =
     HashMap::new();
   let mut context_stats: HashMap<ContextKey, Stat> = HashMap::new();
   let mut arg_stats: HashMap<(String, String, String, i64, String), ArgStat> = HashMap::new();
@@ -56,6 +158,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
   let mut flag_stats: HashMap<(String, String, String, String), Stat> = HashMap::new();
   let mut env_stats: HashMap<(String, String, String, String, String), Stat> = HashMap::new();
   let mut token_cache: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
+  let mut workspace_root_cache: HashMap<String, String> = HashMap::new();
   let mut phase_stats: HashMap<(String, String), PhaseStat> = HashMap::new();
   let mut command_shell: HashMap<String, String> = HashMap::new();
   let phase_config = PhaseConfig::load()?;
@@ -64,7 +167,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
 
   let mut prev_command: Option<String> = None;
   let mut prev_exit_status: Option<i64> = None;
-  let mut prev_repo_root: String = String::new();
+  let mut prev_workspace_root: String = String::new();
   let mut processed: usize = 0;
   let progress_interval = 50_000usize;
   let max_unlabeled = 10_000usize;
@@ -109,11 +212,8 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
     let exit_status = row.get::<Option<i64>>(6)?;
     let ts: Option<i64> = row.get(7)?;
     let ts = ts.unwrap_or(0);
-    let repo_root = if let Some(cwd) = working_directory.as_deref() {
-      find_repo_root(cwd).unwrap_or_else(|| cwd.to_string())
-    } else {
-      String::new()
-    };
+    let workspace_root =
+      resolve_workspace_root(working_directory.as_deref(), &mut workspace_root_cache);
 
     let stats_command = if !expanded_command.is_empty() {
       expanded_command
@@ -124,8 +224,8 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
 
     update_stat(&mut command_stats, &stats_command, ts);
     update_stat_key(
-      &mut repo_command_stats,
-      (repo_root.clone(), stats_command.clone()),
+      &mut workspace_command_stats,
+      (workspace_root.clone(), stats_command.clone()),
       ts,
     );
 
@@ -149,9 +249,9 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
         ts,
       );
       update_stat_key(
-        &mut repo_transition_stats,
+        &mut workspace_transition_stats,
         (
-          prev_repo_root.clone(),
+          prev_workspace_root.clone(),
           prev.clone(),
           prev_exit_status,
           stats_command.clone(),
@@ -159,9 +259,9 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
         ts,
       );
       update_stat_key(
-        &mut repo_transition_stats,
+        &mut workspace_transition_stats,
         (
-          prev_repo_root.clone(),
+          prev_workspace_root.clone(),
           prev.clone(),
           None,
           stats_command.clone(),
@@ -187,7 +287,9 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
         phase_unlabeled.push(features);
       }
     }
+    let mut base_head: Option<String> = None;
     if let Some(parts) = extract_command_parts(&stats_command, &tokens) {
+      base_head = Some(parts.head.clone());
       let mut flags = parts.flags;
       flags.sort();
       let flags_json = serde_json::to_string(&flags)?;
@@ -196,7 +298,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
         update_stat_key(
           &mut flag_stats,
           (
-            repo_root.clone(),
+            workspace_root.clone(),
             parts.head.clone(),
             flag.clone(),
             flag_norm,
@@ -209,7 +311,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
         update_stat_key(
           &mut env_stats,
           (
-            repo_root.clone(),
+            workspace_root.clone(),
             parts.head.clone(),
             env_key,
             env.raw.clone(),
@@ -222,7 +324,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
         update_arg_stat(
           &mut arg_stats,
           (
-            repo_root.clone(),
+            workspace_root.clone(),
             parts.head.clone(),
             flags_json.clone(),
             idx as i64,
@@ -234,7 +336,7 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
         update_arg_stat(
           &mut arg_stats_any,
           (
-            repo_root.clone(),
+            workspace_root.clone(),
             parts.head.clone(),
             flags_json.clone(),
             arg.raw.clone(),
@@ -244,10 +346,68 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
         );
       }
     }
+    if let Some(parts) = extract_command_stats_parts(&stats_command, &tokens)
+      && base_head.as_deref() != Some(parts.head.as_str()) {
+        let mut flags = parts.flags;
+        flags.sort();
+        let flags_json = serde_json::to_string(&flags)?;
+        for flag in &flags {
+          let flag_norm = normalize_token(flag);
+          update_stat_key(
+            &mut flag_stats,
+            (
+              workspace_root.clone(),
+              parts.head.clone(),
+              flag.clone(),
+              flag_norm,
+            ),
+            ts,
+          );
+        }
+        for env in &parts.env {
+          let env_key = env.raw.split('=').next().unwrap_or_default().to_string();
+          update_stat_key(
+            &mut env_stats,
+            (
+              workspace_root.clone(),
+              parts.head.clone(),
+              env_key,
+              env.raw.clone(),
+              env.normalized.clone(),
+            ),
+            ts,
+          );
+        }
+        for (idx, arg) in parts.args.iter().enumerate() {
+          update_arg_stat(
+            &mut arg_stats,
+            (
+              workspace_root.clone(),
+              parts.head.clone(),
+              flags_json.clone(),
+              idx as i64,
+              arg.raw.clone(),
+            ),
+            &arg.normalized,
+            ts,
+          );
+          update_arg_stat(
+            &mut arg_stats_any,
+            (
+              workspace_root.clone(),
+              parts.head.clone(),
+              flags_json.clone(),
+              arg.raw.clone(),
+            ),
+            &arg.normalized,
+            ts,
+          );
+        }
+      }
 
     prev_command = Some(stats_command);
     prev_exit_status = exit_status;
-    prev_repo_root = repo_root;
+    prev_workspace_root = workspace_root;
     processed += 1;
     if processed.is_multiple_of(progress_interval) {
       info!("Indexed {} commands so far", processed);
@@ -308,8 +468,8 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
   conn.execute("BEGIN", ()).await?;
   let write_result: Result<()> = async {
     conn.execute("DELETE FROM transition_stats", ()).await?;
-    conn.execute("DELETE FROM repo_command_stats", ()).await?;
-    conn.execute("DELETE FROM repo_transition_stats", ()).await?;
+    conn.execute("DELETE FROM workspace_command_stats", ()).await?;
+    conn.execute("DELETE FROM workspace_transition_stats", ()).await?;
     conn.execute("DELETE FROM context_stats", ()).await?;
     conn.execute("DELETE FROM arg_stats", ()).await?;
     conn.execute("DELETE FROM arg_stats_any", ()).await?;
@@ -328,24 +488,32 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
       .await?;
     conn.execute("DELETE FROM tmp_command_stats", ()).await?;
 
+    let mut tmp_commands = BulkInserter::new(
+      conn,
+      "INSERT INTO tmp_command_stats (command) VALUES ",
+      1,
+    );
+    let mut upsert_commands = BulkInserter::new_with_suffix(
+      conn,
+      "INSERT INTO command_stats (command, freq, last_seen) VALUES ",
+      3,
+      " ON CONFLICT(command) DO UPDATE SET freq = excluded.freq, last_seen = excluded.last_seen",
+    );
+
     for (command, stat) in &command_stats {
-      conn
-        .execute(
-          "INSERT INTO tmp_command_stats (command) VALUES (?)",
-          libsql::params![command.clone()],
-        )
+      tmp_commands
+        .push_row([Value::Text(command.clone())])
         .await?;
-      conn
-        .execute(
-          "INSERT INTO command_stats (command, freq, last_seen)
-           VALUES (?, ?, ?)
-           ON CONFLICT(command) DO UPDATE SET
-             freq = excluded.freq,
-             last_seen = excluded.last_seen",
-          (command.clone(), stat.freq, stat.last_seen),
-        )
+      upsert_commands
+        .push_row([
+          Value::Text(command.clone()),
+          Value::Integer(stat.freq),
+          Value::Integer(stat.last_seen),
+        ])
         .await?;
     }
+    tmp_commands.flush().await?;
+    upsert_commands.flush().await?;
 
     conn
       .execute(
@@ -355,164 +523,200 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
       )
       .await?;
 
-    for ((repo_root, command), stat) in &repo_command_stats {
-      conn
-        .execute(
-          "INSERT INTO repo_command_stats (repo_root, command, freq, last_seen)
-           VALUES (?, ?, ?, ?)",
-          (repo_root.clone(), command.clone(), stat.freq, stat.last_seen),
-        )
+    let mut insert_workspace_commands = BulkInserter::new(
+      conn,
+      "INSERT INTO workspace_command_stats (workspace_root, command, freq, last_seen) VALUES ",
+      4,
+    );
+    for ((workspace_root, command), stat) in &workspace_command_stats {
+      insert_workspace_commands
+        .push_row([
+          Value::Text(workspace_root.clone()),
+          Value::Text(command.clone()),
+          Value::Integer(stat.freq),
+          Value::Integer(stat.last_seen),
+        ])
         .await?;
     }
+    insert_workspace_commands.flush().await?;
 
+    let mut insert_transitions = BulkInserter::new(
+      conn,
+      "INSERT INTO transition_stats (prev_command, prev_exit_status, next_command, freq, last_seen) VALUES ",
+      5,
+    );
     for ((prev, status, next), stat) in &transition_stats {
-      conn
-        .execute(
-          "INSERT INTO transition_stats (prev_command, prev_exit_status, next_command, freq, last_seen)
-           VALUES (?, ?, ?, ?, ?)",
-          (prev.clone(), *status, next.clone(), stat.freq, stat.last_seen),
-        )
+      insert_transitions
+        .push_row([
+          Value::Text(prev.clone()),
+          opt_i64_value(status),
+          Value::Text(next.clone()),
+          Value::Integer(stat.freq),
+          Value::Integer(stat.last_seen),
+        ])
         .await?;
     }
+    insert_transitions.flush().await?;
 
-    for ((repo_root, prev, status, next), stat) in &repo_transition_stats {
-      conn
-        .execute(
-          "INSERT INTO repo_transition_stats (repo_root, prev_command, prev_exit_status, next_command, freq, last_seen)
-           VALUES (?, ?, ?, ?, ?, ?)",
-          (
-            repo_root.clone(),
-            prev.clone(),
-            *status,
-            next.clone(),
-            stat.freq,
-            stat.last_seen,
-          ),
-        )
+    let mut insert_workspace_transitions = BulkInserter::new(
+      conn,
+      "INSERT INTO workspace_transition_stats (workspace_root, prev_command, prev_exit_status, next_command, freq, last_seen) VALUES ",
+      6,
+    );
+    for ((workspace_root, prev, status, next), stat) in &workspace_transition_stats {
+      insert_workspace_transitions
+        .push_row([
+          Value::Text(workspace_root.clone()),
+          Value::Text(prev.clone()),
+          opt_i64_value(status),
+          Value::Text(next.clone()),
+          Value::Integer(stat.freq),
+          Value::Integer(stat.last_seen),
+        ])
         .await?;
     }
+    insert_workspace_transitions.flush().await?;
 
+    let mut insert_contexts = BulkInserter::new(
+      conn,
+      "INSERT INTO context_stats (command, working_directory, hostname, username, freq, last_seen) VALUES ",
+      6,
+    );
     for ((command, wd, host, user), stat) in &context_stats {
-      conn
-        .execute(
-          "INSERT INTO context_stats (command, working_directory, hostname, username, freq, last_seen)
-           VALUES (?, ?, ?, ?, ?, ?)",
-          (
-            command.clone(),
-            wd.clone(),
-            host.clone(),
-            user.clone(),
-            stat.freq,
-            stat.last_seen,
-          ),
-        )
+      insert_contexts
+        .push_row([
+          Value::Text(command.clone()),
+          opt_text_value(wd),
+          opt_text_value(host),
+          opt_text_value(user),
+          Value::Integer(stat.freq),
+          Value::Integer(stat.last_seen),
+        ])
         .await?;
     }
+    insert_contexts.flush().await?;
 
-    for ((repo_root, head, flags_json, arg_index, arg_raw), stat) in &arg_stats {
-      conn
-        .execute(
-          "INSERT INTO arg_stats (repo_root, command_head, flags_json, arg_index, arg_raw, arg_norm, freq, last_seen)
-           VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-          (
-            repo_root.clone(),
-            head.clone(),
-            flags_json.clone(),
-            *arg_index,
-            arg_raw.clone(),
-            stat.arg_norm.clone(),
-            stat.freq,
-            stat.last_seen,
-          ),
-        )
+    let mut insert_arg_stats = BulkInserter::new(
+      conn,
+      "INSERT INTO arg_stats (workspace_root, command_head, flags_json, arg_index, arg_raw, arg_norm, freq, last_seen) VALUES ",
+      8,
+    );
+    for ((workspace_root, head, flags_json, arg_index, arg_raw), stat) in &arg_stats {
+      insert_arg_stats
+        .push_row([
+          Value::Text(workspace_root.clone()),
+          Value::Text(head.clone()),
+          Value::Text(flags_json.clone()),
+          Value::Integer(*arg_index),
+          Value::Text(arg_raw.clone()),
+          Value::Text(stat.arg_norm.clone()),
+          Value::Integer(stat.freq),
+          Value::Integer(stat.last_seen),
+        ])
         .await?;
     }
+    insert_arg_stats.flush().await?;
 
-    for ((repo_root, head, flags_json, arg_raw), stat) in &arg_stats_any {
-      conn
-        .execute(
-          "INSERT INTO arg_stats_any (repo_root, command_head, flags_json, arg_raw, arg_norm, freq, last_seen)
-           VALUES (?, ?, ?, ?, ?, ?, ?)",
-          (
-            repo_root.clone(),
-            head.clone(),
-            flags_json.clone(),
-            arg_raw.clone(),
-            stat.arg_norm.clone(),
-            stat.freq,
-            stat.last_seen,
-          ),
-        )
+    let mut insert_arg_stats_any = BulkInserter::new(
+      conn,
+      "INSERT INTO arg_stats_any (workspace_root, command_head, flags_json, arg_raw, arg_norm, freq, last_seen) VALUES ",
+      7,
+    );
+    for ((workspace_root, head, flags_json, arg_raw), stat) in &arg_stats_any {
+      insert_arg_stats_any
+        .push_row([
+          Value::Text(workspace_root.clone()),
+          Value::Text(head.clone()),
+          Value::Text(flags_json.clone()),
+          Value::Text(arg_raw.clone()),
+          Value::Text(stat.arg_norm.clone()),
+          Value::Integer(stat.freq),
+          Value::Integer(stat.last_seen),
+        ])
         .await?;
     }
+    insert_arg_stats_any.flush().await?;
 
-    for ((repo_root, head, flag_raw, flag_norm), stat) in &flag_stats {
-      conn
-        .execute(
-          "INSERT INTO flag_stats (repo_root, command_head, flag_raw, flag_norm, freq, last_seen)
-           VALUES (?, ?, ?, ?, ?, ?)",
-          (
-            repo_root.clone(),
-            head.clone(),
-            flag_raw.clone(),
-            flag_norm.clone(),
-            stat.freq,
-            stat.last_seen,
-          ),
-        )
+    let mut insert_flag_stats = BulkInserter::new(
+      conn,
+      "INSERT INTO flag_stats (workspace_root, command_head, flag_raw, flag_norm, freq, last_seen) VALUES ",
+      6,
+    );
+    for ((workspace_root, head, flag_raw, flag_norm), stat) in &flag_stats {
+      insert_flag_stats
+        .push_row([
+          Value::Text(workspace_root.clone()),
+          Value::Text(head.clone()),
+          Value::Text(flag_raw.clone()),
+          Value::Text(flag_norm.clone()),
+          Value::Integer(stat.freq),
+          Value::Integer(stat.last_seen),
+        ])
         .await?;
     }
+    insert_flag_stats.flush().await?;
 
-    for ((repo_root, head, env_key, env_raw, env_norm), stat) in &env_stats {
-      conn
-        .execute(
-          "INSERT INTO env_stats (repo_root, command_head, env_key, env_raw, env_norm, freq, last_seen)
-           VALUES (?, ?, ?, ?, ?, ?, ?)",
-          (
-            repo_root.clone(),
-            head.clone(),
-            env_key.clone(),
-            env_raw.clone(),
-            env_norm.clone(),
-            stat.freq,
-            stat.last_seen,
-          ),
-        )
+    let mut insert_env_stats = BulkInserter::new(
+      conn,
+      "INSERT INTO env_stats (workspace_root, command_head, env_key, env_raw, env_norm, freq, last_seen) VALUES ",
+      7,
+    );
+    for ((workspace_root, head, env_key, env_raw, env_norm), stat) in &env_stats {
+      insert_env_stats
+        .push_row([
+          Value::Text(workspace_root.clone()),
+          Value::Text(head.clone()),
+          Value::Text(env_key.clone()),
+          Value::Text(env_raw.clone()),
+          Value::Text(env_norm.clone()),
+          Value::Integer(stat.freq),
+          Value::Integer(stat.last_seen),
+        ])
         .await?;
     }
+    insert_env_stats.flush().await?;
 
+    let mut insert_token_cache = BulkInserter::new(
+      conn,
+      "INSERT INTO token_cache (command, tokens_json, normalized_json, updated_at) VALUES ",
+      4,
+    );
     for (command, (raw, norm)) in &token_cache {
       let raw_json = serde_json::to_string(raw)?;
       let norm_json = serde_json::to_string(norm)?;
-      conn
-        .execute(
-          "INSERT INTO token_cache (command, tokens_json, normalized_json, updated_at)
-           VALUES (?, ?, ?, ?)",
-          (command.clone(), raw_json, norm_json, now),
-        )
+      insert_token_cache
+        .push_row([
+          Value::Text(command.clone()),
+          Value::Text(raw_json),
+          Value::Text(norm_json),
+          Value::Integer(now),
+        ])
         .await?;
     }
+    insert_token_cache.flush().await?;
 
+    let mut insert_phase_stats = BulkInserter::new(
+      conn,
+      "INSERT INTO phase_stats (command_head, phase, confidence, freq, last_seen) VALUES ",
+      5,
+    );
     for ((command_head, phase), stat) in &phase_stats {
       let confidence = if stat.freq > 0 {
         stat.confidence_sum / stat.freq as f64
       } else {
         0.0
       };
-      conn
-        .execute(
-          "INSERT INTO phase_stats (command_head, phase, confidence, freq, last_seen)
-           VALUES (?, ?, ?, ?, ?)",
-          (
-            command_head.clone(),
-            phase.clone(),
-            confidence,
-            stat.freq,
-            stat.last_seen,
-          ),
-        )
+      insert_phase_stats
+        .push_row([
+          Value::Text(command_head.clone()),
+          Value::Text(phase.clone()),
+          Value::Real(confidence),
+          Value::Integer(stat.freq),
+          Value::Integer(stat.last_seen),
+        ])
         .await?;
     }
+    insert_phase_stats.flush().await?;
 
     Ok(())
   }
@@ -713,13 +917,12 @@ mod tests {
   }
 
   #[tokio::test]
-  async fn rebuild_stats_repo_root_should_fall_back_to_working_directory() -> Result<()> {
+  async fn rebuild_stats_workspace_root_should_fall_back_to_working_directory() -> Result<()> {
     let tmp = NamedTempFile::new()?;
     let db = db::open_db(tmp.path()).await?;
     db::init(&db.conn).await?;
 
-    // This path will not exist during the test. We still want repo-scoped stats to be isolated
-    // by *something stable* (at minimum: the working directory string).
+    // This path will not exist during the test, so no workspace marker is found.
     let inv = base_invocation("echo hi", 10);
     db::insert_invocation(&db.conn, &inv).await?;
     rebuild_stats(&db.conn, None).await?;
@@ -727,13 +930,13 @@ mod tests {
     let mut rows = db
       .conn
       .query(
-        "SELECT repo_root FROM repo_command_stats WHERE command = ?",
+        "SELECT workspace_root FROM workspace_command_stats WHERE command = ?",
         libsql::params!["echo hi".to_string()],
       )
       .await?;
     let row = rows.next().await?.expect("row");
-    let repo_root: String = row.get(0)?;
-    assert_eq!(repo_root, inv.working_directory.clone().unwrap());
+    let workspace_root: String = row.get(0)?;
+    assert!(workspace_root.is_empty());
     Ok(())
   }
 }

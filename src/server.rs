@@ -3,6 +3,7 @@ use std::os::unix::net::UnixListener as StdUnixListener;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
+use std::time::Instant;
 
 use deadpool::managed::{Manager as DeadpoolManager, Object, Pool, RecycleError, RecycleResult};
 use libsql::{Connection, Database};
@@ -25,8 +26,11 @@ use crate::db::{
 };
 use crate::indexer::rebuild_stats;
 use crate::online_model::trainer::train_on_invocations as train_online_model;
+use crate::online_model::trainer::train_on_invocations_bulk as train_online_model_bulk;
 use crate::predict::aliases::{expand_alias, load_aliases};
-use crate::predict::{SuggestConfig, Suggestion as InternalSuggestion};
+use crate::predict::{
+  SuggestConfig, Suggestion as InternalSuggestion, update_blend_weights_for_feedback,
+};
 use crate::sequence::{SequenceConfig, analyze_sequences, analyze_token_sequences};
 use crate::shell_history::{
   Invocation, Shell, normalize_shellname, parse_bash_history, parse_zsh_history,
@@ -38,6 +42,13 @@ const DEFAULT_TIMEOUT_MS: u64 = 1_000;
 // We use the server for long-running operations (import/index) over a local UDS.
 // Default to a very large timeout to avoid client disconnects during indexing.
 const LONG_TIMEOUT_MS: u64 = 86_400_000;
+
+fn db_busy_timeout_ms() -> u64 {
+  std::env::var("ZAGE_DB_BUSY_TIMEOUT_MS")
+    .ok()
+    .and_then(|val| val.parse::<u64>().ok())
+    .unwrap_or(300_000)
+}
 
 fn response_timeout_ms(request: &Request) -> u64 {
   match request {
@@ -262,7 +273,11 @@ impl ConnectionPool {
       .get()
       .await
       .map_err(|err| ZageError::ConfigError(err.to_string()))?;
-    let _ = apply_pragma(&conn, "PRAGMA busy_timeout=5000").await;
+    let _ = apply_pragma(
+      &conn,
+      &format!("PRAGMA busy_timeout={}", db_busy_timeout_ms()),
+    )
+    .await;
     Ok(conn)
   }
 
@@ -277,11 +292,25 @@ impl ConnectionPool {
 }
 
 pub async fn run_server(db_config: &DbConfig) -> Result<()> {
+  let available = std::thread::available_parallelism()
+    .map(|n| n.get())
+    .unwrap_or(1);
+  info!(
+    "server starting: db_kind={:?} available_parallelism={}",
+    db_config.kind, available
+  );
   let db = open_db_with_config(db_config).await?;
-  if let Err(err) = apply_pragma(&db.conn, "PRAGMA journal_mode=WAL").await {
+  if matches!(db_config.kind, crate::config::DbKind::Local)
+    && let Err(err) = apply_pragma(&db.conn, "PRAGMA journal_mode=WAL").await
+  {
     warn!("failed to enable WAL: {}", err);
   }
-  if let Err(err) = apply_pragma(&db.conn, "PRAGMA busy_timeout=5000").await {
+  if let Err(err) = apply_pragma(
+    &db.conn,
+    &format!("PRAGMA busy_timeout={}", db_busy_timeout_ms()),
+  )
+  .await
+  {
     warn!("failed to set busy_timeout: {}", err);
   }
   let sync_enabled = matches!(db_config.kind, crate::config::DbKind::RemoteReplica);
@@ -618,10 +647,11 @@ async fn handle_request(
             status.replay_global, status.replay_workspace, replay_workspaces
           ));
           lines.push(format!(
-            "Tables: meta={}, token_embeddings={}, command_biases={}, head_biases={}, group_scalars={}, feedback={}",
+            "Tables: meta={}, token_embeddings={}, command_biases={}, context_biases={}, head_biases={}, group_scalars={}, feedback={}",
             status.meta_entries,
             status.token_embeddings,
             status.command_biases,
+            status.context_biases,
             status.head_biases,
             status.group_scalars,
             status.feedback
@@ -803,9 +833,8 @@ async fn handle_request(
       accepted_at,
       outcome,
     } => match pool.get().await {
-      Ok(conn) => match upsert_online_feedback(
-        &conn,
-        OnlineFeedbackEvent {
+      Ok(conn) => {
+        let event = OnlineFeedbackEvent {
           shown_id,
           shown_at,
           cwd: working_directory,
@@ -813,15 +842,19 @@ async fn handle_request(
           accepted_command,
           accepted_at,
           outcome,
-        },
-      )
-      .await
-      {
-        Ok(()) => Response::Ack,
-        Err(err) => Response::Error {
-          message: err.to_string(),
-        },
-      },
+        };
+        match upsert_online_feedback(&conn, event.clone()).await {
+          Ok(()) => match update_blend_weights_for_feedback(&conn, &event).await {
+            Ok(()) => Response::Ack,
+            Err(err) => Response::Error {
+              message: err.to_string(),
+            },
+          },
+          Err(err) => Response::Error {
+            message: err.to_string(),
+          },
+        }
+      }
       Err(err) => Response::Error {
         message: err.to_string(),
       },
@@ -886,6 +919,7 @@ struct ImportRequest {
 }
 
 async fn handle_import(conn: &Connection, request: ImportRequest) -> Result<Vec<String>> {
+  let total_start = Instant::now();
   let history_file = if let Some(path) = request.file {
     let path = PathBuf::from(path);
     if path.is_relative() {
@@ -903,6 +937,7 @@ async fn handle_import(conn: &Connection, request: ImportRequest) -> Result<Vec<
 
   let shell = parse_shell(&request.shell)?;
   let aliases = load_aliases();
+  let parse_start = Instant::now();
   let mut invocations = match shell {
     Shell::Zsh => parse_zsh_history(
       &history_file,
@@ -915,32 +950,82 @@ async fn handle_import(conn: &Connection, request: ImportRequest) -> Result<Vec<
       request.username.clone(),
     )?,
   };
+  let parse_dur = parse_start.elapsed();
+  let expand_start = Instant::now();
   for invocation in invocations.iter_mut() {
     if invocation.expanded_command.is_empty() {
       invocation.expanded_command =
         expand_alias(&invocation.command, &aliases).unwrap_or_else(|| invocation.command.clone());
     }
   }
+  let expand_dur = expand_start.elapsed();
+  let insert_start = Instant::now();
   import_history(conn, invocations.iter().cloned()).await?;
+  let insert_dur = insert_start.elapsed();
 
   let mut lines = vec![format!("Imported history from {:?}", history_file)];
+  lines.push(format!(
+    "Import timings: parse={:.2}s alias_expand={:.2}s db_insert={:.2}s",
+    parse_dur.as_secs_f64(),
+    expand_dur.as_secs_f64(),
+    insert_dur.as_secs_f64()
+  ));
+  info!(
+    "import timings: parse={:.2}s alias_expand={:.2}s db_insert={:.2}s",
+    parse_dur.as_secs_f64(),
+    expand_dur.as_secs_f64(),
+    insert_dur.as_secs_f64()
+  );
   if request.reset_model {
+    let reset_start = Instant::now();
     reset_online_model(conn).await?;
     lines.push("Online model reset".to_string());
+    lines.push(format!(
+      "Import timings: model_reset={:.2}s",
+      reset_start.elapsed().as_secs_f64()
+    ));
+    info!(
+      "import timings: model_reset={:.2}s",
+      reset_start.elapsed().as_secs_f64()
+    );
   }
-  train_online_model(conn, &invocations).await?;
+  let train_start = Instant::now();
+  train_online_model_bulk(conn, &invocations).await?;
+  let train_dur = train_start.elapsed();
   lines.push(format!(
     "Online model trained on {} invocations",
     invocations.len()
   ));
+  lines.push(format!(
+    "Import timings: online_train={:.2}s",
+    train_dur.as_secs_f64()
+  ));
+  info!(
+    "import timings: online_train={:.2}s",
+    train_dur.as_secs_f64()
+  );
   if request.no_index {
     lines.push("Index rebuild skipped (requested via --no-index)".to_string());
+    lines.push(format!(
+      "Import timings: total={:.2}s",
+      total_start.elapsed().as_secs_f64()
+    ));
+    info!(
+      "import timings: total={:.2}s",
+      total_start.elapsed().as_secs_f64()
+    );
     return Ok(lines);
   }
 
+  let index_start = Instant::now();
   let report = rebuild_stats(conn, None).await?;
+  let index_dur = index_start.elapsed();
+  let seq_start = Instant::now();
   let seq_report = analyze_sequences(conn, SequenceConfig::default()).await?;
+  let seq_dur = seq_start.elapsed();
+  let token_seq_start = Instant::now();
   let token_seq_report = analyze_token_sequences(conn, SequenceConfig::default()).await?;
+  let token_seq_dur = token_seq_start.elapsed();
   lines.push(format!(
     "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}, phase_stats={}",
     report.commands, report.transitions, report.contexts, report.token_cache, report.phase_stats
@@ -953,6 +1038,20 @@ async fn handle_import(conn: &Connection, request: ImportRequest) -> Result<Vec<
     "Token sequence stats: sequences={}, bigrams={}, trigrams={}",
     token_seq_report.sequences, token_seq_report.bigrams, token_seq_report.trigrams
   ));
+  lines.push(format!(
+    "Import timings: rebuild_stats={:.2}s sequences={:.2}s token_sequences={:.2}s total={:.2}s",
+    index_dur.as_secs_f64(),
+    seq_dur.as_secs_f64(),
+    token_seq_dur.as_secs_f64(),
+    total_start.elapsed().as_secs_f64()
+  ));
+  info!(
+    "import timings: rebuild_stats={:.2}s sequences={:.2}s token_sequences={:.2}s total={:.2}s",
+    index_dur.as_secs_f64(),
+    seq_dur.as_secs_f64(),
+    token_seq_dur.as_secs_f64(),
+    total_start.elapsed().as_secs_f64()
+  );
   Ok(lines)
 }
 
@@ -1094,6 +1193,7 @@ async fn status_response(pool: &Arc<ConnectionPool>) -> Response {
           status.meta_entries > 0
             || status.token_embeddings > 0
             || status.command_biases > 0
+            || status.context_biases > 0
             || status.head_biases > 0
             || status.group_scalars > 0
             || status.replay_global > 0

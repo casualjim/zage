@@ -4,7 +4,7 @@ use libsql::{Connection, Value};
 use serde_json;
 
 use crate::Result;
-use crate::tokenize::{Token, TokenKind, extract_command_parts, tokenize, tokenize_index};
+use crate::tokenize::{Token, TokenKind, extract_command_stats_parts, tokenize, tokenize_index};
 
 use super::ranking::recency_score;
 use super::sql::query_prepared;
@@ -19,19 +19,19 @@ struct PrefixContext {
   arg_index: i64,
   partial: Option<String>,
   partial_is_flag: bool,
-  repo_root: String,
+  workspace_root: String,
 }
 
 #[derive(Debug)]
 struct EnvPrefixContext {
   base: String,
   partial: Option<String>,
-  repo_root: String,
+  workspace_root: String,
   match_on_key: bool,
 }
 
 struct ArgCandidateQuery<'a> {
-  repo_root: &'a str,
+  workspace_root: &'a str,
   head: &'a str,
   flags_json: &'a str,
   base_prefix: &'a str,
@@ -41,13 +41,13 @@ struct ArgCandidateQuery<'a> {
 pub(crate) async fn arg_template_candidates(
   conn: &Connection,
   prefix: &str,
-  repo_root: &str,
+  workspace_root: &str,
   shellname: &str,
   token_priors: &HashMap<String, f64>,
   now: i64,
   recency_half_life: f64,
 ) -> Result<Option<Vec<Suggestion>>> {
-  let ctx = match analyze_prefix(prefix, repo_root, shellname) {
+  let ctx = match analyze_prefix(prefix, workspace_root, shellname) {
     Some(ctx) => ctx,
     None => return Ok(None),
   };
@@ -62,17 +62,17 @@ pub(crate) async fn arg_template_candidates(
     .map(|p| format!("{p}%"))
     .unwrap_or_else(|| "%".to_string());
 
-  let repo_query = ArgCandidateQuery {
-    repo_root: &ctx.repo_root,
+  let workspace_query = ArgCandidateQuery {
+    workspace_root: &ctx.workspace_root,
     head: &ctx.head,
     flags_json: &ctx.flags_json,
     base_prefix: &ctx.base,
     token_priors,
   };
 
-  let repo_positional = fetch_arg_candidates(
+  let workspace_positional = fetch_arg_candidates(
     conn,
-    &repo_query,
+    &workspace_query,
     ctx.arg_index,
     &like,
     now,
@@ -80,13 +80,14 @@ pub(crate) async fn arg_template_candidates(
   )
   .await?;
 
-  let repo_any = fetch_arg_candidates_any(conn, &repo_query, &like, now, recency_half_life).await?;
+  let workspace_any =
+    fetch_arg_candidates_any(conn, &workspace_query, &like, now, recency_half_life).await?;
 
   let mut global_positional = Vec::new();
   let mut global_any = Vec::new();
-  if !ctx.repo_root.is_empty() {
+  if !ctx.workspace_root.is_empty() {
     let global_query = ArgCandidateQuery {
-      repo_root: "",
+      workspace_root: "",
       head: &ctx.head,
       flags_json: &ctx.flags_json,
       base_prefix: &ctx.base,
@@ -107,11 +108,11 @@ pub(crate) async fn arg_template_candidates(
       fetch_arg_candidates_any(conn, &global_query, &like, now, recency_half_life).await?;
   }
 
-  let has_positional = !(repo_positional.is_empty() && global_positional.is_empty());
+  let has_positional = !(workspace_positional.is_empty() && global_positional.is_empty());
   if has_positional {
     let mut merged: HashMap<String, Suggestion> = HashMap::new();
     scale_suggestions(&mut global_positional, 0.75);
-    for list in [repo_positional, global_positional] {
+    for list in [workspace_positional, global_positional] {
       for suggestion in list {
         match merged.get(&suggestion.command) {
           Some(existing) if existing.score >= suggestion.score => {}
@@ -122,12 +123,12 @@ pub(crate) async fn arg_template_candidates(
       }
     }
     Ok(Some(merged.into_values().collect()))
-  } else if repo_any.is_empty() && global_any.is_empty() {
+  } else if workspace_any.is_empty() && global_any.is_empty() {
     Ok(None)
   } else {
     let mut merged: HashMap<String, Suggestion> = HashMap::new();
     scale_suggestions(&mut global_any, 0.75);
-    for suggestion in repo_any.into_iter().chain(global_any.into_iter()) {
+    for suggestion in workspace_any.into_iter().chain(global_any.into_iter()) {
       match merged.get(&suggestion.command) {
         Some(existing) if existing.score >= suggestion.score => {}
         _ => {
@@ -142,12 +143,12 @@ pub(crate) async fn arg_template_candidates(
 pub(crate) async fn env_template_candidates(
   conn: &Connection,
   prefix: &str,
-  repo_root: &str,
+  workspace_root: &str,
   token_priors: &HashMap<String, f64>,
   now: i64,
   recency_half_life: f64,
 ) -> Result<Option<Vec<Suggestion>>> {
-  let ctx = match analyze_env_prefix(prefix, repo_root) {
+  let ctx = match analyze_env_prefix(prefix, workspace_root) {
     Some(ctx) => ctx,
     None => return Ok(None),
   };
@@ -158,10 +159,10 @@ pub(crate) async fn env_template_candidates(
     .map(|p| format!("{p}%"))
     .unwrap_or_else(|| "%".to_string());
 
-  let repo_env = if ctx.match_on_key {
+  let workspace_env = if ctx.match_on_key {
     fetch_env_key_candidates(
       conn,
-      &ctx.repo_root,
+      &ctx.workspace_root,
       &like,
       &ctx.base,
       now,
@@ -171,7 +172,7 @@ pub(crate) async fn env_template_candidates(
   } else {
     fetch_env_candidates(
       conn,
-      &ctx.repo_root,
+      &ctx.workspace_root,
       &like,
       &ctx.base,
       token_priors,
@@ -182,7 +183,7 @@ pub(crate) async fn env_template_candidates(
   };
 
   let mut global_env = Vec::new();
-  if !ctx.repo_root.is_empty() {
+  if !ctx.workspace_root.is_empty() {
     global_env = if ctx.match_on_key {
       fetch_env_key_candidates(conn, "", &like, &ctx.base, now, recency_half_life).await?
     } else {
@@ -199,12 +200,12 @@ pub(crate) async fn env_template_candidates(
     };
   }
 
-  if repo_env.is_empty() && global_env.is_empty() {
+  if workspace_env.is_empty() && global_env.is_empty() {
     Ok(None)
   } else {
     let mut merged: HashMap<String, Suggestion> = HashMap::new();
     scale_suggestions(&mut global_env, 0.75);
-    for suggestion in repo_env.into_iter().chain(global_env.into_iter()) {
+    for suggestion in workspace_env.into_iter().chain(global_env.into_iter()) {
       match merged.get(&suggestion.command) {
         Some(existing) if existing.score >= suggestion.score => {}
         _ => {
@@ -231,8 +232,8 @@ async fn flag_candidates(
 
   let exclude: HashSet<String> = ctx.flags.iter().cloned().collect();
 
-  let repo_context = FlagCandidateContext {
-    repo_root: &ctx.repo_root,
+  let workspace_context = FlagCandidateContext {
+    workspace_root: &ctx.workspace_root,
     head: &ctx.head,
     like: &like,
     base_prefix: &ctx.base,
@@ -241,12 +242,12 @@ async fn flag_candidates(
     now,
     recency_half_life,
   };
-  let mut repo_flags = fetch_flag_candidates(conn, &repo_context).await?;
+  let mut workspace_flags = fetch_flag_candidates(conn, &workspace_context).await?;
 
   let mut global_flags = Vec::new();
-  if !ctx.repo_root.is_empty() {
+  if !ctx.workspace_root.is_empty() {
     let global_context = FlagCandidateContext {
-      repo_root: "",
+      workspace_root: "",
       head: &ctx.head,
       like: &like,
       base_prefix: &ctx.base,
@@ -266,22 +267,22 @@ async fn flag_candidates(
         .map(|flag| flag.starts_with("--"))
         .unwrap_or(false)
     };
-    let has_short_flag = repo_flags
+    let has_short_flag = workspace_flags
       .iter()
       .chain(global_flags.iter())
       .any(|suggestion| !is_long_flag(&suggestion.command));
     if has_short_flag {
-      repo_flags.retain(|suggestion| !is_long_flag(&suggestion.command));
+      workspace_flags.retain(|suggestion| !is_long_flag(&suggestion.command));
       global_flags.retain(|suggestion| !is_long_flag(&suggestion.command));
     }
   }
 
-  if repo_flags.is_empty() && global_flags.is_empty() {
+  if workspace_flags.is_empty() && global_flags.is_empty() {
     Ok(None)
   } else {
     let mut merged: HashMap<String, Suggestion> = HashMap::new();
     scale_suggestions(&mut global_flags, 0.75);
-    for suggestion in repo_flags.into_iter().chain(global_flags.into_iter()) {
+    for suggestion in workspace_flags.into_iter().chain(global_flags.into_iter()) {
       match merged.get(&suggestion.command) {
         Some(existing) if existing.score >= suggestion.score => {}
         _ => {
@@ -305,10 +306,10 @@ async fn fetch_arg_candidates(
     conn,
     "SELECT arg_raw, arg_norm, freq, last_seen
      FROM arg_stats
-     WHERE repo_root = ? AND command_head = ? AND flags_json = ? AND arg_index = ? AND arg_raw LIKE ?
+     WHERE workspace_root = ? AND command_head = ? AND flags_json = ? AND arg_index = ? AND arg_raw LIKE ?
      ORDER BY freq DESC, last_seen DESC
      LIMIT 50",
-    libsql::params![query.repo_root, query.head, query.flags_json, arg_index, like],
+    libsql::params![query.workspace_root, query.head, query.flags_json, arg_index, like],
   )
   .await?;
 
@@ -322,7 +323,11 @@ async fn fetch_arg_candidates(
     let recency = recency_score(now, last_seen, recency_half_life);
     let frequency = (freq as f64).ln_1p();
     let token_prior = query.token_priors.get(&arg_norm).copied().unwrap_or(0.0);
-    let context = if query.repo_root.is_empty() { 0.0 } else { 1.0 };
+    let context = if query.workspace_root.is_empty() {
+      0.0
+    } else {
+      1.0
+    };
     let score = 0.45 * recency + 0.3 * frequency + 0.2 * token_prior + 0.05 * context;
 
     let mut base = query.base_prefix.to_string();
@@ -348,6 +353,7 @@ async fn fetch_arg_candidates(
         context,
         sequence: token_prior,
         similarity: 0.0,
+        embedding_retrieval: 0.0,
         online_model: 0.0,
       },
     });
@@ -367,10 +373,10 @@ async fn fetch_arg_candidates_any(
     conn,
     "SELECT arg_raw, arg_norm, freq, last_seen
      FROM arg_stats_any
-     WHERE repo_root = ? AND command_head = ? AND flags_json = ? AND arg_raw LIKE ?
+     WHERE workspace_root = ? AND command_head = ? AND flags_json = ? AND arg_raw LIKE ?
      ORDER BY freq DESC, last_seen DESC
      LIMIT 50",
-    libsql::params![query.repo_root, query.head, query.flags_json, like],
+    libsql::params![query.workspace_root, query.head, query.flags_json, like],
   )
   .await?;
 
@@ -384,7 +390,11 @@ async fn fetch_arg_candidates_any(
     let recency = recency_score(now, last_seen, recency_half_life);
     let frequency = (freq as f64).ln_1p();
     let token_prior = query.token_priors.get(&arg_norm).copied().unwrap_or(0.0);
-    let context = if query.repo_root.is_empty() { 0.0 } else { 1.0 };
+    let context = if query.workspace_root.is_empty() {
+      0.0
+    } else {
+      1.0
+    };
     let score = 0.4 * recency + 0.3 * frequency + 0.25 * token_prior + 0.05 * context;
 
     let mut base = query.base_prefix.to_string();
@@ -410,6 +420,7 @@ async fn fetch_arg_candidates_any(
         context,
         sequence: token_prior,
         similarity: 0.0,
+        embedding_retrieval: 0.0,
         online_model: 0.0,
       },
     });
@@ -420,14 +431,14 @@ async fn fetch_arg_candidates_any(
 
 async fn fetch_env_candidates(
   conn: &Connection,
-  repo_root: &str,
+  workspace_root: &str,
   like: &str,
   base_prefix: &str,
   token_priors: &HashMap<String, f64>,
   now: i64,
   recency_half_life: f64,
 ) -> Result<Vec<Suggestion>> {
-  let (sql, params): (&str, Vec<Value>) = if repo_root.is_empty() {
+  let (sql, params): (&str, Vec<Value>) = if workspace_root.is_empty() {
     (
       "SELECT env_raw, env_norm, freq, last_seen
        FROM env_stats
@@ -440,11 +451,11 @@ async fn fetch_env_candidates(
     (
       "SELECT env_raw, env_norm, freq, last_seen
        FROM env_stats
-       WHERE repo_root = ? AND env_raw LIKE ?
+       WHERE workspace_root = ? AND env_raw LIKE ?
        ORDER BY freq DESC, last_seen DESC
        LIMIT 50",
       vec![
-        Value::from(repo_root.to_string()),
+        Value::from(workspace_root.to_string()),
         Value::from(like.to_string()),
       ],
     )
@@ -462,7 +473,7 @@ async fn fetch_env_candidates(
     let recency = recency_score(now, last_seen, recency_half_life);
     let frequency = (freq as f64).ln_1p();
     let token_prior = token_priors.get(&env_norm).copied().unwrap_or(0.0);
-    let context = if repo_root.is_empty() { 0.0 } else { 1.0 };
+    let context = if workspace_root.is_empty() { 0.0 } else { 1.0 };
     let score = 0.45 * recency + 0.3 * frequency + 0.2 * token_prior + 0.05 * context;
 
     let mut base = base_prefix.to_string();
@@ -488,6 +499,7 @@ async fn fetch_env_candidates(
         context,
         sequence: token_prior,
         similarity: 0.0,
+        embedding_retrieval: 0.0,
         online_model: 0.0,
       },
     });
@@ -498,13 +510,13 @@ async fn fetch_env_candidates(
 
 async fn fetch_env_key_candidates(
   conn: &Connection,
-  repo_root: &str,
+  workspace_root: &str,
   like: &str,
   base_prefix: &str,
   now: i64,
   recency_half_life: f64,
 ) -> Result<Vec<Suggestion>> {
-  let (sql, params): (&str, Vec<Value>) = if repo_root.is_empty() {
+  let (sql, params): (&str, Vec<Value>) = if workspace_root.is_empty() {
     (
       "SELECT env_key, SUM(freq) as freq, MAX(last_seen) as last_seen
        FROM env_stats
@@ -518,12 +530,12 @@ async fn fetch_env_key_candidates(
     (
       "SELECT env_key, SUM(freq) as freq, MAX(last_seen) as last_seen
        FROM env_stats
-       WHERE repo_root = ? AND env_key LIKE ?
+       WHERE workspace_root = ? AND env_key LIKE ?
        GROUP BY env_key
        ORDER BY freq DESC, last_seen DESC
        LIMIT 50",
       vec![
-        Value::from(repo_root.to_string()),
+        Value::from(workspace_root.to_string()),
         Value::from(like.to_string()),
       ],
     )
@@ -539,7 +551,7 @@ async fn fetch_env_key_candidates(
 
     let recency = recency_score(now, last_seen, recency_half_life);
     let frequency = (freq as f64).ln_1p();
-    let context = if repo_root.is_empty() { 0.0 } else { 1.0 };
+    let context = if workspace_root.is_empty() { 0.0 } else { 1.0 };
     let score = 0.55 * recency + 0.35 * frequency + 0.1 * context;
 
     let mut base = base_prefix.to_string();
@@ -565,6 +577,7 @@ async fn fetch_env_key_candidates(
         context,
         sequence: 0.0,
         similarity: 0.0,
+        embedding_retrieval: 0.0,
         online_model: 0.0,
       },
     });
@@ -574,7 +587,7 @@ async fn fetch_env_key_candidates(
 }
 
 struct FlagCandidateContext<'a> {
-  repo_root: &'a str,
+  workspace_root: &'a str,
   head: &'a str,
   like: &'a str,
   base_prefix: &'a str,
@@ -592,10 +605,10 @@ async fn fetch_flag_candidates(
     conn,
     "SELECT flag_raw, flag_norm, freq, last_seen
      FROM flag_stats
-     WHERE repo_root = ? AND command_head = ? AND flag_raw LIKE ?
+     WHERE workspace_root = ? AND command_head = ? AND flag_raw LIKE ?
      ORDER BY freq DESC, last_seen DESC
      LIMIT 50",
-    libsql::params![context.repo_root, context.head, context.like],
+    libsql::params![context.workspace_root, context.head, context.like],
   )
   .await?;
 
@@ -612,7 +625,7 @@ async fn fetch_flag_candidates(
     let recency = recency_score(context.now, last_seen, context.recency_half_life);
     let frequency = (freq as f64).ln_1p();
     let token_prior = context.token_priors.get(&flag_norm).copied().unwrap_or(0.0);
-    let context_score = if context.repo_root.is_empty() {
+    let context_score = if context.workspace_root.is_empty() {
       0.0
     } else {
       1.0
@@ -642,6 +655,7 @@ async fn fetch_flag_candidates(
         context: context_score,
         sequence: token_prior,
         similarity: 0.0,
+        embedding_retrieval: 0.0,
         online_model: 0.0,
       },
     });
@@ -650,12 +664,12 @@ async fn fetch_flag_candidates(
   Ok(results)
 }
 
-fn analyze_prefix(prefix: &str, repo_root: &str, shellname: &str) -> Option<PrefixContext> {
+fn analyze_prefix(prefix: &str, workspace_root: &str, shellname: &str) -> Option<PrefixContext> {
   let tokens = tokenize_index(shellname, prefix);
   if tokens.is_empty() {
     return None;
   }
-  let parts = extract_command_parts(prefix, &tokens)?;
+  let parts = extract_command_stats_parts(prefix, &tokens)?;
   let mut flags = parts.flags;
   flags.sort();
   let flags_json = serde_json::to_string(&flags).ok()?;
@@ -721,11 +735,11 @@ fn analyze_prefix(prefix: &str, repo_root: &str, shellname: &str) -> Option<Pref
     arg_index,
     partial,
     partial_is_flag,
-    repo_root: repo_root.to_string(),
+    workspace_root: workspace_root.to_string(),
   })
 }
 
-fn analyze_env_prefix(prefix: &str, repo_root: &str) -> Option<EnvPrefixContext> {
+fn analyze_env_prefix(prefix: &str, workspace_root: &str) -> Option<EnvPrefixContext> {
   let tokens = tokenize(prefix);
   if tokens.is_empty() {
     return None;
@@ -792,7 +806,7 @@ fn analyze_env_prefix(prefix: &str, repo_root: &str) -> Option<EnvPrefixContext>
   Some(EnvPrefixContext {
     base,
     partial,
-    repo_root: repo_root.to_string(),
+    workspace_root: workspace_root.to_string(),
     match_on_key,
   })
 }
@@ -943,7 +957,7 @@ mod tests {
 
     db.conn
       .execute(
-        "INSERT INTO arg_stats (repo_root, command_head, flags_json, arg_index, arg_raw, arg_norm, freq, last_seen)
+        "INSERT INTO arg_stats (workspace_root, command_head, flags_json, arg_index, arg_raw, arg_norm, freq, last_seen)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
         ("", "git", "[]", 0i64, "status", "status", 5i64, 10i64),
       )
@@ -951,7 +965,7 @@ mod tests {
       .unwrap();
     db.conn
       .execute(
-        "INSERT INTO arg_stats_any (repo_root, command_head, flags_json, arg_raw, arg_norm, freq, last_seen)
+        "INSERT INTO arg_stats_any (workspace_root, command_head, flags_json, arg_raw, arg_norm, freq, last_seen)
          VALUES (?, ?, ?, ?, ?, ?, ?)",
         ("", "git", "[]", "commit", "commit", 4i64, 9i64),
       )
@@ -985,7 +999,7 @@ mod tests {
 
     db.conn
       .execute(
-        "INSERT INTO arg_stats_any (repo_root, command_head, flags_json, arg_raw, arg_norm, freq, last_seen)
+        "INSERT INTO arg_stats_any (workspace_root, command_head, flags_json, arg_raw, arg_norm, freq, last_seen)
          VALUES (?, ?, ?, ?, ?, ?, ?)",
         ("", "git", "[]", "commit", "commit", 4i64, 9i64),
       )

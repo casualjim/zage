@@ -13,7 +13,6 @@ pub mod phase;
 pub mod predict;
 #[cfg(feature = "pprof")]
 mod profile;
-pub mod repo;
 pub mod sequence;
 pub mod server;
 pub mod service;

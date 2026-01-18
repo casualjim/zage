@@ -1,4 +1,4 @@
-use super::{Invocation, dedup_invocations, generate_import_session_id, get_hostname};
+use super::{Invocation, dedup_invocations, generate_import_session_id};
 use crate::Result;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
@@ -16,12 +16,8 @@ pub fn parse_history_file(
   let reader = BufReader::new(file);
   let mut invocations = Vec::new();
 
-  let username = username.unwrap_or_else(|| {
-    uzers::get_current_username()
-      .map(|v| v.to_string_lossy().into_owned())
-      .unwrap_or_else(|| "unknown".to_string())
-  });
-  let hostname = hostname.unwrap_or_else(get_hostname);
+  // For imports we should not "invent" identity info from the importer machine.
+  // If the caller wants hostname/username, they can pass them explicitly.
 
   let mut last_ts = None;
 
@@ -50,8 +46,8 @@ pub fn parse_history_file(
       expanded_command: String::new(),
       command,
       shellname: "bash".to_string(),
-      hostname: Some(hostname.clone()),
-      username: Some(username.clone()),
+      hostname: hostname.clone(),
+      username: username.clone(),
       start_unix_timestamp: last_ts,
       session_id,
       ..Default::default()

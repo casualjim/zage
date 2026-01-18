@@ -14,7 +14,7 @@ pub(crate) async fn add_transition_candidates(
   conn: &Connection,
   last_command: &str,
   last_exit_status: Option<i64>,
-  repo_root: &str,
+  workspace_root: &str,
   candidates: &mut HashMap<String, Candidate>,
 ) -> Result<()> {
   let normalized = normalize_command_whitespace(last_command);
@@ -24,12 +24,12 @@ pub(crate) async fn add_transition_candidates(
   }
 
   for last in variants {
-    if !repo_root.is_empty() {
+    if !workspace_root.is_empty() {
       let found = fetch_transition_candidates(
         conn,
         TransitionQuery::new(
-          "repo_transition_stats",
-          Some(repo_root),
+          "workspace_transition_stats",
+          Some(workspace_root),
           last,
           last_exit_status,
           true,
@@ -42,8 +42,8 @@ pub(crate) async fn add_transition_candidates(
         let _ = fetch_transition_candidates(
           conn,
           TransitionQuery::new(
-            "repo_transition_stats",
-            Some(repo_root),
+            "workspace_transition_stats",
+            Some(workspace_root),
             last,
             None,
             true,
@@ -82,28 +82,28 @@ pub(crate) async fn add_transition_candidates(
 
 struct TransitionQuery<'a> {
   table: &'a str,
-  repo_root: Option<&'a str>,
+  workspace_root: Option<&'a str>,
   last_command: &'a str,
   last_exit_status: Option<i64>,
-  is_repo: bool,
+  is_workspace: bool,
   status_specific: bool,
 }
 
 impl<'a> TransitionQuery<'a> {
   fn new(
     table: &'a str,
-    repo_root: Option<&'a str>,
+    workspace_root: Option<&'a str>,
     last_command: &'a str,
     last_exit_status: Option<i64>,
-    is_repo: bool,
+    is_workspace: bool,
     status_specific: bool,
   ) -> Self {
     Self {
       table,
-      repo_root,
+      workspace_root,
       last_command,
       last_exit_status,
-      is_repo,
+      is_workspace,
       status_specific,
     }
   }
@@ -124,9 +124,9 @@ async fn fetch_transition_candidates(
     sql.push_str(" AND prev_exit_status = ?");
     params.push(Value::from(status));
   }
-  if let Some(repo_root) = query.repo_root {
-    sql.push_str(" AND repo_root = ?");
-    params.push(Value::from(repo_root.to_string()));
+  if let Some(workspace_root) = query.workspace_root {
+    sql.push_str(" AND workspace_root = ?");
+    params.push(Value::from(workspace_root.to_string()));
   }
 
   sql.push_str(" ORDER BY freq DESC LIMIT 50");
@@ -140,8 +140,8 @@ async fn fetch_transition_candidates(
     let entry = candidates
       .entry(cmd.clone())
       .or_insert_with(|| Candidate::new(&cmd));
-    if query.is_repo {
-      entry.repo_transition_freq = entry.repo_transition_freq.max(freq);
+    if query.is_workspace {
+      entry.workspace_transition_freq = entry.workspace_transition_freq.max(freq);
     } else {
       entry.transition_freq = entry.transition_freq.max(freq);
     }
@@ -254,17 +254,17 @@ pub(crate) async fn add_session_candidates(
   Ok(())
 }
 
-pub(crate) async fn add_repo_candidates(
+pub(crate) async fn add_workspace_candidates(
   conn: &Connection,
-  repo_root: &str,
+  workspace_root: &str,
   candidates: &mut HashMap<String, Candidate>,
 ) -> Result<()> {
   let mut rows = query_prepared(
     conn,
-    "SELECT command, freq, last_seen FROM repo_command_stats
-     WHERE repo_root = ?
+    "SELECT command, freq, last_seen FROM workspace_command_stats
+     WHERE workspace_root = ?
      ORDER BY freq DESC LIMIT 50",
-    libsql::params![repo_root.to_string()],
+    libsql::params![workspace_root.to_string()],
   )
   .await?;
   while let Some(row) = rows.next().await? {
@@ -274,7 +274,7 @@ pub(crate) async fn add_repo_candidates(
     let entry = candidates
       .entry(cmd.clone())
       .or_insert_with(|| Candidate::new(&cmd));
-    entry.repo_freq = entry.repo_freq.max(freq);
+    entry.workspace_freq = entry.workspace_freq.max(freq);
     entry.last_seen = entry.last_seen.max(last_seen);
   }
   Ok(())
@@ -283,7 +283,7 @@ pub(crate) async fn add_repo_candidates(
 pub(crate) async fn add_phase_candidates(
   conn: &Connection,
   session_phase: Option<&PhaseSignal>,
-  repo_root: &str,
+  workspace_root: &str,
   candidates: &mut HashMap<String, Candidate>,
 ) -> Result<()> {
   let session_phase = match session_phase {
@@ -309,7 +309,7 @@ pub(crate) async fn add_phase_candidates(
     if !seen_heads.insert(head.clone()) {
       continue;
     }
-    add_head_candidates(conn, &[head], repo_root, candidates).await?;
+    add_head_candidates(conn, &[head], workspace_root, candidates).await?;
     for candidate in candidates.values_mut() {
       candidate.context_freq += (freq as f64 * session_phase.confidence) as i64;
       candidate.last_seen = candidate.last_seen.max(last_seen);
@@ -322,18 +322,18 @@ pub(crate) async fn add_phase_candidates(
 pub(crate) async fn add_head_candidates(
   conn: &Connection,
   recent_heads: &[String],
-  repo_root: &str,
+  workspace_root: &str,
   candidates: &mut HashMap<String, Candidate>,
 ) -> Result<()> {
   for head in recent_heads {
     let like = format!("{head} %");
-    if !repo_root.is_empty() {
+    if !workspace_root.is_empty() {
       let mut rows = query_prepared(
         conn,
-        "SELECT command, freq, last_seen FROM repo_command_stats
-         WHERE repo_root = ? AND (command = ? OR command LIKE ?)
+        "SELECT command, freq, last_seen FROM workspace_command_stats
+         WHERE workspace_root = ? AND (command = ? OR command LIKE ?)
          ORDER BY freq DESC LIMIT 20",
-        libsql::params![repo_root.to_string(), head.clone(), like.clone()],
+        libsql::params![workspace_root.to_string(), head.clone(), like.clone()],
       )
       .await?;
       while let Some(row) = rows.next().await? {
@@ -343,7 +343,7 @@ pub(crate) async fn add_head_candidates(
         let entry = candidates
           .entry(cmd.clone())
           .or_insert_with(|| Candidate::new(&cmd));
-        entry.repo_freq = entry.repo_freq.max(freq);
+        entry.workspace_freq = entry.workspace_freq.max(freq);
         entry.last_seen = entry.last_seen.max(last_seen);
       }
     }
@@ -425,7 +425,7 @@ pub(crate) async fn add_recent_candidates(
 
 pub(crate) async fn hydrate_candidate_stats(
   conn: &Connection,
-  repo_root: &str,
+  workspace_root: &str,
   candidates: &mut HashMap<String, Candidate>,
 ) -> Result<()> {
   if candidates.is_empty() {
@@ -464,7 +464,7 @@ pub(crate) async fn hydrate_candidate_stats(
     }
   }
 
-  if !repo_root.is_empty() {
+  if !workspace_root.is_empty() {
     for chunk in commands.chunks(chunk_size) {
       let mut placeholders = String::new();
       for idx in 0..chunk.len() {
@@ -474,12 +474,12 @@ pub(crate) async fn hydrate_candidate_stats(
         placeholders.push('?');
       }
       let sql = format!(
-        "SELECT command, freq, last_seen FROM repo_command_stats
-         WHERE repo_root = ? AND command IN ({})",
+        "SELECT command, freq, last_seen FROM workspace_command_stats
+         WHERE workspace_root = ? AND command IN ({})",
         placeholders
       );
       let mut params: Vec<Value> = Vec::with_capacity(chunk.len() + 1);
-      params.push(Value::from(repo_root.to_string()));
+      params.push(Value::from(workspace_root.to_string()));
       for cmd in chunk {
         params.push(Value::from(cmd.clone()));
       }
@@ -491,7 +491,7 @@ pub(crate) async fn hydrate_candidate_stats(
         let entry = candidates
           .entry(cmd.clone())
           .or_insert_with(|| Candidate::new(&cmd));
-        entry.repo_freq = entry.repo_freq.max(freq);
+        entry.workspace_freq = entry.workspace_freq.max(freq);
         entry.last_seen = entry.last_seen.max(last_seen);
       }
     }
@@ -529,7 +529,7 @@ struct TemplateStat {
 
 pub(crate) async fn add_template_candidates(
   conn: &Connection,
-  repo_root: &str,
+  workspace_root: &str,
   shellname: &str,
   candidates: &mut HashMap<String, Candidate>,
 ) -> Result<()> {
@@ -545,9 +545,9 @@ pub(crate) async fn add_template_candidates(
 
   let mut added = 0usize;
   for head in heads {
-    let (flags, flags_repo) = fetch_template_flags(conn, repo_root, &head, 3).await?;
-    let (args0, args0_repo) = fetch_template_args(conn, repo_root, &head, 0, 3).await?;
-    let (args1, args1_repo) = fetch_template_args(conn, repo_root, &head, 1, 2).await?;
+    let (flags, flags_workspace) = fetch_template_flags(conn, workspace_root, &head, 3).await?;
+    let (args0, args0_workspace) = fetch_template_args(conn, workspace_root, &head, 0, 3).await?;
+    let (args1, args1_workspace) = fetch_template_args(conn, workspace_root, &head, 1, 2).await?;
 
     let mut base = head.clone();
     let mut flags_freq = 0i64;
@@ -565,7 +565,13 @@ pub(crate) async fn add_template_candidates(
         flags_freq += stat.freq;
         flags_last_seen = flags_last_seen.max(stat.last_seen);
       }
-      add_template_candidate(candidates, &base, flags_freq, flags_last_seen, flags_repo);
+      add_template_candidate(
+        candidates,
+        &base,
+        flags_freq,
+        flags_last_seen,
+        flags_workspace,
+      );
     }
 
     for arg0 in &args0 {
@@ -576,7 +582,13 @@ pub(crate) async fn add_template_candidates(
       cmd.push_str(&arg0.value);
       let freq = flags_freq + arg0.freq;
       let last_seen = flags_last_seen.max(arg0.last_seen);
-      add_template_candidate(candidates, &cmd, freq, last_seen, flags_repo || args0_repo);
+      add_template_candidate(
+        candidates,
+        &cmd,
+        freq,
+        last_seen,
+        flags_workspace || args0_workspace,
+      );
 
       for arg1 in &args1 {
         let mut cmd = cmd.clone();
@@ -589,7 +601,7 @@ pub(crate) async fn add_template_candidates(
           &cmd,
           freq,
           last_seen,
-          flags_repo || args0_repo || args1_repo,
+          flags_workspace || args0_workspace || args1_workspace,
         );
         added += 1;
         if added > 50 {
@@ -607,14 +619,14 @@ fn add_template_candidate(
   command: &str,
   freq: i64,
   last_seen: i64,
-  is_repo: bool,
+  is_workspace: bool,
 ) {
   if candidates.contains_key(command) {
     return;
   }
   let mut entry = Candidate::new(command);
-  if is_repo {
-    entry.repo_freq = freq;
+  if is_workspace {
+    entry.workspace_freq = freq;
   } else {
     entry.freq = freq;
   }
@@ -624,13 +636,13 @@ fn add_template_candidate(
 
 async fn fetch_template_flags(
   conn: &Connection,
-  repo_root: &str,
+  workspace_root: &str,
   head: &str,
   limit: usize,
 ) -> Result<(Vec<TemplateStat>, bool)> {
-  let repo_flags = fetch_flag_stats(conn, repo_root, head, limit).await?;
-  if !repo_flags.is_empty() {
-    return Ok((repo_flags, true));
+  let workspace_flags = fetch_flag_stats(conn, workspace_root, head, limit).await?;
+  if !workspace_flags.is_empty() {
+    return Ok((workspace_flags, true));
   }
   let global_flags = fetch_flag_stats(conn, "", head, limit).await?;
   Ok((global_flags, false))
@@ -638,16 +650,16 @@ async fn fetch_template_flags(
 
 async fn fetch_flag_stats(
   conn: &Connection,
-  repo_root: &str,
+  workspace_root: &str,
   head: &str,
   limit: usize,
 ) -> Result<Vec<TemplateStat>> {
   let mut rows = query_prepared(
     conn,
     "SELECT flag_raw, freq, last_seen FROM flag_stats
-     WHERE repo_root = ? AND command_head = ?
+     WHERE workspace_root = ? AND command_head = ?
      ORDER BY freq DESC LIMIT ?",
-    libsql::params![repo_root.to_string(), head.to_string(), limit as i64],
+    libsql::params![workspace_root.to_string(), head.to_string(), limit as i64],
   )
   .await?;
   let mut stats = Vec::new();
@@ -663,22 +675,22 @@ async fn fetch_flag_stats(
 
 async fn fetch_template_args(
   conn: &Connection,
-  repo_root: &str,
+  workspace_root: &str,
   head: &str,
   index: i64,
   limit: usize,
 ) -> Result<(Vec<TemplateStat>, bool)> {
-  let repo_args = fetch_arg_stats(conn, repo_root, head, index, limit).await?;
-  if !repo_args.is_empty() {
-    return Ok((repo_args, true));
+  let workspace_args = fetch_arg_stats(conn, workspace_root, head, index, limit).await?;
+  if !workspace_args.is_empty() {
+    return Ok((workspace_args, true));
   }
   let global_args = fetch_arg_stats(conn, "", head, index, limit).await?;
   if !global_args.is_empty() {
     return Ok((global_args, false));
   }
-  let repo_any = fetch_arg_stats_any(conn, repo_root, head, limit).await?;
-  if !repo_any.is_empty() {
-    return Ok((repo_any, true));
+  let workspace_any = fetch_arg_stats_any(conn, workspace_root, head, limit).await?;
+  if !workspace_any.is_empty() {
+    return Ok((workspace_any, true));
   }
   let global_any = fetch_arg_stats_any(conn, "", head, limit).await?;
   Ok((global_any, false))
@@ -686,7 +698,7 @@ async fn fetch_template_args(
 
 async fn fetch_arg_stats(
   conn: &Connection,
-  repo_root: &str,
+  workspace_root: &str,
   head: &str,
   index: i64,
   limit: usize,
@@ -694,9 +706,14 @@ async fn fetch_arg_stats(
   let mut rows = query_prepared(
     conn,
     "SELECT arg_raw, freq, last_seen FROM arg_stats
-     WHERE repo_root = ? AND command_head = ? AND arg_index = ?
+     WHERE workspace_root = ? AND command_head = ? AND arg_index = ?
      ORDER BY freq DESC LIMIT ?",
-    libsql::params![repo_root.to_string(), head.to_string(), index, limit as i64],
+    libsql::params![
+      workspace_root.to_string(),
+      head.to_string(),
+      index,
+      limit as i64
+    ],
   )
   .await?;
   let mut stats = Vec::new();
@@ -712,16 +729,16 @@ async fn fetch_arg_stats(
 
 async fn fetch_arg_stats_any(
   conn: &Connection,
-  repo_root: &str,
+  workspace_root: &str,
   head: &str,
   limit: usize,
 ) -> Result<Vec<TemplateStat>> {
   let mut rows = query_prepared(
     conn,
     "SELECT arg_raw, freq, last_seen FROM arg_stats_any
-     WHERE repo_root = ? AND command_head = ?
+     WHERE workspace_root = ? AND command_head = ?
      ORDER BY freq DESC LIMIT ?",
-    libsql::params![repo_root.to_string(), head.to_string(), limit as i64],
+    libsql::params![workspace_root.to_string(), head.to_string(), limit as i64],
   )
   .await?;
   let mut stats = Vec::new();

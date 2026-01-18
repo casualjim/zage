@@ -54,10 +54,11 @@ async fn model_status_embedded(db: &Db) -> Result<()> {
     status.replay_global, status.replay_workspace, replay_workspaces
   );
   eprintln!(
-    "Tables: meta={}, token_embeddings={}, command_biases={}, head_biases={}, group_scalars={}, feedback={}",
+    "Tables: meta={}, token_embeddings={}, command_biases={}, context_biases={}, head_biases={}, group_scalars={}, feedback={}",
     status.meta_entries,
     status.token_embeddings,
     status.command_biases,
+    status.context_biases,
     status.head_biases,
     status.group_scalars,
     status.feedback

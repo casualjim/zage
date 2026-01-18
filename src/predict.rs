@@ -1,16 +1,21 @@
 use std::collections::{HashMap, HashSet};
 
 use libsql::{Connection, Value};
+use serde::{Deserialize, Serialize};
 
 use crate::Result;
-use crate::config::{OnlineModelBlendConfig, OnlineModelBlendMode, OnlineModelConfig};
+use crate::config::{OnlineModelBlendConfig, OnlineModelConfig};
 use crate::core::{Candidate, SystemTimeProvider, TimeProvider};
 pub use crate::core::{ScoreBreakdown, Suggestion};
-use crate::db::{get_recent_invocations, online_model_status};
+use crate::db::{
+  OnlineFeedbackEvent, get_recent_invocations, online_model_meta_set, online_model_meta_value,
+  online_model_status,
+};
 use crate::err::ZageError;
-use crate::online_model::trainer::{OnlineScoreContext, score_commands as online_score_commands};
+use crate::online_model::trainer::{
+  OnlineScoreContext, context_embedding_for_retrieval, score_commands as online_score_commands,
+};
 use crate::phase::PhaseConfig;
-use crate::repo::find_repo_root;
 use crate::shell_history::{Invocation, normalize_shellname};
 use crate::tokenize::{TokenKind, extract_command_parts, normalized_tokens, tokenize_index};
 pub use config::{RankingWeights, SuggestConfig};
@@ -31,8 +36,8 @@ use aliases::{
 };
 use candidates::{
   add_context_candidates, add_global_candidates, add_head_candidates, add_phase_candidates,
-  add_recent_candidates, add_repo_candidates, add_sequence_candidates, add_session_candidates,
-  add_template_candidates, add_transition_candidates, hydrate_candidate_stats, load_session_stats,
+  add_recent_candidates, add_sequence_candidates, add_session_candidates, add_template_candidates,
+  add_transition_candidates, add_workspace_candidates, hydrate_candidate_stats, load_session_stats,
   push_opt_i64, push_opt_string,
 };
 use phase_support::{
@@ -52,7 +57,7 @@ const GLOBAL_CANDIDATE_LIMIT: usize = 50;
 const RECENT_CANDIDATE_LIMIT: usize = 200;
 const EMBEDDING_CANDIDATE_LIMIT: usize = 150;
 const FULL_LINE_POOL_LIMIT: usize = 50;
-const CONTEXT_REPO_WEIGHT: f64 = 1.4;
+const CONTEXT_WORKSPACE_WEIGHT: f64 = 1.4;
 const CONTEXT_CWD_WEIGHT: f64 = 1.1;
 const CONTEXT_EXIT_WEIGHT: f64 = 0.9;
 const CONTEXT_HOST_WEIGHT: f64 = 0.2;
@@ -61,6 +66,39 @@ const CONTEXT_TIME_WEIGHT: f64 = 0.05;
 const CONTEXT_SESSION_WEIGHT: f64 = 0.03;
 const CONTEXT_SESSION_MISS_PENALTY: f64 = 0.6;
 const CONTEXT_SESSION_BOOST: f64 = 0.5;
+const BLEND_META_KEY: &str = "online_blend_weights_v1";
+const BLEND_MIN_WEIGHT: f64 = 0.0;
+const BLEND_MAX_WEIGHT: f64 = 5.0;
+const BLEND_LR: f64 = 0.05;
+const BLEND_L2: f64 = 0.01;
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct BlendWeights {
+  model: f64,
+  frecency: f64,
+  sequence: f64,
+  tier1: f64,
+}
+
+impl BlendWeights {
+  fn defaults() -> Self {
+    Self {
+      model: 0.1,
+      frecency: 0.5,
+      sequence: 1.0,
+      tier1: 1.0,
+    }
+  }
+
+  fn clamp(self) -> Self {
+    Self {
+      model: self.model.clamp(BLEND_MIN_WEIGHT, BLEND_MAX_WEIGHT),
+      frecency: self.frecency.clamp(BLEND_MIN_WEIGHT, BLEND_MAX_WEIGHT),
+      sequence: self.sequence.clamp(BLEND_MIN_WEIGHT, BLEND_MAX_WEIGHT),
+      tier1: self.tier1.clamp(BLEND_MIN_WEIGHT, BLEND_MAX_WEIGHT),
+    }
+  }
+}
 
 fn expanded_command_for(
   invocation: &crate::shell_history::Invocation,
@@ -200,6 +238,18 @@ fn resolve_shellname(config: &SuggestConfig) -> Result<String> {
   Ok(normalized)
 }
 
+fn resolve_workspace_root(cwd: Option<&str>) -> String {
+  let Some(cwd) = cwd else {
+    return String::new();
+  };
+  if let Ok(Some(info)) = crate::workspace::detect_workspace_for_cwd(cwd)
+    && !info.root.trim().is_empty()
+  {
+    return info.root.trim_end_matches('/').to_string();
+  }
+  String::new()
+}
+
 async fn load_recent_invocations(
   conn: &Connection,
   config: &SuggestConfig,
@@ -226,6 +276,7 @@ pub async fn suggest_with_aliases(
     weights: RankingWeights::default(),
     recency_half_life: DEFAULT_RECENCY_HALF_LIFE_SECONDS,
     now: time_provider.now(),
+    phase_config: None,
   };
   suggest_with_runtime(conn, config, &runtime, None).await
 }
@@ -246,12 +297,12 @@ pub(crate) async fn suggest_with_runtime(
 
   let aliases = &runtime.aliases;
   let Some(context) =
-    build_pipeline_context(conn, &config, override_prev.as_ref(), aliases).await?
+    build_pipeline_context(conn, &config, runtime, override_prev.as_ref(), aliases).await?
   else {
     return Ok(Vec::new());
   };
 
-  let collected = collect_candidates(conn, &config, &context, aliases).await?;
+  let collected = collect_candidates(conn, &config, &context, aliases, runtime.now).await?;
   let feature_args = FeatureMatrixArgs {
     conn,
     context: &context,
@@ -283,7 +334,7 @@ struct PipelineContext {
   recent_heads: Vec<String>,
   last_command: Option<String>,
   last_exit_status: Option<i64>,
-  repo_root: String,
+  workspace_root: String,
   shellname: String,
   phase_config: Option<PhaseConfig>,
   session_phase: Option<PhaseSignal>,
@@ -296,6 +347,7 @@ struct CollectedCandidates {
 async fn build_pipeline_context(
   conn: &Connection,
   config: &SuggestConfig,
+  runtime: &SuggestRuntime,
   override_prev: Option<&(String, Option<i64>)>,
   aliases: &HashMap<String, String>,
 ) -> Result<Option<PipelineContext>> {
@@ -328,15 +380,15 @@ async fn build_pipeline_context(
     .map(|(_, exit)| *exit)
     .unwrap_or_else(|| recent.last().and_then(|inv| inv.exit_status));
   let shellname = resolve_shellname(config)?;
-  let repo_root = config
-    .cwd
-    .as_deref()
-    .and_then(find_repo_root)
-    .unwrap_or_default();
+  let workspace_root = resolve_workspace_root(config.cwd.as_deref());
 
   let recent_head_set: HashSet<String> = recent_heads.iter().cloned().collect();
   let phase_for_recent = load_phase_for_heads(conn, &recent_head_set).await?;
-  let phase_config = PhaseConfig::load()?;
+  let phase_config = if let Some(override_config) = runtime.phase_config.as_ref() {
+    override_config.clone()
+  } else {
+    PhaseConfig::load()?
+  };
   let phase_config = if phase_config.labels().len() > 1 {
     Some(phase_config)
   } else {
@@ -352,7 +404,7 @@ async fn build_pipeline_context(
     recent_heads,
     last_command,
     last_exit_status,
-    repo_root,
+    workspace_root,
     shellname,
     phase_config,
     session_phase,
@@ -364,6 +416,7 @@ async fn collect_candidates(
   config: &SuggestConfig,
   context: &PipelineContext,
   aliases: &HashMap<String, String>,
+  now: i64,
 ) -> Result<CollectedCandidates> {
   let mut candidates: HashMap<String, Candidate> = HashMap::new();
 
@@ -372,7 +425,7 @@ async fn collect_candidates(
       conn,
       last,
       context.last_exit_status,
-      &context.repo_root,
+      &context.workspace_root,
       &mut candidates,
     )
     .await?;
@@ -382,65 +435,89 @@ async fn collect_candidates(
     add_session_candidates(conn, session_id, &mut candidates).await?;
   }
 
-  let mut query = crate::embeddings::mean_embedding_for_commands(
-    conn,
-    &context.sequence_commands,
-    config.recent_limit,
-  )
-  .await?;
-
-  if query.is_none() {
-    let embedding_dim = crate::embeddings::command_embedding_dim(conn)
-      .await?
-      .unwrap_or(0);
-    if embedding_dim > 0 {
-      let workspace_root = (!context.repo_root.is_empty()).then_some(context.repo_root.as_str());
-      query = Some(crate::embeddings::embed_context_hash(
-        crate::embeddings::EmbedContextInput {
-          workspace_root,
-          cwd: config.cwd.as_deref(),
-          hostname: config.hostname.as_deref(),
-          username: config.username.as_deref(),
-          exit_status: context.last_exit_status,
-          session_id: config.session_id,
-          shellname: context.shellname.as_str(),
-          recent_commands: &context.sequence_commands,
-          window: config.recent_limit,
-        },
-        embedding_dim,
-      ));
-    }
-  }
-
-  if let Some(query) = query {
-    let similar =
-      crate::embeddings::search_similar_commands(conn, &query, EMBEDDING_CANDIDATE_LIMIT).await?;
-    for cmd in similar {
-      let _ = candidates
-        .entry(cmd.clone())
-        .or_insert_with(|| Candidate::new(&cmd));
+  let online_cfg = OnlineModelConfig::load()?;
+  let online_status = online_model_status(conn).await?;
+  let warmed_up = online_status.token_embeddings > 0 || online_status.group_scalars > 0;
+  if warmed_up {
+    let query = context_embedding_for_retrieval(
+      conn,
+      OnlineScoreContext {
+        shellname: context.shellname.as_str(),
+        workspace_root: context.workspace_root.as_str(),
+        cwd: config.cwd.as_deref(),
+        hostname: config.hostname.as_deref(),
+        username: config.username.as_deref(),
+        phase: context
+          .session_phase
+          .as_ref()
+          .map(|phase| phase.phase.as_str()),
+        exit_status: context.last_exit_status,
+        session_id: config.session_id,
+        unix_timestamp: now,
+        recent_commands: &context.sequence_commands,
+        window: online_cfg.window,
+      },
+      &online_cfg,
+    )
+    .await?;
+    if let Some(query) = query {
+      let similar =
+        crate::embeddings::search_similar_commands(conn, &query, EMBEDDING_CANDIDATE_LIMIT).await?;
+      if !similar.is_empty() {
+        let model_scores = online_score_commands(
+          conn,
+          OnlineScoreContext {
+            shellname: context.shellname.as_str(),
+            workspace_root: context.workspace_root.as_str(),
+            cwd: config.cwd.as_deref(),
+            hostname: config.hostname.as_deref(),
+            username: config.username.as_deref(),
+            phase: context
+              .session_phase
+              .as_ref()
+              .map(|phase| phase.phase.as_str()),
+            exit_status: context.last_exit_status,
+            session_id: config.session_id,
+            unix_timestamp: now,
+            recent_commands: &context.sequence_commands,
+            window: online_cfg.window,
+          },
+          &similar,
+          &online_cfg,
+        )
+        .await?;
+        let gate = online_model_gate(&model_scores, online_cfg.blend).unwrap_or(0.0);
+        if gate > 0.0 {
+          for cmd in similar {
+            let entry = candidates
+              .entry(cmd.clone())
+              .or_insert_with(|| Candidate::new(&cmd));
+            entry.from_embedding = true;
+          }
+        }
+      }
     }
   }
 
   add_phase_candidates(
     conn,
     context.session_phase.as_ref(),
-    &context.repo_root,
+    &context.workspace_root,
     &mut candidates,
   )
   .await?;
 
   add_context_candidates(conn, config, &mut candidates).await?;
 
-  if !context.repo_root.is_empty() {
-    add_repo_candidates(conn, &context.repo_root, &mut candidates).await?;
+  if !context.workspace_root.is_empty() {
+    add_workspace_candidates(conn, &context.workspace_root, &mut candidates).await?;
   }
 
   if !context.recent_heads.is_empty() {
     add_head_candidates(
       conn,
       &context.recent_heads,
-      &context.repo_root,
+      &context.workspace_root,
       &mut candidates,
     )
     .await?;
@@ -459,7 +536,7 @@ async fn collect_candidates(
   if !candidates.is_empty() {
     add_template_candidates(
       conn,
-      &context.repo_root,
+      &context.workspace_root,
       context.shellname.as_str(),
       &mut candidates,
     )
@@ -470,7 +547,7 @@ async fn collect_candidates(
     add_global_candidates(conn, &mut candidates, GLOBAL_CANDIDATE_LIMIT).await?;
     add_template_candidates(
       conn,
-      &context.repo_root,
+      &context.workspace_root,
       context.shellname.as_str(),
       &mut candidates,
     )
@@ -482,7 +559,7 @@ async fn collect_candidates(
     add_global_candidates(conn, &mut candidates, GLOBAL_CANDIDATE_LIMIT).await?;
     add_template_candidates(
       conn,
-      &context.repo_root,
+      &context.workspace_root,
       context.shellname.as_str(),
       &mut candidates,
     )
@@ -500,7 +577,7 @@ async fn collect_candidates(
   }
 
   if !candidates.is_empty() {
-    hydrate_candidate_stats(conn, &context.repo_root, &mut candidates).await?;
+    hydrate_candidate_stats(conn, &context.workspace_root, &mut candidates).await?;
   }
 
   if !aliases.is_empty() {
@@ -559,7 +636,7 @@ fn build_feature_matrix<'a>(args: &'a FeatureMatrixArgs<'a>) -> ScoreContext<'a>
     now: args.now,
     recency_half_life: args.recency_half_life,
     phase_config: args.context.phase_config.as_ref(),
-    repo_root: &args.context.repo_root,
+    workspace_root: &args.context.workspace_root,
   }
 }
 
@@ -607,7 +684,7 @@ struct ScoreContext<'a> {
   now: i64,
   recency_half_life: f64,
   phase_config: Option<&'a PhaseConfig>,
-  repo_root: &'a str,
+  workspace_root: &'a str,
 }
 
 fn time_bucket(ts: i64) -> u8 {
@@ -623,22 +700,54 @@ fn time_bucket(ts: i64) -> u8 {
   }
 }
 
-fn apply_online_model_blend(
-  suggestions: &mut [Suggestion],
-  model_scores: &[f32],
-  cfg: OnlineModelBlendConfig,
-) {
-  if cfg.alpha == 0.0 || suggestions.is_empty() {
-    return;
-  }
-  if suggestions.len() != model_scores.len() {
-    return;
+async fn load_blend_weights(conn: &Connection) -> Result<BlendWeights> {
+  let Some(raw) = online_model_meta_value(conn, BLEND_META_KEY).await? else {
+    return Ok(BlendWeights::defaults());
+  };
+  let weights = serde_json::from_str(&raw)
+    .map_err(|err| ZageError::ConfigError(format!("invalid online blend weights: {err}")))?;
+  Ok(weights)
+}
+
+async fn store_blend_weights(conn: &Connection, weights: &BlendWeights) -> Result<()> {
+  let json = serde_json::to_string(weights).map_err(|err| {
+    ZageError::ConfigError(format!("failed to encode online blend weights: {err}"))
+  })?;
+  online_model_meta_set(conn, BLEND_META_KEY, &json).await?;
+  Ok(())
+}
+
+fn sigmoid(value: f64) -> f64 {
+  1.0 / (1.0 + (-value).exp())
+}
+
+fn frecency_prior(weights: &RankingWeights, suggestion: &Suggestion) -> f64 {
+  weights.recency * suggestion.breakdown.recency
+    + weights.frequency * suggestion.breakdown.frequency
+    + 0.1 * suggestion.breakdown.session_recency
+}
+
+fn log_frecency_prior(value: f64) -> f64 {
+  if value > 0.0 { value.ln_1p() } else { 0.0 }
+}
+
+fn sequence_score(weights: &RankingWeights, suggestion: &Suggestion) -> f64 {
+  weights.sequence * suggestion.breakdown.sequence
+}
+
+fn tier1_score(weights: &RankingWeights, suggestion: &Suggestion) -> f64 {
+  weights.transition * suggestion.breakdown.transition
+    + weights.context * suggestion.breakdown.context
+    + weights.similarity * suggestion.breakdown.similarity
+}
+
+fn online_model_gate(model_scores: &[f32], cfg: OnlineModelBlendConfig) -> Option<f64> {
+  if model_scores.is_empty() {
+    return None;
   }
 
   let mut top1 = f32::NEG_INFINITY;
   let mut top2 = f32::NEG_INFINITY;
-  let mut min_model = f32::INFINITY;
-  let mut max_model = f32::NEG_INFINITY;
   for &score in model_scores {
     if !score.is_finite() {
       continue;
@@ -649,12 +758,10 @@ fn apply_online_model_blend(
     } else if score > top2 {
       top2 = score;
     }
-    min_model = min_model.min(score);
-    max_model = max_model.max(score);
   }
 
   if !top1.is_finite() {
-    return;
+    return None;
   }
 
   let gate = if (top1 as f64) < cfg.min_score_gate {
@@ -670,54 +777,7 @@ fn apply_online_model_blend(
     }
   };
 
-  if gate <= 0.0 {
-    return;
-  }
-
-  match cfg.mode {
-    OnlineModelBlendMode::Additive => {
-      for (idx, suggestion) in suggestions.iter_mut().enumerate() {
-        let model = model_scores[idx];
-        if !model.is_finite() {
-          continue;
-        }
-        let contrib = cfg.alpha * gate * (model as f64);
-        suggestion.score += contrib;
-        suggestion.breakdown.online_model = contrib;
-      }
-    }
-    OnlineModelBlendMode::Replace => {
-      let mut min_score = f64::INFINITY;
-      let mut max_score = f64::NEG_INFINITY;
-      for suggestion in suggestions.iter() {
-        if !suggestion.score.is_finite() {
-          continue;
-        }
-        min_score = min_score.min(suggestion.score);
-        max_score = max_score.max(suggestion.score);
-      }
-      if !min_score.is_finite() || !max_score.is_finite() {
-        return;
-      }
-
-      let alpha = (cfg.alpha * gate).clamp(0.0, 1.0);
-      let model_span = (max_model - min_model).max(1e-6);
-      let score_span = (max_score - min_score).max(1e-6);
-
-      for (idx, suggestion) in suggestions.iter_mut().enumerate() {
-        let model = model_scores[idx];
-        if !model.is_finite() {
-          continue;
-        }
-        let model_norm = ((model - min_model) / model_span) as f64;
-        let model_scaled = min_score + model_norm * score_span;
-        let blended = (1.0 - alpha) * suggestion.score + alpha * model_scaled;
-        let delta = blended - suggestion.score;
-        suggestion.score = blended;
-        suggestion.breakdown.online_model = delta;
-      }
-    }
-  }
+  Some(gate)
 }
 
 async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>> {
@@ -734,19 +794,19 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
   let mut scored: Vec<Suggestion> = Vec::new();
   for candidate in context.candidates.values() {
     let recency = recency_score(context.now, candidate.last_seen, context.recency_half_life);
-    let repo_weight = if !context.repo_root.is_empty() {
+    let workspace_weight = if !context.workspace_root.is_empty() {
       1.0
     } else {
       0.5
     };
-    let frequency =
-      (candidate.freq as f64).ln_1p() + repo_weight * (candidate.repo_freq as f64).ln_1p();
+    let frequency = (candidate.freq as f64).ln_1p()
+      + workspace_weight * (candidate.workspace_freq as f64).ln_1p();
     let mut transition = (candidate.transition_freq as f64).ln_1p()
-      + 0.7 * (candidate.repo_transition_freq as f64).ln_1p();
+      + 0.7 * (candidate.workspace_transition_freq as f64).ln_1p();
     if candidate.transition_exit_status_match {
       transition *= 1.3;
     }
-    let repo_context = (candidate.repo_freq as f64).ln_1p();
+    let workspace_context = (candidate.workspace_freq as f64).ln_1p();
     let cwd_context = if candidate.context_cwd_match {
       (candidate.context_freq as f64).ln_1p()
     } else {
@@ -774,7 +834,7 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
     };
     let session_context = (candidate.session_freq as f64).ln_1p();
 
-    let mut context_score = CONTEXT_REPO_WEIGHT * repo_context
+    let mut context_score = CONTEXT_WORKSPACE_WEIGHT * workspace_context
       + CONTEXT_CWD_WEIGHT * cwd_context
       + CONTEXT_EXIT_WEIGHT * exit_context
       + CONTEXT_HOST_WEIGHT * host_context
@@ -808,7 +868,7 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
     } else {
       0.0
     };
-    if !context.repo_root.is_empty() && candidate.repo_freq == 0 {
+    if !context.workspace_root.is_empty() && candidate.workspace_freq == 0 {
       sequence *= 0.5;
     }
     let similarity = if context.prefix_norm.is_empty() {
@@ -852,28 +912,34 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
         context: context_score,
         sequence,
         similarity,
+        embedding_retrieval: if candidate.from_embedding { 1.0 } else { 0.0 },
         online_model: 0.0,
       },
     });
   }
 
+  let weights = context.weights;
   let online_cfg = OnlineModelConfig::load()?;
   let online_status = online_model_status(context.conn).await?;
   let warmed_up = online_status.token_embeddings > 0 || online_status.group_scalars > 0;
+  let blend_weights = load_blend_weights(context.conn).await?;
   if warmed_up && !scored.is_empty() {
     let commands = scored
       .iter()
       .map(|suggestion| suggestion.command.clone())
       .collect::<Vec<_>>();
-    let blend = online_cfg.blend;
     let model_scores = online_score_commands(
       context.conn,
       OnlineScoreContext {
         shellname: context.shellname,
-        repo_root: context.repo_root,
+        workspace_root: context.workspace_root,
         cwd: context.cwd,
         hostname: context.hostname,
         username: context.username,
+        phase: context
+          .session_phase
+          .as_ref()
+          .map(|phase| phase.phase.as_str()),
         exit_status: context.exit_status,
         session_id: context.session_id,
         unix_timestamp: context.now,
@@ -884,75 +950,158 @@ async fn score_candidates(context: &ScoreContext<'_>) -> Result<Vec<Suggestion>>
       &online_cfg,
     )
     .await?;
-    apply_online_model_blend(&mut scored, &model_scores, blend);
-  }
-
-  let use_fallback_rank = !matches!(online_cfg.blend.mode, OnlineModelBlendMode::Replace);
-  let weights = context.weights;
-  if use_fallback_rank {
-    for suggestion in scored.iter_mut() {
-      let intelligent = weights.transition * suggestion.breakdown.transition
-        + weights.context * suggestion.breakdown.context
-        + weights.sequence * suggestion.breakdown.sequence
-        + weights.similarity * suggestion.breakdown.similarity
-        + suggestion.breakdown.online_model;
-      let frecency = weights.recency * suggestion.breakdown.recency
-        + weights.frequency * suggestion.breakdown.frequency
-        + 0.1 * suggestion.breakdown.session_recency;
-      let rank_score = if intelligent > 0.0 {
-        intelligent
-      } else {
-        frecency
-      };
-      if rank_score.is_finite() {
-        suggestion.score = rank_score;
+    if model_scores.len() == scored.len() {
+      let gate = online_model_gate(&model_scores, online_cfg.blend).unwrap_or(0.0);
+      let model_scale = online_cfg.blend.alpha * gate;
+      if model_scale > 0.0 {
+        for (idx, suggestion) in scored.iter_mut().enumerate() {
+          let model = model_scores[idx];
+          if model.is_finite() {
+            let model_feature = (model as f64).tanh();
+            suggestion.breakdown.online_model = model_feature * model_scale;
+          }
+        }
       }
     }
   }
 
-  let score_parts = |suggestion: &Suggestion| {
-    if use_fallback_rank {
-      let intelligent = weights.transition * suggestion.breakdown.transition
-        + weights.context * suggestion.breakdown.context
-        + weights.sequence * suggestion.breakdown.sequence
-        + weights.similarity * suggestion.breakdown.similarity
-        + suggestion.breakdown.online_model;
-      let frecency = weights.recency * suggestion.breakdown.recency
-        + weights.frequency * suggestion.breakdown.frequency
-        + 0.1 * suggestion.breakdown.session_recency;
-      (intelligent, frecency)
+  for suggestion in scored.iter_mut() {
+    let frecency = log_frecency_prior(frecency_prior(weights, suggestion));
+    let sequence = sequence_score(weights, suggestion);
+    let tier1 = tier1_score(weights, suggestion);
+    let base = blend_weights.model * suggestion.breakdown.online_model
+      + blend_weights.sequence * sequence
+      + blend_weights.tier1 * tier1;
+    let score = if base.is_finite() && base > 0.0 {
+      base
     } else {
-      (suggestion.score, 0.0)
+      blend_weights.frecency * frecency
+    };
+    if score.is_finite() {
+      suggestion.score = score;
     }
-  };
+  }
 
   scored.sort_by(|a, b| {
-    let (int_a, frec_a) = score_parts(a);
-    let (int_b, frec_b) = score_parts(b);
-    let has_int_a = int_a > 0.0;
-    let has_int_b = int_b > 0.0;
-    let has_int_cmp = has_int_b.cmp(&has_int_a);
-    if has_int_cmp != std::cmp::Ordering::Equal {
-      return has_int_cmp;
+    let score_cmp = b.score.total_cmp(&a.score);
+    if score_cmp != std::cmp::Ordering::Equal {
+      return score_cmp;
     }
-    if has_int_a {
-      let int_cmp = int_b.total_cmp(&int_a);
-      if int_cmp != std::cmp::Ordering::Equal {
-        return int_cmp;
-      }
-    } else {
-      let frec_cmp = frec_b.total_cmp(&frec_a);
-      if frec_cmp != std::cmp::Ordering::Equal {
-        return frec_cmp;
-      }
-    }
-    let recency_cmp = a.breakdown.recency.total_cmp(&b.breakdown.recency);
+    let recency_cmp = b.breakdown.recency.total_cmp(&a.breakdown.recency);
     if recency_cmp != std::cmp::Ordering::Equal {
       return recency_cmp;
     }
     a.command.cmp(&b.command)
   });
   Ok(scored)
+}
+
+pub(crate) async fn update_blend_weights_for_feedback(
+  conn: &Connection,
+  event: &OnlineFeedbackEvent,
+) -> Result<()> {
+  if let Some(outcome) = event.outcome.as_deref()
+    && !outcome.eq_ignore_ascii_case("accepted")
+  {
+    return Ok(());
+  }
+  let command = event
+    .accepted_command
+    .as_deref()
+    .unwrap_or(event.suggestion.as_str())
+    .trim();
+  if command.is_empty() {
+    return Ok(());
+  }
+  let now = event.accepted_at.unwrap_or(event.shown_at);
+  if now <= 0 {
+    return Ok(());
+  }
+
+  let cwd = event.cwd.as_deref();
+  let workspace_root = resolve_workspace_root(cwd);
+
+  let mut candidates = HashMap::new();
+  candidates.insert(command.to_string(), Candidate::new(command));
+  hydrate_candidate_stats(conn, &workspace_root, &mut candidates).await?;
+  if let (Some(cwd), Some(candidate)) = (cwd, candidates.get_mut(command)) {
+    let mut rows = query_prepared(
+      conn,
+      "SELECT freq, last_seen FROM context_stats
+       WHERE command = ? AND working_directory = ?
+       ORDER BY freq DESC LIMIT 1",
+      libsql::params![command.to_string(), cwd.to_string()],
+    )
+    .await?;
+    if let Some(row) = rows.next().await? {
+      let freq = row.get::<i64>(0)?;
+      let last_seen = row.get::<i64>(1)?;
+      candidate.context_freq = candidate.context_freq.max(freq);
+      candidate.context_cwd_match = true;
+      candidate.last_seen = candidate.last_seen.max(last_seen);
+    }
+  }
+
+  let prefix_norm: Vec<String> = Vec::new();
+  let sequence_commands: Vec<String> = Vec::new();
+  let recent_heads: Vec<String> = Vec::new();
+  let weights = RankingWeights::default();
+  let context = ScoreContext {
+    conn,
+    candidates: &candidates,
+    prefix_norm: &prefix_norm,
+    shellname: "zsh",
+    sequence_commands: &sequence_commands,
+    cwd,
+    hostname: None,
+    username: None,
+    exit_status: None,
+    session_phase: None,
+    session_id: None,
+    recent_heads: &recent_heads,
+    weights: &weights,
+    now,
+    recency_half_life: DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+    phase_config: None,
+    workspace_root: &workspace_root,
+  };
+
+  let scored = score_candidates(&context).await?;
+  let Some(suggestion) = scored.iter().find(|s| s.command == command) else {
+    return Ok(());
+  };
+
+  let frecency = log_frecency_prior(frecency_prior(&weights, suggestion));
+  let sequence = sequence_score(&weights, suggestion);
+  let tier1 = tier1_score(&weights, suggestion);
+  let model = suggestion.breakdown.online_model;
+  if !model.is_finite() || !frecency.is_finite() || !sequence.is_finite() || !tier1.is_finite() {
+    return Ok(());
+  }
+  if model == 0.0 && frecency == 0.0 && sequence == 0.0 && tier1 == 0.0 {
+    return Ok(());
+  }
+
+  let defaults = BlendWeights::defaults();
+  let mut blend = load_blend_weights(conn).await?;
+  let base = blend.model * model + blend.sequence * sequence + blend.tier1 * tier1;
+  let effective_frecency = if base.is_finite() && base > 0.0 {
+    0.0
+  } else {
+    frecency
+  };
+  let logit = base + blend.frecency * effective_frecency;
+  let prob = sigmoid(logit);
+  let error = prob - 1.0;
+
+  blend.model -= BLEND_LR * (error * model + BLEND_L2 * (blend.model - defaults.model));
+  blend.frecency -=
+    BLEND_LR * (error * effective_frecency + BLEND_L2 * (blend.frecency - defaults.frecency));
+  blend.sequence -= BLEND_LR * (error * sequence + BLEND_L2 * (blend.sequence - defaults.sequence));
+  blend.tier1 -= BLEND_LR * (error * tier1 + BLEND_L2 * (blend.tier1 - defaults.tier1));
+  let blend = blend.clamp();
+  store_blend_weights(conn, &blend).await?;
+  Ok(())
 }
 
 async fn suggest_completions(
@@ -992,22 +1141,14 @@ async fn completion_candidates(
   session_filter: Option<i64>,
 ) -> Result<Vec<Suggestion>> {
   let normalized_prefix = normalize_prefix_for_match(prefix);
-  let project_root = config
-    .cwd
-    .as_deref()
-    .and_then(find_repo_root)
-    .or_else(|| config.cwd.clone())
-    .map(|root| root.trim_end_matches('/').to_string());
+  let workspace_root = resolve_workspace_root(config.cwd.as_deref());
+  let project_root = if workspace_root.is_empty() {
+    None
+  } else {
+    Some(workspace_root.clone())
+  };
   let project_like = project_root.as_ref().map(|root| format!("{root}/%"));
 
-  let repo_root = config
-    .cwd
-    .as_deref()
-    .and_then(find_repo_root)
-    .or_else(|| config.cwd.clone())
-    .unwrap_or_default()
-    .trim_end_matches('/')
-    .to_string();
   let shellname = resolve_shellname(config)?;
   let prefer_full_line = config.prefer_full_line;
   let pool_limit = if prefer_full_line {
@@ -1060,7 +1201,7 @@ async fn completion_candidates(
   if let Some(mut suggestions) = env_template_candidates(
     conn,
     prefix,
-    &repo_root,
+    &workspace_root,
     &token_priors,
     runtime.now,
     runtime.recency_half_life,
@@ -1076,7 +1217,7 @@ async fn completion_candidates(
   if let Some(mut arg_suggestions) = arg_template_candidates(
     conn,
     prefix,
-    &repo_root,
+    &workspace_root,
     shellname.as_str(),
     &token_priors,
     runtime.now,
@@ -1289,6 +1430,7 @@ async fn completion_candidates(
         context,
         sequence: 0.0,
         similarity,
+        embedding_retrieval: 0.0,
         online_model: 0.0,
       },
     });
@@ -1399,6 +1541,7 @@ async fn completion_candidates(
           context: 0.0,
           sequence: 0.0,
           similarity,
+          embedding_retrieval: 0.0,
           online_model: 0.0,
         },
       });
@@ -1445,7 +1588,7 @@ async fn completion_candidates(
     }
   }
 
-  apply_online_model_for_completions(conn, config, runtime, aliases, &repo_root, &mut scored)
+  apply_online_model_for_completions(conn, config, runtime, aliases, &workspace_root, &mut scored)
     .await?;
 
   if prefer_full_line && !scored.is_empty() {
@@ -1492,7 +1635,7 @@ async fn apply_online_model_for_completions(
   config: &SuggestConfig,
   runtime: &SuggestRuntime,
   aliases: &HashMap<String, String>,
-  repo_root: &str,
+  workspace_root: &str,
   scored: &mut [Suggestion],
 ) -> Result<()> {
   if scored.is_empty() {
@@ -1522,10 +1665,11 @@ async fn apply_online_model_for_completions(
     conn,
     OnlineScoreContext {
       shellname: shellname.as_str(),
-      repo_root,
+      workspace_root,
       cwd: config.cwd.as_deref(),
       hostname: config.hostname.as_deref(),
       username: config.username.as_deref(),
+      phase: None,
       exit_status: last_exit_status,
       session_id: config.session_id,
       unix_timestamp: runtime.now,
@@ -1536,14 +1680,30 @@ async fn apply_online_model_for_completions(
     &online_cfg,
   )
   .await?;
-  apply_online_model_blend(scored, &model_scores, online_cfg.blend);
+
+  if model_scores.len() == scored.len() {
+    let gate = online_model_gate(&model_scores, online_cfg.blend).unwrap_or(0.0);
+    let model_scale = online_cfg.blend.alpha * gate;
+    if model_scale > 0.0 {
+      for (idx, suggestion) in scored.iter_mut().enumerate() {
+        let model = model_scores[idx];
+        if model.is_finite() {
+          let model_feature = (model as f64).tanh();
+          let contrib = model_feature * model_scale;
+          suggestion.score += contrib;
+          suggestion.breakdown.online_model = contrib;
+        }
+      }
+    }
+  }
   Ok(())
 }
 
 #[cfg(test)]
 mod tests {
   use super::*;
-  use crate::db::{init, insert_invocation, open_db};
+  use crate::config::OnlineModelBlendMode;
+  use crate::db::{OnlineFeedbackEvent, init, insert_invocation, open_db};
   use crate::shell_history::Invocation;
 
   use super::aliases::{add_alias_candidates, alias_for_command};
@@ -1610,22 +1770,9 @@ mod tests {
   }
 
   #[test]
-  fn online_model_margin_gate_prevents_reorder_when_ambiguous() {
-    let mut suggestions = vec![
-      Suggestion {
-        command: "A".to_string(),
-        score: 10.0,
-        breakdown: ScoreBreakdown::default(),
-      },
-      Suggestion {
-        command: "B".to_string(),
-        score: 9.0,
-        breakdown: ScoreBreakdown::default(),
-      },
-    ];
+  fn online_model_gate_blocks_ambiguous_scores() {
     let model_scores = vec![0.10, 0.11];
-    apply_online_model_blend(
-      &mut suggestions,
+    let gate = online_model_gate(
       &model_scores,
       OnlineModelBlendConfig {
         mode: OnlineModelBlendMode::Additive,
@@ -1633,29 +1780,15 @@ mod tests {
         margin_gate: 0.05,
         min_score_gate: 0.0,
       },
-    );
-    suggestions.sort_by(|a, b| b.score.total_cmp(&a.score));
-    assert_eq!(suggestions[0].command, "A");
-    assert!(suggestions[1].breakdown.online_model > 0.0);
+    )
+    .unwrap_or(0.0);
+    assert!(gate < 1.0);
   }
 
   #[test]
-  fn online_model_reorders_when_confident() {
-    let mut suggestions = vec![
-      Suggestion {
-        command: "A".to_string(),
-        score: 10.0,
-        breakdown: ScoreBreakdown::default(),
-      },
-      Suggestion {
-        command: "B".to_string(),
-        score: 9.99,
-        breakdown: ScoreBreakdown::default(),
-      },
-    ];
+  fn online_model_gate_allows_confident_scores() {
     let model_scores = vec![-0.5, 0.5];
-    apply_online_model_blend(
-      &mut suggestions,
+    let gate = online_model_gate(
       &model_scores,
       OnlineModelBlendConfig {
         mode: OnlineModelBlendMode::Additive,
@@ -1663,10 +1796,130 @@ mod tests {
         margin_gate: 0.05,
         min_score_gate: 0.0,
       },
-    );
-    suggestions.sort_by(|a, b| b.score.total_cmp(&a.score));
-    assert_eq!(suggestions[0].command, "B");
-    assert!(suggestions[0].breakdown.online_model > 0.0);
+    )
+    .unwrap_or(0.0);
+    assert_eq!(gate, 1.0);
+  }
+
+  #[tokio::test]
+  async fn blend_weights_update_increases_frecency_weight() -> Result<()> {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db = open_db(tmp.path()).await.unwrap();
+    init(&db.conn).await.unwrap();
+
+    db.conn
+      .execute(
+        "INSERT INTO command_stats (command, freq, last_seen) VALUES (?, ?, ?)",
+        libsql::params!["git status".to_string(), 10i64, 3600i64],
+      )
+      .await?;
+
+    let before = load_blend_weights(&db.conn).await?;
+    let event = OnlineFeedbackEvent {
+      shown_id: "fb-1".to_string(),
+      shown_at: 32400,
+      cwd: Some("/tmp".to_string()),
+      suggestion: "git status".to_string(),
+      accepted_command: Some("git status".to_string()),
+      accepted_at: Some(32400),
+      outcome: Some("accepted".to_string()),
+    };
+    update_blend_weights_for_feedback(&db.conn, &event).await?;
+    let after = load_blend_weights(&db.conn).await?;
+    assert!(after.frecency > before.frecency);
+    Ok(())
+  }
+
+  #[tokio::test]
+  async fn feedback_increases_frecency_score_for_accepted() -> Result<()> {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db = open_db(tmp.path()).await.unwrap();
+    init(&db.conn).await.unwrap();
+
+    db.conn
+      .execute(
+        "INSERT INTO command_stats (command, freq, last_seen) VALUES (?, ?, ?)",
+        libsql::params!["A".to_string(), 1000i64, 100i64],
+      )
+      .await?;
+    db.conn
+      .execute(
+        "INSERT INTO command_stats (command, freq, last_seen) VALUES (?, ?, ?)",
+        libsql::params!["B".to_string(), 1i64, 100i64],
+      )
+      .await?;
+    db.conn
+      .execute(
+        "INSERT INTO context_stats (command, working_directory, hostname, username, freq, last_seen)
+         VALUES (?, ?, NULL, NULL, ?, ?)",
+        libsql::params!["B".to_string(), "/tmp".to_string(), 100i64, 100i64],
+      )
+      .await?;
+
+    let mut candidates = HashMap::new();
+    let mut cand_a = Candidate::new("A");
+    cand_a.freq = 1000;
+    cand_a.last_seen = 100;
+    let mut cand_b = Candidate::new("B");
+    cand_b.freq = 1;
+    cand_b.last_seen = 100;
+    cand_b.context_freq = 100;
+    cand_b.context_cwd_match = true;
+    candidates.insert("A".to_string(), cand_a);
+    candidates.insert("B".to_string(), cand_b);
+
+    let prefix_norm: Vec<String> = Vec::new();
+    let sequence_commands: Vec<String> = Vec::new();
+    let recent_heads: Vec<String> = Vec::new();
+    let weights = RankingWeights::default();
+    let ctx = ScoreContext {
+      conn: &db.conn,
+      candidates: &candidates,
+      prefix_norm: &prefix_norm,
+      shellname: "zsh",
+      sequence_commands: &sequence_commands,
+      cwd: Some("/tmp"),
+      hostname: None,
+      username: None,
+      exit_status: None,
+      session_phase: None,
+      session_id: None,
+      recent_heads: &recent_heads,
+      weights: &weights,
+      now: 200,
+      recency_half_life: DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+      phase_config: None,
+      workspace_root: "/tmp",
+    };
+
+    let before = score_candidates(&ctx).await?;
+    let before_score = before
+      .iter()
+      .find(|s| s.command == "A")
+      .map(|s| s.score)
+      .unwrap_or(0.0);
+
+    let event = OnlineFeedbackEvent {
+      shown_id: "fb-2".to_string(),
+      shown_at: 200,
+      cwd: Some("/tmp".to_string()),
+      suggestion: "A".to_string(),
+      accepted_command: Some("A".to_string()),
+      accepted_at: Some(200),
+      outcome: Some("accepted".to_string()),
+    };
+    for _ in 0..120 {
+      update_blend_weights_for_feedback(&db.conn, &event).await?;
+    }
+
+    let after = score_candidates(&ctx).await?;
+    let after_score = after
+      .iter()
+      .find(|s| s.command == "A")
+      .map(|s| s.score)
+      .unwrap_or(0.0);
+    assert!(after_score > before_score);
+    Ok(())
   }
 
   #[test]
@@ -1770,6 +2023,89 @@ mod tests {
   }
 
   #[tokio::test]
+  async fn embedding_retrieval_adds_candidates_when_tier1_omits() -> Result<()> {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db = open_db(tmp.path()).await.unwrap();
+    init(&db.conn).await.unwrap();
+
+    let online_config = OnlineModelConfig::default();
+    crate::embeddings::ensure_command_embeddings_schema(&db.conn, online_config.embedding_dim)
+      .await
+      .unwrap();
+
+    db.conn
+      .execute(
+        "INSERT INTO online_group_scalar (group_name, value, updated_at)
+         VALUES (?, ?, ?)",
+        ("cwd", 1.0f64, 1i64),
+      )
+      .await
+      .unwrap();
+
+    let target = "target-command".to_string();
+    let mut commands = vec![target.clone()];
+    for idx in 0..59 {
+      commands.push(format!("cmd-{idx}"));
+    }
+
+    for (idx, command) in commands.iter().enumerate() {
+      let freq = if command == &target {
+        1i64
+      } else {
+        1_000i64 - idx as i64
+      };
+      db.conn
+        .execute(
+          "INSERT INTO command_stats (command, freq, last_seen, embedding)
+           VALUES (?, ?, ?, ?)",
+          libsql::params![
+            command.clone(),
+            freq,
+            100i64 + idx as i64,
+            Option::<Vec<u8>>::None
+          ],
+        )
+        .await
+        .unwrap();
+    }
+
+    insert_command(&db.conn, "ls", "ls", 10).await?;
+    insert_command(&db.conn, "echo hi", "echo hi", 20).await?;
+
+    crate::embeddings::index_command_embeddings(&db.conn, None)
+      .await
+      .unwrap();
+
+    let runtime = SuggestRuntime {
+      aliases: HashMap::new(),
+      weights: RankingWeights::default(),
+      recency_half_life: ranking::DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+      now: 200,
+      phase_config: None,
+    };
+    let config = SuggestConfig {
+      max_results: 100,
+      recent_limit: 5,
+      prefix: None,
+      cwd: Some("/tmp".to_string()),
+      hostname: Some("host".to_string()),
+      username: Some("user".to_string()),
+      session_id: Some(1),
+      shellname: Some("zsh".to_string()),
+      use_sequences: false,
+      prefer_full_line: true,
+    };
+
+    let suggestions = suggest_with_runtime(&db.conn, config, &runtime, None).await?;
+    let suggestion = suggestions
+      .iter()
+      .find(|suggestion| suggestion.command == target)
+      .expect("expected embedding candidate");
+    assert!(suggestion.breakdown.embedding_retrieval > 0.0);
+    Ok(())
+  }
+
+  #[tokio::test]
   async fn completion_suggests_double_dash_flags() {
     let tmp = tempfile::NamedTempFile::new().unwrap();
     let db = open_db(tmp.path()).await.unwrap();
@@ -1777,9 +2113,9 @@ mod tests {
 
     db.conn
       .execute(
-        "INSERT INTO flag_stats (repo_root, command_head, flag_raw, flag_norm, freq, last_seen)
+        "INSERT INTO flag_stats (workspace_root, command_head, flag_raw, flag_norm, freq, last_seen)
          VALUES (?, ?, ?, ?, ?, ?)",
-        ("", "cargo", "--locked", "--locked", 5i64, 10i64),
+        ("", "cargo install", "--locked", "--locked", 5i64, 10i64),
       )
       .await
       .unwrap();
@@ -1790,6 +2126,7 @@ mod tests {
       weights: RankingWeights::default(),
       recency_half_life: ranking::DEFAULT_RECENCY_HALF_LIFE_SECONDS,
       now: 1_000,
+      phase_config: None,
     };
     let prefix = "cargo install --path . --force --";
     let config = SuggestConfig {
@@ -1813,6 +2150,68 @@ mod tests {
       suggestions
         .iter()
         .any(|s| s.command == format!("{prefix}locked"))
+    );
+    assert!(suggestions.iter().all(|s| s.command.starts_with(prefix)));
+  }
+
+  #[tokio::test]
+  async fn completion_scopes_flags_to_subcommand_head() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db = open_db(tmp.path()).await.unwrap();
+    init(&db.conn).await.unwrap();
+
+    db.conn
+      .execute(
+        "INSERT INTO flag_stats (workspace_root, command_head, flag_raw, flag_norm, freq, last_seen)
+         VALUES (?, ?, ?, ?, ?, ?)",
+        ("", "zage import", "--shell", "--shell", 5i64, 10i64),
+      )
+      .await
+      .unwrap();
+    db.conn
+      .execute(
+        "INSERT INTO flag_stats (workspace_root, command_head, flag_raw, flag_norm, freq, last_seen)
+         VALUES (?, ?, ?, ?, ?, ?)",
+        ("", "zage suggest", "--current-line", "--current-line", 5i64, 10i64),
+      )
+      .await
+      .unwrap();
+
+    let cwd = tempfile::tempdir().unwrap();
+    let runtime = SuggestRuntime {
+      aliases: HashMap::new(),
+      weights: RankingWeights::default(),
+      recency_half_life: ranking::DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+      now: 1_000,
+      phase_config: None,
+    };
+    let prefix = "zage import --";
+    let config = SuggestConfig {
+      max_results: 10,
+      recent_limit: 10,
+      prefix: Some(prefix.to_string()),
+      cwd: Some(cwd.path().to_string_lossy().into_owned()),
+      hostname: None,
+      username: None,
+      session_id: None,
+      shellname: Some("zsh".to_string()),
+      use_sequences: false,
+      prefer_full_line: true,
+    };
+
+    let suggestions = suggest_with_runtime(&db.conn, config, &runtime, None)
+      .await
+      .unwrap();
+
+    assert!(
+      suggestions
+        .iter()
+        .any(|s| s.command == format!("{prefix}shell"))
+    );
+    assert!(
+      !suggestions
+        .iter()
+        .any(|s| s.command == format!("{prefix}current-line"))
     );
     assert!(suggestions.iter().all(|s| s.command.starts_with(prefix)));
   }

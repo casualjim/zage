@@ -1,10 +1,45 @@
-use super::{Invocation, dedup_invocations, generate_import_session_id, get_hostname};
+use super::{Invocation, dedup_invocations, generate_import_session_id};
 use crate::Result;
 use itertools::Itertools;
-use std::env;
 use std::fs::File;
 use std::io::{BufRead, BufReader};
 use std::path::{Path, PathBuf};
+
+fn normalize_path(mut path: PathBuf) -> Option<PathBuf> {
+  path = path.components().fold(PathBuf::new(), |mut acc, comp| {
+    match comp {
+      std::path::Component::RootDir => acc.push("/"),
+      std::path::Component::CurDir => {}
+      std::path::Component::ParentDir => {
+        acc.pop();
+      }
+      std::path::Component::Normal(name) => acc.push(name),
+      std::path::Component::Prefix(_) => { /* ignore windows prefixes */ }
+    }
+    acc
+  });
+
+  if path.as_os_str().is_empty() {
+    None
+  } else {
+    Some(path)
+  }
+}
+
+fn cd_target(command: &str) -> Option<&str> {
+  let trimmed = command.trim();
+  let mut parts = trimmed.split_whitespace();
+  let head = parts.next()?;
+  if head != "cd" {
+    return None;
+  }
+
+  match parts.next() {
+    Some("-") => None,
+    Some(target) => Some(target),
+    None => Some("~"),
+  }
+}
 
 /// Parse zsh history file into a vector of Invocations
 /// Handles potential binary/non-UTF8 content by reading as bytes
@@ -18,15 +53,14 @@ pub fn parse_history_file(
   let reader = BufReader::new(file);
   let mut invocations = Vec::new();
 
-  // Track current directory, starting with the CWD where import is run
-  let mut current_dir = env::current_dir().unwrap_or_else(|_| PathBuf::from("/"));
+  // Track current directory only when the history explicitly reveals it (via `cd` commands).
+  // Importing history from another machine should not "inherit" the importer's cwd.
+  let mut current_dir: Option<PathBuf> = None;
 
-  let username_s = username.unwrap_or_else(|| {
-    uzers::get_current_username()
-      .map(|v| v.to_string_lossy().into_owned())
-      .unwrap_or_else(|| "unknown".to_string())
-  });
-  let hostname_s = hostname.unwrap_or_else(get_hostname);
+  // For imports we should not "invent" identity info from the importer machine.
+  // If the caller wants hostname/username, they can pass them explicitly.
+  let username_s = username;
+  let hostname_s = hostname;
 
   for line_result in reader.split(b'\n') {
     let mut line_bytes = match line_result {
@@ -52,29 +86,15 @@ pub fn parse_history_file(
     let command_s = String::from_utf8_lossy(command).into_owned();
 
     // Update current directory based on 'cd' commands
-    if let Some(target) = command_s.strip_prefix("cd ") {
+    if let Some(target) = cd_target(&command_s) {
       let target = target.trim();
       if !target.is_empty() {
         let target_path = PathBuf::from(target);
-        if target_path.is_absolute() {
-          current_dir = target_path;
-        } else {
-          current_dir = current_dir.join(target_path);
-          // Basic normalization (doesn't handle symlinks etc.)
-          current_dir = current_dir
-            .components()
-            .fold(PathBuf::new(), |mut acc, comp| {
-              match comp {
-                std::path::Component::RootDir => acc.push("/"),
-                std::path::Component::CurDir => {}
-                std::path::Component::ParentDir => {
-                  acc.pop();
-                }
-                std::path::Component::Normal(name) => acc.push(name),
-                std::path::Component::Prefix(_) => { /* ignore windows prefixes */ }
-              }
-              acc
-            });
+        if target_path.is_absolute() || target.starts_with('~') {
+          current_dir = normalize_path(target_path);
+        } else if let Some(base) = current_dir.as_ref() {
+          let next = base.join(target_path);
+          current_dir = normalize_path(next);
         }
       }
     }
@@ -100,14 +120,16 @@ pub fn parse_history_file(
       expanded_command: String::new(),
       command: command_s.clone(),
       shellname: "zsh".to_string(),
-      hostname: Some(hostname_s.clone()),
-      username: Some(username_s.clone()),
+      hostname: hostname_s.clone(),
+      username: username_s.clone(),
       workspace: None,
       start_unix_timestamp,
       end_unix_timestamp,
       session_id,
       // Set the working directory based on tracked state
-      working_directory: Some(current_dir.to_string_lossy().into_owned()),
+      working_directory: current_dir
+        .as_ref()
+        .map(|d| d.to_string_lossy().into_owned()),
       exit_status: None, // exit_status is not available in zsh history
     };
 

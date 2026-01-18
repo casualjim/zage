@@ -267,7 +267,8 @@ We will blend with priors using a log-linear model:
 
 v1 calibration:
 
-- Learn `α/β/γ/δ` online using weak feedback (shown-and-executed soon after ≈ positive; shown-but-not-executed ≈ weak negative).
+- Learn `α/β/γ/δ` online using **accept-only feedback** (exact suggestion accepted).
+- No implicit negatives or time windows in v1; non-accepts are ignored (no-op).
 - Use simple gradient descent on logistic loss; no complex bandits for v1.
 
 ### Privacy note (v1)
@@ -506,12 +507,13 @@ Replace “single chronological split” with:
 
 ### 10) Implicit negative feedback (“undo”, Ctrl-C, rejects)
 
-We need signals beyond “what was executed”:
+We do **not** use implicit negatives in v1:
 
-- If the user is shown a suggestion and does not execute it within a short window (or types a different command), treat it as a weak negative.
-- Ctrl-C after command starts can be a weak negative (but be careful: Ctrl-C is sometimes normal).
+- Only **accepted suggestions** are logged and used for training.
+- No “rejected/ignored” outcomes, and no time-window matching.
+- Ctrl-C and other aborts are ignored (no-op).
 
-This requires instrumentation in the shell plugin (server-side logging of “shown suggestion IDs” + later matching to actual invocations).
+If we want negatives later, it must be explicit and UX-supported; we will not infer it from timing.
 
 ### Multi-host sync conflict behavior
 

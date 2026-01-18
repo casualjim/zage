@@ -6,6 +6,7 @@ mod normalize;
 mod tree_sitter;
 
 pub use command_parts::{CommandParts, extract_command_parts};
+pub use command_parts::{CommandStatsParts, extract_command_stats_parts};
 pub use lexer::{token_strings, token_strings_index, tokenize, tokenize_index};
 pub use normalize::{normalize_command_whitespace, normalize_token, normalized_tokens};
 

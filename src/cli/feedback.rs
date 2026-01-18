@@ -3,6 +3,7 @@ use tracing::info;
 
 use crate::cli::BackendRef;
 use crate::db::{OnlineFeedbackEvent, upsert_online_feedback};
+use crate::predict::update_blend_weights_for_feedback;
 use crate::server::{self, Request, Response};
 
 pub struct FeedbackArgs {
@@ -45,19 +46,17 @@ pub async fn run(backend: BackendRef<'_>, args: FeedbackArgs) -> Result<()> {
       }
     }
     BackendRef::Embedded(db) => {
-      upsert_online_feedback(
-        &db.conn,
-        OnlineFeedbackEvent {
-          shown_id,
-          shown_at,
-          cwd: working_directory,
-          suggestion,
-          accepted_command,
-          accepted_at,
-          outcome,
-        },
-      )
-      .await?;
+      let event = OnlineFeedbackEvent {
+        shown_id,
+        shown_at,
+        cwd: working_directory,
+        suggestion,
+        accepted_command,
+        accepted_at,
+        outcome,
+      };
+      upsert_online_feedback(&db.conn, event.clone()).await?;
+      update_blend_weights_for_feedback(&db.conn, &event).await?;
       Ok(())
     }
   }

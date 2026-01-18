@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
-use std::sync::{Mutex, OnceLock};
 
 use jiff::Timestamp;
 use libsql::{Connection, Value};
@@ -13,6 +12,7 @@ use crate::ZageError;
 use crate::db::{init, insert_invocation, open_db};
 use crate::hash_util::stable_hash;
 use crate::indexer::rebuild_stats;
+use crate::phase::PhaseConfig;
 use crate::sequence::{SequenceConfig, analyze_sequences};
 use crate::shell_history::Invocation;
 
@@ -51,14 +51,6 @@ pub struct TestSuggestion {
 pub struct Tier1Case {
   pub name: String,
   pub index: usize,
-}
-
-#[derive(Debug, Deserialize, Default)]
-struct Meta {
-  #[allow(dead_code)]
-  description: Option<String>,
-  #[allow(dead_code)]
-  tags: Option<Vec<String>>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -177,8 +169,6 @@ struct Scenario {
 
 #[derive(Debug, Deserialize, Default)]
 struct TestSpec {
-  #[allow(dead_code)]
-  meta: Option<Meta>,
   physics: Option<Physics>,
   fs: Option<HashMap<String, String>>,
   aliases: Option<HashMap<String, String>>,
@@ -195,7 +185,7 @@ pub async fn suggest_for_test(
   config: SuggestConfig,
   test_config: TestConfig,
 ) -> Result<Vec<TestSuggestion>> {
-  let runtime = build_runtime(test_config, HashMap::new())?;
+  let runtime = build_runtime(test_config, HashMap::new(), None)?;
   let suggestions = suggest_with_runtime(conn, config, &runtime, None).await?;
   Ok(rank_suggestions(suggestions))
 }
@@ -204,10 +194,11 @@ async fn suggest_for_test_with_aliases(
   conn: &Connection,
   config: SuggestConfig,
   test_config: TestConfig,
+  phase_config: Option<PhaseConfig>,
   aliases: HashMap<String, String>,
   override_prev: Option<(String, Option<i64>)>,
 ) -> Result<Vec<TestSuggestion>> {
-  let runtime = build_runtime(test_config, aliases)?;
+  let runtime = build_runtime(test_config, aliases, phase_config)?;
   let suggestions = suggest_with_runtime(conn, config, &runtime, override_prev).await?;
   Ok(rank_suggestions(suggestions))
 }
@@ -215,6 +206,7 @@ async fn suggest_for_test_with_aliases(
 fn build_runtime(
   test_config: TestConfig,
   aliases: HashMap<String, String>,
+  phase_config: Option<PhaseConfig>,
 ) -> Result<SuggestRuntime> {
   let now = if let Some(now) = test_config.now {
     now
@@ -231,6 +223,7 @@ fn build_runtime(
     weights,
     recency_half_life,
     now,
+    phase_config,
   })
 }
 
@@ -822,47 +815,6 @@ async fn assert_db_expectations(conn: &Connection, scenario: &Scenario) -> Resul
   Ok(())
 }
 
-struct EnvGuard {
-  key: &'static str,
-  previous: Option<String>,
-}
-
-impl Drop for EnvGuard {
-  fn drop(&mut self) {
-    if let Some(value) = self.previous.as_ref() {
-      unsafe {
-        std::env::set_var(self.key, value);
-      }
-    } else {
-      unsafe {
-        std::env::remove_var(self.key);
-      }
-    }
-  }
-}
-
-fn set_env_guard(key: &'static str, value: Option<String>) -> EnvGuard {
-  let previous = std::env::var(key).ok();
-  if let Some(value) = value {
-    unsafe {
-      std::env::set_var(key, value);
-    }
-  } else {
-    unsafe {
-      std::env::remove_var(key);
-    }
-  }
-  EnvGuard { key, previous }
-}
-
-fn env_lock() -> std::sync::MutexGuard<'static, ()> {
-  static LOCK: OnceLock<Mutex<()>> = OnceLock::new();
-  LOCK
-    .get_or_init(|| Mutex::new(()))
-    .lock()
-    .expect("env lock")
-}
-
 fn build_phases_config(phases: &HashMap<String, Vec<String>>) -> String {
   let mut labels: Vec<&String> = phases.keys().collect();
   labels.sort();
@@ -903,7 +855,6 @@ pub async fn run_tier1_case(path: &Path, scenario_index: usize) -> Result<()> {
   run_tier1_spec(path, Some(scenario_index)).await
 }
 
-#[allow(clippy::await_holding_lock)]
 async fn run_tier1_spec(path: &Path, scenario_index: Option<usize>) -> Result<()> {
   let spec = load_tier1_spec(path)?;
 
@@ -917,31 +868,25 @@ async fn run_tier1_spec(path: &Path, scenario_index: Option<usize>) -> Result<()
 
   seed_history(&db.conn, &spec.history, &temp_dir, physics_now, &aliases).await?;
 
-  let _env_lock = env_lock();
   let run_phase_indexing = spec
     .options
     .as_ref()
     .and_then(|opt| opt.run_phase_indexing)
     .unwrap_or(false);
-  let _phase_guard = if run_phase_indexing {
+
+  let phase_config = if run_phase_indexing {
     if let Some(phases) = spec.phases.as_ref() {
       let phases_path = temp_dir.path().join("phases.toml");
       let contents = build_phases_config(phases);
       fs::write(&phases_path, contents)?;
-      Some(set_env_guard(
-        "ZAGE_PHASES_CONFIG",
-        Some(phases_path.to_string_lossy().to_string()),
-      ))
+      Some(PhaseConfig::load_from_path(&phases_path)?)
     } else {
-      Some(set_env_guard("ZAGE_PHASES_CONFIG", None))
+      None
     }
   } else {
     let phases_path = temp_dir.path().join("phases_disabled.toml");
     fs::write(&phases_path, "[phases.default]\npatterns = []\n")?;
-    Some(set_env_guard(
-      "ZAGE_PHASES_CONFIG",
-      Some(phases_path.to_string_lossy().to_string()),
-    ))
+    Some(PhaseConfig::load_from_path(&phases_path)?)
   };
 
   rebuild_stats(&db.conn, None).await?;
@@ -979,6 +924,7 @@ async fn run_tier1_spec(path: &Path, scenario_index: Option<usize>) -> Result<()
       &db.conn,
       config,
       test_config.clone(),
+      phase_config.clone(),
       aliases.clone(),
       override_prev,
     )

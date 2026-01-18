@@ -1,25 +1,12 @@
 use libsql::{Connection, Value};
 
+use crate::config::OnlineModelConfig;
+use crate::online_model::trainer::command_embeddings_for_commands;
 use crate::{Result, ZageError};
 
 const META_KEY_COMMAND_EMBEDDING_DIM: &str = "command_embedding_dim";
 const COMMAND_EMBEDDING_INDEX: &str = "command_stats_embedding_idx";
 const DEFAULT_SHELLNAME: &str = "zsh";
-const DEFAULT_EMBEDDING_DIM: usize = 128;
-const MAX_EMBED_TOKENS: usize = 256;
-
-#[derive(Debug, Clone, Copy)]
-pub struct EmbedContextInput<'a> {
-  pub workspace_root: Option<&'a str>,
-  pub cwd: Option<&'a str>,
-  pub hostname: Option<&'a str>,
-  pub username: Option<&'a str>,
-  pub exit_status: Option<i64>,
-  pub session_id: Option<i64>,
-  pub shellname: &'a str,
-  pub recent_commands: &'a [String],
-  pub window: usize,
-}
 
 pub async fn ensure_command_embeddings_schema(
   conn: &Connection,
@@ -83,10 +70,8 @@ pub async fn index_command_embeddings(
   conn: &Connection,
   max_commands: Option<usize>,
 ) -> Result<usize> {
-  let embedding_dim = command_embedding_dim(conn)
-    .await?
-    .unwrap_or(DEFAULT_EMBEDDING_DIM);
-  ensure_command_embeddings_schema(conn, embedding_dim).await?;
+  let config = OnlineModelConfig::load()?;
+  ensure_command_embeddings_schema(conn, config.embedding_dim).await?;
 
   let now = unix_now();
   let limit = max_commands.map(|v| v as i64).unwrap_or(i64::MAX);
@@ -94,103 +79,14 @@ pub async fn index_command_embeddings(
 
   let mut inserted = 0usize;
   for chunk in commands.chunks(512) {
-    for (command, shellname) in chunk {
-      let embedding = embed_command_hash(shellname, command, embedding_dim);
+    let embeddings = command_embeddings_for_commands(conn, chunk, &config).await?;
+    for ((command, _), embedding) in chunk.iter().zip(embeddings.into_iter()) {
       upsert_command_embedding(conn, command, &embedding, now).await?;
       inserted += 1;
     }
   }
 
   Ok(inserted)
-}
-
-pub fn embed_context_hash(input: EmbedContextInput<'_>, embedding_dim: usize) -> Vec<f32> {
-  let mut out = vec![0.0f32; embedding_dim];
-
-  // Encode context fields with a fixed weighting scheme.
-  // This is intentionally simple and deterministic; online learning will replace this later.
-  add_token(&mut out, "ctx", 0.25);
-
-  if let Some(root) = input.workspace_root.filter(|v| !v.is_empty()) {
-    add_token(&mut out, &format!("ctx:workspace_root={root}"), 4.0);
-  }
-  if let Some(cwd) = input.cwd.filter(|v| !v.is_empty()) {
-    add_token(&mut out, &format!("ctx:cwd={cwd}"), 2.0);
-  }
-  if let Some(exit) = input.exit_status {
-    add_token(&mut out, &format!("ctx:exit={exit}"), 1.5);
-  }
-  if let Some(host) = input.hostname.filter(|v| !v.is_empty()) {
-    add_token(&mut out, &format!("ctx:host={host}"), 0.25);
-  }
-  if let Some(user) = input.username.filter(|v| !v.is_empty()) {
-    add_token(&mut out, &format!("ctx:user={user}"), 0.25);
-  }
-  if let Some(session) = input.session_id {
-    add_token(&mut out, &format!("ctx:session={session}"), 0.10);
-  }
-
-  // Recent command window: add generalized command tokens with a positional prefix.
-  // We bias towards later commands slightly by weighting closer-to-now higher.
-  let mut remaining = MAX_EMBED_TOKENS;
-  let window = input.window.min(input.recent_commands.len());
-  let start = input.recent_commands.len().saturating_sub(window);
-  for (pos, cmd) in input.recent_commands[start..].iter().enumerate() {
-    if remaining == 0 {
-      break;
-    }
-    // pos is 0..window-1; later commands should matter more.
-    let age = (window - 1).saturating_sub(pos) as f32;
-    let w = 1.0 / (1.0 + age * 0.25);
-
-    let tokens = crate::tokenize::generalized_command_tokens(input.shellname, cmd, 8);
-    for tok in tokens.into_iter().take(remaining) {
-      add_token(&mut out, &format!("prev:{tok}"), w);
-      remaining = remaining.saturating_sub(1);
-      if remaining == 0 {
-        break;
-      }
-    }
-  }
-
-  l2_normalize(&mut out);
-  out
-}
-
-fn embed_command_hash(shellname: &str, command: &str, embedding_dim: usize) -> Vec<f32> {
-  let mut out = vec![0.0f32; embedding_dim];
-  for token in crate::tokenize::generalized_command_tokens(shellname, command, 8)
-    .into_iter()
-    .take(MAX_EMBED_TOKENS)
-  {
-    add_token(&mut out, &token, 1.0);
-  }
-  l2_normalize(&mut out);
-  out
-}
-
-fn add_token(dst: &mut [f32], token: &str, weight: f32) {
-  if dst.is_empty() {
-    return;
-  }
-  let h = crate::hash_util::stable_hash(token);
-  let idx = (h % dst.len() as u64) as usize;
-  let sign = if (h >> 63) & 1 == 1 { -1.0 } else { 1.0 };
-  dst[idx] += sign * weight;
-}
-
-fn l2_normalize(v: &mut [f32]) {
-  let mut sum = 0.0f32;
-  for x in v.iter() {
-    sum += x * x;
-  }
-  if sum <= 0.0 {
-    return;
-  }
-  let inv = sum.sqrt().recip();
-  for x in v.iter_mut() {
-    *x *= inv;
-  }
 }
 
 async fn list_commands_missing_embeddings(
@@ -693,42 +589,5 @@ mod tests {
     let out = search_similar_commands(&db.conn, &[1.0, 1.0], 1).await?;
     assert_eq!(out, vec!["a".to_string()]);
     Ok(())
-  }
-
-  #[test]
-  fn embed_context_hash_respects_shellname_for_recent_commands() {
-    let recent_commands = vec!["echo $FOO".to_string()];
-
-    let unknown = embed_context_hash(
-      EmbedContextInput {
-        workspace_root: None,
-        cwd: None,
-        hostname: None,
-        username: None,
-        exit_status: None,
-        session_id: None,
-        shellname: "unknown",
-        recent_commands: &recent_commands,
-        window: 1,
-      },
-      64,
-    );
-
-    let zsh = embed_context_hash(
-      EmbedContextInput {
-        workspace_root: None,
-        cwd: None,
-        hostname: None,
-        username: None,
-        exit_status: None,
-        session_id: None,
-        shellname: "zsh",
-        recent_commands: &recent_commands,
-        window: 1,
-      },
-      64,
-    );
-
-    assert_ne!(unknown, zsh);
   }
 }

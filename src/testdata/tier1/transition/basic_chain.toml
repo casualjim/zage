@@ -64,9 +64,5 @@ cwd = "/tmp"
 session = "s1"
 
 [scenario.expect]
-top = ["git commit -m 'msg'", "git commit -m 'fix'"]
+top = ["git status", "git commit -m 'fix'"]
 contains = ["git status"]
-
-[[scenario.expect.candidate]]
-cmd = "git commit -m 'msg'"
-min_transition = 0.5

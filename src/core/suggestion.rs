@@ -14,5 +14,6 @@ pub struct ScoreBreakdown {
   pub context: f64,
   pub sequence: f64,
   pub similarity: f64,
+  pub embedding_retrieval: f64,
   pub online_model: f64,
 }
