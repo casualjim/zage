@@ -2,6 +2,9 @@
 name = "zage"
 version = "0.1.0"
 edition = "2024"
+description = "Shell history indexing and next-command suggestions with an online model"
+license = "MIT"
+repository = "https://git.wagyu.icu/casualjim/zage"
 
 [features]
 tier1-tests = ["tempfile"]
