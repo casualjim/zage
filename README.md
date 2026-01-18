@@ -349,45 +349,6 @@ The model trains incrementally as you work, adapting to your workflows without o
 
 ## Advanced Features
 
-### Phase Configuration
-
-Zage learns workflow phases (build/test/deploy/edit/etc.) from your history. You can seed those
-phases with a TOML file to make the learning fast and predictable.
-
-Default config path:
-
-- `config/phases.toml` (repo-local)
-- `~/.config/zage/phases.toml`
-
-Override with:
-
-- `ZAGE_PHASES_CONFIG=/path/to/phases.toml`
-
-Pattern rules:
-
-- Patterns are tokenized by the existing shell parser (term-limited).
-- Terms can include glob wildcards: `*` and `?`.
-- Multiple terms are allowed; quoted terms stay a single unit.
-- Flags are **order-independent** (`git commit -m -S` matches `git commit -S -m "msg"`).
-- Args are **order-dependent** (matched as a prefix of the argument list).
-
-Example:
-
-```toml
-[phases.build]
-patterns = [
-  "cargo build",
-  "make",
-  "cmake --build *"
-]
-
-[phases.deploy]
-patterns = [
-  "git push",
-  "kubectl apply *"
-]
-```
-
 ### Aliases
 
 Zage can learn from aliases and their expansions:

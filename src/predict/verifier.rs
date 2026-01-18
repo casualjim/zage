@@ -2,6 +2,7 @@ use std::collections::HashMap;
 use std::fs;
 use std::path::Path;
 
+use humantime::parse_duration;
 use jiff::Timestamp;
 use libsql::{Connection, Value};
 use serde::Deserialize;
@@ -12,7 +13,6 @@ use crate::ZageError;
 use crate::db::{init, insert_invocation, open_db};
 use crate::hash_util::stable_hash;
 use crate::indexer::rebuild_stats;
-use crate::phase::PhaseConfig;
 use crate::sequence::{SequenceConfig, analyze_sequences};
 use crate::shell_history::Invocation;
 
@@ -79,7 +79,6 @@ struct Options {
   min_sequence_support: Option<usize>,
   min_sequence_confidence: Option<f64>,
   min_sequence_lift: Option<f64>,
-  run_phase_indexing: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Default)]
@@ -177,7 +176,6 @@ struct TestSpec {
   #[serde(default)]
   scenario: Vec<Scenario>,
   options: Option<Options>,
-  phases: Option<HashMap<String, Vec<String>>>,
 }
 
 pub async fn suggest_for_test(
@@ -185,7 +183,7 @@ pub async fn suggest_for_test(
   config: SuggestConfig,
   test_config: TestConfig,
 ) -> Result<Vec<TestSuggestion>> {
-  let runtime = build_runtime(test_config, HashMap::new(), None)?;
+  let runtime = build_runtime(test_config, HashMap::new())?;
   let suggestions = suggest_with_runtime(conn, config, &runtime, None).await?;
   Ok(rank_suggestions(suggestions))
 }
@@ -194,11 +192,10 @@ async fn suggest_for_test_with_aliases(
   conn: &Connection,
   config: SuggestConfig,
   test_config: TestConfig,
-  phase_config: Option<PhaseConfig>,
   aliases: HashMap<String, String>,
   override_prev: Option<(String, Option<i64>)>,
 ) -> Result<Vec<TestSuggestion>> {
-  let runtime = build_runtime(test_config, aliases, phase_config)?;
+  let runtime = build_runtime(test_config, aliases)?;
   let suggestions = suggest_with_runtime(conn, config, &runtime, override_prev).await?;
   Ok(rank_suggestions(suggestions))
 }
@@ -206,7 +203,6 @@ async fn suggest_for_test_with_aliases(
 fn build_runtime(
   test_config: TestConfig,
   aliases: HashMap<String, String>,
-  phase_config: Option<PhaseConfig>,
 ) -> Result<SuggestRuntime> {
   let now = if let Some(now) = test_config.now {
     now
@@ -223,7 +219,6 @@ fn build_runtime(
     weights,
     recency_half_life,
     now,
-    phase_config,
   })
 }
 
@@ -257,8 +252,23 @@ fn parse_timestamp_string(raw: &str, base: Option<i64>) -> Result<i64> {
     let base = base.ok_or_else(|| {
       ZageError::ConfigError("relative timestamp requires [physics].now".to_string())
     })?;
-    let delta = parse_relative_offset(trimmed)?;
-    return Ok(base + delta);
+    let (sign, rest) = if let Some(value) = trimmed.strip_prefix('-') {
+      (-1i64, value)
+    } else if let Some(value) = trimmed.strip_prefix('+') {
+      (1i64, value)
+    } else {
+      (1i64, trimmed)
+    };
+    if rest.trim().is_empty() {
+      return Err(ZageError::ConfigError(
+        "relative offset missing duration".to_string(),
+      ));
+    }
+    let duration = parse_duration(rest).map_err(|err| {
+      ZageError::ConfigError(format!("invalid relative duration {rest:?}: {err}"))
+    })?;
+    let delta = duration.as_secs() as i64;
+    return Ok(base + sign * delta);
   }
   if trimmed.chars().all(|c| c.is_ascii_digit()) {
     let ts: i64 = trimmed.parse()?;
@@ -268,43 +278,6 @@ fn parse_timestamp_string(raw: &str, base: Option<i64>) -> Result<i64> {
     .parse::<Timestamp>()
     .map_err(|err| ZageError::ConfigError(err.to_string()))?;
   Ok(parsed.as_second())
-}
-
-fn parse_relative_offset(raw: &str) -> Result<i64> {
-  let (sign, rest) = if let Some(value) = raw.strip_prefix('-') {
-    (-1i64, value)
-  } else if let Some(value) = raw.strip_prefix('+') {
-    (1i64, value)
-  } else {
-    (1i64, raw)
-  };
-  if rest.is_empty() {
-    return Err(ZageError::ConfigError(
-      "relative offset missing value".to_string(),
-    ));
-  }
-  let last = rest.chars().last().unwrap_or('s');
-  if last.is_ascii_digit() {
-    let value: i64 = rest.parse()?;
-    return Ok(sign * value);
-  }
-  let number = &rest[..rest.len() - last.len_utf8()];
-  let magnitude: i64 = number.parse()?;
-  let seconds = match last {
-    's' => 1,
-    'm' => 60,
-    'h' => 60 * 60,
-    'd' => 60 * 60 * 24,
-    'w' => 60 * 60 * 24 * 7,
-    'M' => 60 * 60 * 24 * 30,
-    'y' => 60 * 60 * 24 * 365,
-    _ => {
-      return Err(ZageError::ConfigError(format!(
-        "unsupported relative unit: {last}"
-      )));
-    }
-  };
-  Ok(sign * magnitude * seconds)
 }
 
 fn resolve_session_id(value: Option<&String>) -> i64 {
@@ -815,22 +788,6 @@ async fn assert_db_expectations(conn: &Connection, scenario: &Scenario) -> Resul
   Ok(())
 }
 
-fn build_phases_config(phases: &HashMap<String, Vec<String>>) -> String {
-  let mut labels: Vec<&String> = phases.keys().collect();
-  labels.sort();
-  let mut output = String::new();
-  for label in labels {
-    output.push_str(&format!("[phases.{label}]\npatterns = [\n"));
-    if let Some(entries) = phases.get(label) {
-      for entry in entries {
-        output.push_str(&format!("  \"{entry}\",\n"));
-      }
-    }
-    output.push_str("]\n\n");
-  }
-  output
-}
-
 fn load_tier1_spec(path: &Path) -> Result<TestSpec> {
   let contents = fs::read_to_string(path)?;
   toml::from_str(&contents).map_err(|err| ZageError::ConfigError(err.to_string()))
@@ -868,27 +825,6 @@ async fn run_tier1_spec(path: &Path, scenario_index: Option<usize>) -> Result<()
 
   seed_history(&db.conn, &spec.history, &temp_dir, physics_now, &aliases).await?;
 
-  let run_phase_indexing = spec
-    .options
-    .as_ref()
-    .and_then(|opt| opt.run_phase_indexing)
-    .unwrap_or(false);
-
-  let phase_config = if run_phase_indexing {
-    if let Some(phases) = spec.phases.as_ref() {
-      let phases_path = temp_dir.path().join("phases.toml");
-      let contents = build_phases_config(phases);
-      fs::write(&phases_path, contents)?;
-      Some(PhaseConfig::load_from_path(&phases_path)?)
-    } else {
-      None
-    }
-  } else {
-    let phases_path = temp_dir.path().join("phases_disabled.toml");
-    fs::write(&phases_path, "[phases.default]\npatterns = []\n")?;
-    Some(PhaseConfig::load_from_path(&phases_path)?)
-  };
-
   rebuild_stats(&db.conn, None).await?;
 
   if spec
@@ -924,7 +860,6 @@ async fn run_tier1_spec(path: &Path, scenario_index: Option<usize>) -> Result<()
       &db.conn,
       config,
       test_config.clone(),
-      phase_config.clone(),
       aliases.clone(),
       override_prev,
     )

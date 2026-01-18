@@ -88,6 +88,18 @@ CREATE TABLE IF NOT EXISTS transition_stats (
 CREATE INDEX IF NOT EXISTS idx_transition_prev ON transition_stats(prev_command, prev_exit_status);
 CREATE INDEX IF NOT EXISTS idx_transition_next ON transition_stats(next_command);
 
+CREATE TABLE IF NOT EXISTS transition_head_stats (
+  prev_head TEXT NOT NULL,
+  prev_exit_status INTEGER,
+  next_command TEXT NOT NULL,
+  freq INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  PRIMARY KEY (prev_head, prev_exit_status, next_command)
+);
+
+CREATE INDEX IF NOT EXISTS idx_transition_head_prev ON transition_head_stats(prev_head, prev_exit_status);
+CREATE INDEX IF NOT EXISTS idx_transition_head_next ON transition_head_stats(next_command);
+
 CREATE TABLE IF NOT EXISTS workspace_command_stats (
   workspace_root TEXT NOT NULL,
   command TEXT NOT NULL,
@@ -109,6 +121,18 @@ CREATE TABLE IF NOT EXISTS workspace_transition_stats (
 );
 
 CREATE INDEX IF NOT EXISTS idx_workspace_transition_root_prev ON workspace_transition_stats(workspace_root, prev_command, prev_exit_status);
+
+CREATE TABLE IF NOT EXISTS workspace_transition_head_stats (
+  workspace_root TEXT NOT NULL,
+  prev_head TEXT NOT NULL,
+  prev_exit_status INTEGER,
+  next_command TEXT NOT NULL,
+  freq INTEGER NOT NULL,
+  last_seen INTEGER NOT NULL,
+  PRIMARY KEY (workspace_root, prev_head, prev_exit_status, next_command)
+);
+
+CREATE INDEX IF NOT EXISTS idx_workspace_transition_head_root_prev ON workspace_transition_head_stats(workspace_root, prev_head, prev_exit_status);
 
 CREATE TABLE IF NOT EXISTS arg_stats (
   workspace_root TEXT NOT NULL,
@@ -175,18 +199,6 @@ CREATE TABLE IF NOT EXISTS token_sequence_stats (
 );
 
 CREATE INDEX IF NOT EXISTS idx_token_sequence_lift ON token_sequence_stats(lift);
-
-CREATE TABLE IF NOT EXISTS phase_stats (
-  command_head TEXT NOT NULL,
-  phase TEXT NOT NULL,
-  confidence REAL NOT NULL,
-  freq INTEGER NOT NULL,
-  last_seen INTEGER NOT NULL,
-  PRIMARY KEY (command_head, phase)
-);
-
-CREATE INDEX IF NOT EXISTS idx_phase_stats_head ON phase_stats(command_head);
-CREATE INDEX IF NOT EXISTS idx_phase_stats_phase ON phase_stats(phase);
 
 -- Online next-command model (v1)
 CREATE TABLE IF NOT EXISTS online_model_meta (

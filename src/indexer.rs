@@ -7,7 +7,6 @@ use serde_json;
 use tracing::info;
 
 use crate::Result;
-use crate::phase::{PhaseConfig, PhaseSample, features_from_tokens, train_phase_predictor};
 use crate::predict::aliases::{expand_alias, load_aliases};
 use crate::tokenize::{
   extract_command_parts, extract_command_stats_parts, normalize_command_whitespace,
@@ -20,7 +19,6 @@ pub struct IndexReport {
   pub transitions: usize,
   pub contexts: usize,
   pub token_cache: usize,
-  pub phase_stats: usize,
 }
 
 #[derive(Debug, Default)]
@@ -34,13 +32,6 @@ struct ArgStat {
   freq: i64,
   last_seen: i64,
   arg_norm: String,
-}
-
-#[derive(Debug, Default)]
-struct PhaseStat {
-  freq: i64,
-  last_seen: i64,
-  confidence_sum: f64,
 }
 
 type ContextKey = (String, Option<String>, Option<String>, Option<String>);
@@ -149,8 +140,11 @@ impl<'a> BulkInserter<'a> {
 pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Result<IndexReport> {
   let mut command_stats: HashMap<String, Stat> = HashMap::new();
   let mut transition_stats: HashMap<(String, Option<i64>, String), Stat> = HashMap::new();
+  let mut transition_head_stats: HashMap<(String, Option<i64>, String), Stat> = HashMap::new();
   let mut workspace_command_stats: HashMap<(String, String), Stat> = HashMap::new();
   let mut workspace_transition_stats: HashMap<(String, String, Option<i64>, String), Stat> =
+    HashMap::new();
+  let mut workspace_transition_head_stats: HashMap<(String, String, Option<i64>, String), Stat> =
     HashMap::new();
   let mut context_stats: HashMap<ContextKey, Stat> = HashMap::new();
   let mut arg_stats: HashMap<(String, String, String, i64, String), ArgStat> = HashMap::new();
@@ -159,18 +153,13 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
   let mut env_stats: HashMap<(String, String, String, String, String), Stat> = HashMap::new();
   let mut token_cache: HashMap<String, (Vec<String>, Vec<String>)> = HashMap::new();
   let mut workspace_root_cache: HashMap<String, String> = HashMap::new();
-  let mut phase_stats: HashMap<(String, String), PhaseStat> = HashMap::new();
-  let mut command_shell: HashMap<String, String> = HashMap::new();
-  let phase_config = PhaseConfig::load()?;
-  let mut phase_samples: Vec<PhaseSample> = Vec::new();
-  let mut phase_unlabeled: Vec<Vec<f64>> = Vec::new();
 
   let mut prev_command: Option<String> = None;
+  let mut prev_head: Option<String> = None;
   let mut prev_exit_status: Option<i64> = None;
   let mut prev_workspace_root: String = String::new();
   let mut processed: usize = 0;
   let progress_interval = 50_000usize;
-  let max_unlabeled = 10_000usize;
   let aliases = load_aliases();
 
   let mut rows = if let Some(limit) = max_commands {
@@ -270,8 +259,6 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
       );
     }
 
-    command_shell.insert(stats_command.clone(), shellname.clone());
-
     let tokens = tokenize_index(&shellname, &stats_command);
     if !token_cache.contains_key(&stats_command) {
       let raw = tokens.iter().map(|t| t.raw.clone()).collect();
@@ -279,14 +266,43 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
       token_cache.insert(stats_command.clone(), (raw, normalized));
     }
 
-    if phase_config.labels().len() > 1 {
-      let features = features_from_tokens(&tokens, phase_config.hash_size());
-      if let Some(label) = phase_config.match_label(&stats_command) {
-        phase_samples.push(PhaseSample { features, label });
-      } else if phase_unlabeled.len() < max_unlabeled {
-        phase_unlabeled.push(features);
-      }
+    let current_head = extract_command_stats_parts(&stats_command, &tokens)
+      .map(|parts| parts.head)
+      .or_else(|| extract_command_parts(&stats_command, &tokens).map(|parts| parts.head));
+
+    if let Some(prev_head) = &prev_head {
+      update_stat_key(
+        &mut transition_head_stats,
+        (prev_head.clone(), prev_exit_status, stats_command.clone()),
+        ts,
+      );
+      update_stat_key(
+        &mut transition_head_stats,
+        (prev_head.clone(), None, stats_command.clone()),
+        ts,
+      );
+      update_stat_key(
+        &mut workspace_transition_head_stats,
+        (
+          prev_workspace_root.clone(),
+          prev_head.clone(),
+          prev_exit_status,
+          stats_command.clone(),
+        ),
+        ts,
+      );
+      update_stat_key(
+        &mut workspace_transition_head_stats,
+        (
+          prev_workspace_root.clone(),
+          prev_head.clone(),
+          None,
+          stats_command.clone(),
+        ),
+        ts,
+      );
     }
+
     let mut base_head: Option<String> = None;
     if let Some(parts) = extract_command_parts(&stats_command, &tokens) {
       base_head = Some(parts.head.clone());
@@ -347,65 +363,67 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
       }
     }
     if let Some(parts) = extract_command_stats_parts(&stats_command, &tokens)
-      && base_head.as_deref() != Some(parts.head.as_str()) {
-        let mut flags = parts.flags;
-        flags.sort();
-        let flags_json = serde_json::to_string(&flags)?;
-        for flag in &flags {
-          let flag_norm = normalize_token(flag);
-          update_stat_key(
-            &mut flag_stats,
-            (
-              workspace_root.clone(),
-              parts.head.clone(),
-              flag.clone(),
-              flag_norm,
-            ),
-            ts,
-          );
-        }
-        for env in &parts.env {
-          let env_key = env.raw.split('=').next().unwrap_or_default().to_string();
-          update_stat_key(
-            &mut env_stats,
-            (
-              workspace_root.clone(),
-              parts.head.clone(),
-              env_key,
-              env.raw.clone(),
-              env.normalized.clone(),
-            ),
-            ts,
-          );
-        }
-        for (idx, arg) in parts.args.iter().enumerate() {
-          update_arg_stat(
-            &mut arg_stats,
-            (
-              workspace_root.clone(),
-              parts.head.clone(),
-              flags_json.clone(),
-              idx as i64,
-              arg.raw.clone(),
-            ),
-            &arg.normalized,
-            ts,
-          );
-          update_arg_stat(
-            &mut arg_stats_any,
-            (
-              workspace_root.clone(),
-              parts.head.clone(),
-              flags_json.clone(),
-              arg.raw.clone(),
-            ),
-            &arg.normalized,
-            ts,
-          );
-        }
+      && base_head.as_deref() != Some(parts.head.as_str())
+    {
+      let mut flags = parts.flags;
+      flags.sort();
+      let flags_json = serde_json::to_string(&flags)?;
+      for flag in &flags {
+        let flag_norm = normalize_token(flag);
+        update_stat_key(
+          &mut flag_stats,
+          (
+            workspace_root.clone(),
+            parts.head.clone(),
+            flag.clone(),
+            flag_norm,
+          ),
+          ts,
+        );
       }
+      for env in &parts.env {
+        let env_key = env.raw.split('=').next().unwrap_or_default().to_string();
+        update_stat_key(
+          &mut env_stats,
+          (
+            workspace_root.clone(),
+            parts.head.clone(),
+            env_key,
+            env.raw.clone(),
+            env.normalized.clone(),
+          ),
+          ts,
+        );
+      }
+      for (idx, arg) in parts.args.iter().enumerate() {
+        update_arg_stat(
+          &mut arg_stats,
+          (
+            workspace_root.clone(),
+            parts.head.clone(),
+            flags_json.clone(),
+            idx as i64,
+            arg.raw.clone(),
+          ),
+          &arg.normalized,
+          ts,
+        );
+        update_arg_stat(
+          &mut arg_stats_any,
+          (
+            workspace_root.clone(),
+            parts.head.clone(),
+            flags_json.clone(),
+            arg.raw.clone(),
+          ),
+          &arg.normalized,
+          ts,
+        );
+      }
+    }
 
     prev_command = Some(stats_command);
+    prev_head = current_head;
     prev_exit_status = exit_status;
     prev_workspace_root = workspace_root;
     processed += 1;
@@ -418,48 +436,6 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
     return Ok(IndexReport::default());
   }
 
-  let phase_predictor = train_phase_predictor(&phase_config, phase_samples, phase_unlabeled);
-  let phase_labels: Vec<String> = phase_predictor
-    .as_ref()
-    .map(|predictor| predictor.labels().to_vec())
-    .unwrap_or_else(|| phase_config.labels().to_vec());
-
-  if phase_labels.len() > 1 {
-    for (command, stat) in &command_stats {
-      let Some(shellname) = command_shell.get(command).map(|s| s.as_str()) else {
-        continue;
-      };
-      let tokens = tokenize_index(shellname, command);
-      let parts = extract_command_parts(command, &tokens);
-      let Some(parts) = parts else {
-        continue;
-      };
-      let features = features_from_tokens(&tokens, phase_config.hash_size());
-      let probs = if let Some(predictor) = &phase_predictor {
-        predictor.predict(&features)
-      } else {
-        phase_config.pattern_distribution(command)
-      };
-      if probs.len() != phase_labels.len() {
-        continue;
-      }
-      for (idx, phase) in phase_labels.iter().enumerate() {
-        let prob = probs[idx] as f64;
-        if prob <= 0.0 {
-          continue;
-        }
-        let entry = phase_stats
-          .entry((parts.head.clone(), phase.clone()))
-          .or_default();
-        entry.freq += stat.freq;
-        if stat.last_seen > entry.last_seen {
-          entry.last_seen = stat.last_seen;
-        }
-        entry.confidence_sum += prob * stat.freq as f64;
-      }
-    }
-  }
-
   let now = SystemTime::now()
     .duration_since(UNIX_EPOCH)
     .unwrap_or_default()
@@ -468,15 +444,16 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
   conn.execute("BEGIN", ()).await?;
   let write_result: Result<()> = async {
     conn.execute("DELETE FROM transition_stats", ()).await?;
+    conn.execute("DELETE FROM transition_head_stats", ()).await?;
     conn.execute("DELETE FROM workspace_command_stats", ()).await?;
     conn.execute("DELETE FROM workspace_transition_stats", ()).await?;
+    conn.execute("DELETE FROM workspace_transition_head_stats", ()).await?;
     conn.execute("DELETE FROM context_stats", ()).await?;
     conn.execute("DELETE FROM arg_stats", ()).await?;
     conn.execute("DELETE FROM arg_stats_any", ()).await?;
     conn.execute("DELETE FROM flag_stats", ()).await?;
     conn.execute("DELETE FROM env_stats", ()).await?;
     conn.execute("DELETE FROM token_cache", ()).await?;
-    conn.execute("DELETE FROM phase_stats", ()).await?;
 
     // Preserve any extra columns on command_stats (e.g. embeddings) by updating freq/last_seen
     // in-place and then deleting commands that are no longer present in the selected history.
@@ -558,6 +535,24 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
     }
     insert_transitions.flush().await?;
 
+    let mut insert_transition_heads = BulkInserter::new(
+      conn,
+      "INSERT INTO transition_head_stats (prev_head, prev_exit_status, next_command, freq, last_seen) VALUES ",
+      5,
+    );
+    for ((prev, status, next), stat) in &transition_head_stats {
+      insert_transition_heads
+        .push_row([
+          Value::Text(prev.clone()),
+          opt_i64_value(status),
+          Value::Text(next.clone()),
+          Value::Integer(stat.freq),
+          Value::Integer(stat.last_seen),
+        ])
+        .await?;
+    }
+    insert_transition_heads.flush().await?;
+
     let mut insert_workspace_transitions = BulkInserter::new(
       conn,
       "INSERT INTO workspace_transition_stats (workspace_root, prev_command, prev_exit_status, next_command, freq, last_seen) VALUES ",
@@ -576,6 +571,25 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
         .await?;
     }
     insert_workspace_transitions.flush().await?;
+
+    let mut insert_workspace_transition_heads = BulkInserter::new(
+      conn,
+      "INSERT INTO workspace_transition_head_stats (workspace_root, prev_head, prev_exit_status, next_command, freq, last_seen) VALUES ",
+      6,
+    );
+    for ((workspace_root, prev, status, next), stat) in &workspace_transition_head_stats {
+      insert_workspace_transition_heads
+        .push_row([
+          Value::Text(workspace_root.clone()),
+          Value::Text(prev.clone()),
+          opt_i64_value(status),
+          Value::Text(next.clone()),
+          Value::Integer(stat.freq),
+          Value::Integer(stat.last_seen),
+        ])
+        .await?;
+    }
+    insert_workspace_transition_heads.flush().await?;
 
     let mut insert_contexts = BulkInserter::new(
       conn,
@@ -695,29 +709,6 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
     }
     insert_token_cache.flush().await?;
 
-    let mut insert_phase_stats = BulkInserter::new(
-      conn,
-      "INSERT INTO phase_stats (command_head, phase, confidence, freq, last_seen) VALUES ",
-      5,
-    );
-    for ((command_head, phase), stat) in &phase_stats {
-      let confidence = if stat.freq > 0 {
-        stat.confidence_sum / stat.freq as f64
-      } else {
-        0.0
-      };
-      insert_phase_stats
-        .push_row([
-          Value::Text(command_head.clone()),
-          Value::Text(phase.clone()),
-          Value::Real(confidence),
-          Value::Integer(stat.freq),
-          Value::Integer(stat.last_seen),
-        ])
-        .await?;
-    }
-    insert_phase_stats.flush().await?;
-
     Ok(())
   }
   .await;
@@ -733,7 +724,6 @@ pub async fn rebuild_stats(conn: &Connection, max_commands: Option<usize>) -> Re
     transitions: transition_stats.len(),
     contexts: context_stats.len(),
     token_cache: token_cache.len(),
-    phase_stats: phase_stats.len(),
   })
 }
 

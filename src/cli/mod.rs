@@ -200,6 +200,10 @@ pub enum Commands {
     #[arg(long)]
     show_scores: bool,
 
+    /// Show a per-suggestion score breakdown (requires `--show-scores` when using zsh format)
+    #[arg(long)]
+    show_breakdown: bool,
+
     /// Return full-line suggestions for autosuggest backends
     #[arg(long)]
     autosuggest: bool,
@@ -303,6 +307,7 @@ pub struct SuggestArgs {
   pub no_sequences: bool,
   pub completion_format: CompletionFormat,
   pub show_scores: bool,
+  pub show_breakdown: bool,
   pub autosuggest: bool,
   pub timeout: Option<HumanDuration>,
 }
@@ -462,6 +467,7 @@ pub async fn run(cli: Cli) -> Result<()> {
       no_sequences,
       completion_format,
       show_scores,
+      show_breakdown,
       autosuggest,
       timeout,
       embedded_db: _,
@@ -478,6 +484,7 @@ pub async fn run(cli: Cli) -> Result<()> {
         no_sequences,
         completion_format,
         show_scores,
+        show_breakdown,
         autosuggest,
         timeout,
       };

@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::collections::HashSet;
 
 use libsql::Connection;
 use rayon::prelude::*;
@@ -425,62 +426,61 @@ pub async fn candidates_from_sequences(
   limit: usize,
 ) -> Result<Vec<SequenceCandidate>> {
   let config = SequenceConfig::default();
-  let mut rows = conn
-    .query(
-      "SELECT sequence_json, support, confidence, lift, sequence_len
-       FROM sequence_stats
-       WHERE sequence_len >= 2
-       ORDER BY lift DESC
-       LIMIT ?",
-      libsql::params![limit as i64],
-    )
-    .await?;
-
-  let mut candidates = Vec::new();
   let normalized_recent_commands = recent_commands
     .iter()
     .map(|cmd| normalize_sequence_command(shellname, cmd))
     .collect::<Vec<_>>();
   let recent_len = normalized_recent_commands.len();
-  let recent_signatures = normalized_recent_commands
-    .iter()
-    .map(|cmd| command_signature(shellname, cmd))
-    .collect::<Vec<_>>();
-  while let Some(row) = rows.next().await? {
-    let sequence_json = row.get::<String>(0)?;
-    let support = row.get::<i64>(1)? as usize;
-    let confidence = row.get::<f64>(2)?;
-    let lift = row.get::<f64>(3)?;
-    let sequence_len = row.get::<i64>(4)? as usize;
-    if support < config.min_support || confidence < config.min_confidence || lift < config.min_lift
-    {
-      continue;
-    }
+  if recent_len == 0 {
+    return Ok(Vec::new());
+  }
 
-    let sequence: Vec<String> = serde_json::from_str(&sequence_json)?;
-    if sequence_len < 2 || sequence.len() < 2 {
-      continue;
-    }
-    let prefix_len = sequence_len.saturating_sub(1);
-    if prefix_len == 0 || recent_len < prefix_len {
-      continue;
-    }
-    let recent_slice = &normalized_recent_commands[recent_len - prefix_len..];
-    let mut matched = sequence[..prefix_len] == *recent_slice;
-    if !matched {
-      let seq_signatures = sequence[..prefix_len]
-        .iter()
-        .map(|cmd| command_signature(shellname, cmd))
-        .collect::<Vec<_>>();
-      matched = seq_signatures.len() == prefix_len
-        && seq_signatures
-          .iter()
-          .zip(recent_signatures[recent_len - prefix_len..].iter())
-          .all(|(seq_sig, recent_sig)| seq_sig.is_some() && seq_sig == recent_sig);
-    }
+  let max_prefix_len = config.max_len.saturating_sub(1).min(recent_len);
+  if max_prefix_len == 0 {
+    return Ok(Vec::new());
+  }
 
-    if matched {
+  let mut candidates: Vec<SequenceCandidate> = Vec::new();
+  let mut seen: HashSet<String> = HashSet::new();
+
+  // Prefer the longest matching prefix, but back off to shorter prefixes if needed.
+  for prefix_len in (1..=max_prefix_len).rev() {
+    let prefix_slice = &normalized_recent_commands[recent_len - prefix_len..];
+    let prefix_json = serde_json::to_string(prefix_slice)?;
+    let seq_len = (prefix_len + 1) as i64;
+
+    let mut rows = conn
+      .query(
+        "SELECT sequence_json, support, confidence, lift, sequence_len
+         FROM sequence_stats
+         WHERE prefix_json = ? AND sequence_len = ?
+         ORDER BY lift DESC
+         LIMIT ?",
+        libsql::params![prefix_json, seq_len, limit as i64],
+      )
+      .await?;
+
+    while let Some(row) = rows.next().await? {
+      let sequence_json = row.get::<String>(0)?;
+      let support = row.get::<i64>(1)? as usize;
+      let confidence = row.get::<f64>(2)?;
+      let lift = row.get::<f64>(3)?;
+      let sequence_len = row.get::<i64>(4)? as usize;
+      if support < config.min_support
+        || confidence < config.min_confidence
+        || lift < config.min_lift
+      {
+        continue;
+      }
+
+      let sequence: Vec<String> = serde_json::from_str(&sequence_json)?;
+      if sequence_len != prefix_len + 1 || sequence.len() != sequence_len {
+        continue;
+      }
       let next = sequence.last().cloned().unwrap_or_default();
+      if next.is_empty() || !seen.insert(next.clone()) {
+        continue;
+      }
       candidates.push(SequenceCandidate {
         command: next,
         confidence,
@@ -488,6 +488,14 @@ pub async fn candidates_from_sequences(
         support,
         prefix_len,
       });
+      if candidates.len() >= limit {
+        return Ok(candidates);
+      }
+    }
+
+    // If we found any candidates for the longest prefix, stop backing off.
+    if !candidates.is_empty() {
+      break;
     }
   }
 

@@ -24,6 +24,7 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
     no_sequences,
     completion_format,
     show_scores,
+    show_breakdown,
     autosuggest,
     timeout,
   } = args;
@@ -82,6 +83,7 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
         recent_limit,
         use_sequences: !no_sequences,
         prefer_full_line: autosuggest,
+        include_debug: show_breakdown,
         timeout_ms,
       };
       match server::try_request(request).await? {
@@ -111,6 +113,7 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
           shellname: Some(shellname.clone()),
           use_sequences: !no_sequences,
           prefer_full_line: autosuggest,
+          include_debug: show_breakdown,
         };
         suggest(&db.conn, base_config).await?
       }
@@ -149,14 +152,22 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
       {
         match completion_format {
           CompletionFormat::Plain => {
-            if show_scores {
+            if show_breakdown {
+              println!(
+                "{}\t{}",
+                tok.raw,
+                format_suggestion_debug(&suggestion, show_scores)
+              );
+            } else if show_scores {
               println!("{}\t{:.4}", tok.raw, suggestion.score);
             } else {
               println!("{}", tok.raw);
             }
           }
           CompletionFormat::Zsh => {
-            let desc = if show_scores {
+            let desc = if show_breakdown {
+              Some(format_suggestion_debug(&suggestion, show_scores))
+            } else if show_scores {
               Some(format!("{:.4}", suggestion.score))
             } else {
               None
@@ -183,6 +194,7 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
           shellname: Some(shellname.clone()),
           use_sequences: !no_sequences,
           prefer_full_line: autosuggest,
+          include_debug: show_breakdown,
         };
         suggest(&db.conn, config).await?
       }
@@ -196,14 +208,22 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
     for suggestion in suggestions {
       match completion_format {
         CompletionFormat::Plain => {
-          if show_scores {
+          if show_breakdown {
+            println!(
+              "{}\t{}",
+              suggestion.command,
+              format_suggestion_debug(&suggestion, show_scores)
+            );
+          } else if show_scores {
             println!("{}\t{:.4}", suggestion.command, suggestion.score);
           } else {
             println!("{}", suggestion.command);
           }
         }
         CompletionFormat::Zsh => {
-          let desc = if show_scores {
+          let desc = if show_breakdown {
+            Some(format_suggestion_debug(&suggestion, show_scores))
+          } else if show_scores {
             Some(format!("{:.4}", suggestion.score))
           } else {
             None
@@ -248,7 +268,149 @@ fn map_server_suggestions(items: Vec<server::Suggestion>) -> Vec<Suggestion> {
     .map(|item| Suggestion {
       command: item.command,
       score: item.score as f64,
-      breakdown: ScoreBreakdown::default(),
+      breakdown: ScoreBreakdown {
+        recency: item.breakdown.recency as f64,
+        session_recency: item.breakdown.session_recency as f64,
+        frequency: item.breakdown.frequency as f64,
+        transition: item.breakdown.transition as f64,
+        context: item.breakdown.context as f64,
+        sequence: item.breakdown.sequence as f64,
+        similarity: item.breakdown.similarity as f64,
+        embedding_retrieval: item.breakdown.embedding_retrieval as f64,
+        online_model: item.breakdown.online_model as f64,
+      },
+      debug: item.debug.map(|debug| crate::core::SuggestionDebug {
+        blend: crate::core::BlendDebug {
+          model_gate: debug.blend.model_gate as f64,
+          model_alpha: debug.blend.model_alpha as f64,
+          blend_model_weight: debug.blend.blend_model_weight as f64,
+          blend_frecency_weight: debug.blend.blend_frecency_weight as f64,
+          blend_sequence_weight: debug.blend.blend_sequence_weight as f64,
+          blend_tier1_weight: debug.blend.blend_tier1_weight as f64,
+          model_feature: debug.blend.model_feature as f64,
+          frecency_feature: debug.blend.frecency_feature as f64,
+          sequence_feature: debug.blend.sequence_feature as f64,
+          tier1_feature: debug.blend.tier1_feature as f64,
+          model_contrib: debug.blend.model_contrib as f64,
+          frecency_contrib: debug.blend.frecency_contrib as f64,
+          sequence_contrib: debug.blend.sequence_contrib as f64,
+          tier1_contrib: debug.blend.tier1_contrib as f64,
+        },
+        candidate: crate::core::CandidateDebug {
+          freq: debug.candidate.freq,
+          workspace_freq: debug.candidate.workspace_freq,
+          last_seen: debug.candidate.last_seen,
+          transition_freq: debug.candidate.transition_freq,
+          workspace_transition_freq: debug.candidate.workspace_transition_freq,
+          transition_exit_status_match: debug.candidate.transition_exit_status_match,
+          context_freq: debug.candidate.context_freq,
+          context_cwd_match: debug.candidate.context_cwd_match,
+          context_host_match: debug.candidate.context_host_match,
+          context_user_match: debug.candidate.context_user_match,
+          session_freq: debug.candidate.session_freq,
+          session_last_seen: debug.candidate.session_last_seen,
+          from_embedding: debug.candidate.from_embedding,
+          sequence_confidence: debug.candidate.sequence_confidence as f64,
+          sequence_lift: debug.candidate.sequence_lift as f64,
+          sequence_prefix_len: debug.candidate.sequence_prefix_len as usize,
+        },
+        pipeline: crate::core::PipelineDebug {
+          added_transition: debug.pipeline.added_transition as usize,
+          added_session: debug.pipeline.added_session as usize,
+          added_embedding: debug.pipeline.added_embedding as usize,
+          added_context: debug.pipeline.added_context as usize,
+          added_workspace: debug.pipeline.added_workspace as usize,
+          added_head: debug.pipeline.added_head as usize,
+          added_sequence: debug.pipeline.added_sequence as usize,
+          added_template: debug.pipeline.added_template as usize,
+          added_recent: debug.pipeline.added_recent as usize,
+          added_global: debug.pipeline.added_global as usize,
+          total_candidates: debug.pipeline.total_candidates as usize,
+          conditional_candidates: debug.pipeline.conditional_candidates as usize,
+          pruned_before: debug.pipeline.pruned_before as usize,
+          pruned_after: debug.pipeline.pruned_after as usize,
+          pruned_kept_conditional: debug.pipeline.pruned_kept_conditional as usize,
+        },
+      }),
     })
     .collect()
+}
+
+fn format_suggestion_debug(suggestion: &Suggestion, always_show_score: bool) -> String {
+  let score = if always_show_score {
+    format!("score={:.4}", suggestion.score)
+  } else {
+    format!("{:.4}", suggestion.score)
+  };
+
+  if let Some(debug) = suggestion.debug.as_ref() {
+    let b = &debug.blend;
+    let c = &debug.candidate;
+    let p = &debug.pipeline;
+    let (dom, dom_val) = {
+      let mut best = ("m", b.model_contrib.abs());
+      for cand in [
+        ("f", b.frecency_contrib.abs()),
+        ("s", b.sequence_contrib.abs()),
+        ("t", b.tier1_contrib.abs()),
+      ] {
+        if cand.1 > best.1 {
+          best = cand;
+        }
+      }
+      best
+    };
+    return format!(
+      "{score} dom={dom}={dom_val:.3} contrib[m={:.3} f={:.3} s={:.3} t={:.3}] gate={:.2} a={:.2} w[m={:.2} f={:.2} s={:.2} t={:.2}] feat[mdl={:.3} fre={:.3} seq={:.3} t1={:.3}] cand[tr={} wtr={} ctx={} freq={} wf={} seqc={:.3} lift={:.2} pref={} emb={}] pool[total={} cond={} add[tr={} ctx={} ws={} head={} seq={} tpl={} rec={} glb={} emb={} ses={}] prune[{}→{} keep_cond={}]",
+      b.model_contrib,
+      b.frecency_contrib,
+      b.sequence_contrib,
+      b.tier1_contrib,
+      b.model_gate,
+      b.model_alpha,
+      b.blend_model_weight,
+      b.blend_frecency_weight,
+      b.blend_sequence_weight,
+      b.blend_tier1_weight,
+      b.model_feature,
+      b.frecency_feature,
+      b.sequence_feature,
+      b.tier1_feature,
+      c.transition_freq,
+      c.workspace_transition_freq,
+      c.context_freq,
+      c.freq,
+      c.workspace_freq,
+      c.sequence_confidence,
+      c.sequence_lift,
+      c.sequence_prefix_len,
+      if c.from_embedding { 1 } else { 0 },
+      p.total_candidates,
+      p.conditional_candidates,
+      p.added_transition,
+      p.added_context,
+      p.added_workspace,
+      p.added_head,
+      p.added_sequence,
+      p.added_template,
+      p.added_recent,
+      p.added_global,
+      p.added_embedding,
+      p.added_session,
+      p.pruned_before,
+      p.pruned_after,
+      p.pruned_kept_conditional
+    );
+  }
+
+  format!(
+    "{score} feats[rec={:.3} freq={:.3} tr={:.3} ctx={:.3} seq={:.3} sim={:.3} mdl={:.3}]",
+    suggestion.breakdown.recency,
+    suggestion.breakdown.frequency,
+    suggestion.breakdown.transition,
+    suggestion.breakdown.context,
+    suggestion.breakdown.sequence,
+    suggestion.breakdown.similarity,
+    suggestion.breakdown.online_model
+  )
 }

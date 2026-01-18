@@ -55,8 +55,6 @@ async fn daemon_roundtrip_ping_record_suggest() -> zage::Result<()> {
     other => panic!("unexpected record response: {other:?}"),
   }
 
-  tokio::time::sleep(Duration::from_millis(300)).await;
-
   let suggest = Request::Suggest {
     current_line: Some("git ".to_string()),
     working_directory: Some("/tmp".to_string()),
@@ -69,6 +67,7 @@ async fn daemon_roundtrip_ping_record_suggest() -> zage::Result<()> {
     recent_limit: 10,
     use_sequences: true,
     prefer_full_line: false,
+    include_debug: false,
     timeout_ms: None,
   };
   match zage::server::try_request(suggest).await? {

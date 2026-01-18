@@ -1782,69 +1782,9 @@ session = "s1"
 contains = ["gco main", "gco feature-branch"]
 ```
 
-### 3.10 Phase Mechanics
+### 3.10 (Removed) Phase Mechanics
 
-#### 3.10.1 Phase Detection
-
-**Objective**: Workflow phase is detected from recent commands
-
-```toml
-[meta]
-description = "Verify phase detection from command history"
-tags = ["phase"]
-
-[physics]
-now = "2024-06-15T12:00:00Z"
-# Phase boost is added to context score via phase_match_boost()
-w_recency = 0.0
-w_frequency = 0.0
-w_transition = 0.0
-w_context = 1.0
-w_sequence = 0.0
-w_similarity = 0.0
-
-[options]
-run_phase_indexing = true
-
-[phases]
-build = ["cargo build", "make", "npm run build"]
-test = ["cargo test", "pytest", "npm test"]
-deploy = ["kubectl apply", "docker push"]
-
-[[history]]
-cmd = "cargo build"
-at = "-10m"
-cwd = "/tmp"
-exit = 0
-session = "s1"
-
-[[history]]
-cmd = "cargo build --release"
-at = "-9m"
-cwd = "/tmp"
-exit = 0
-session = "s1"
-
-[[history]]
-cmd = "cargo test"
-at = "-1h"
-cwd = "/tmp"
-exit = 0
-session = "s1"
-count = 20
-
-[[scenario]]
-name = "build_phase_boost"
-mode = "next_command"
-
-[scenario.context]
-cwd = "/tmp"
-session = "s1"
-
-[scenario.expect]
-# Recent commands are build-phase, so build commands should be boosted
-top = ["cargo build", "cargo build --release"]
-```
+Phase detection and phase-based ranking were removed in favor of sequence/transition signals.
 
 ### 3.11 Template Mechanics
 

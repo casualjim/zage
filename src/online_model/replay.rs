@@ -318,7 +318,6 @@ mod tests {
       ctx_user: Vec::new(),
       ctx_timebucket: Vec::new(),
       ctx_session: Vec::new(),
-      ctx_phase: Vec::new(),
       recent_heads: Vec::new(),
       recent_flags: Vec::new(),
       recent_args: Vec::new(),

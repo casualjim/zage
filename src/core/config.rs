@@ -10,6 +10,7 @@ pub struct SuggestConfig {
   pub shellname: Option<String>,
   pub use_sequences: bool,
   pub prefer_full_line: bool,
+  pub include_debug: bool,
 }
 
 impl Default for SuggestConfig {
@@ -25,6 +26,7 @@ impl Default for SuggestConfig {
       shellname: None,
       use_sequences: true,
       prefer_full_line: false,
+      include_debug: false,
     }
   }
 }

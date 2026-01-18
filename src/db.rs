@@ -175,14 +175,20 @@ async fn ensure_sequence_stats_columns(conn: &Connection) -> Result<()> {
 
 pub async fn insert_invocation(conn: &Connection, invocation: &Invocation) -> Result<bool> {
   let id = uuid::Uuid::now_v7().to_string();
+  let command = crate::tokenize::normalize_command_whitespace(&invocation.command);
+  let expanded_command = if invocation.expanded_command.is_empty() {
+    String::new()
+  } else {
+    crate::tokenize::normalize_command_whitespace(&invocation.expanded_command)
+  };
   let changed = conn
     .execute(
       "INSERT OR IGNORE INTO shell_history (id, command, expanded_command, shellname, working_directory, hostname, username, exit_status, start_unix_timestamp, end_unix_timestamp, session_id)
        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       (
         id,
-        invocation.command.clone(),
-        invocation.expanded_command.clone(),
+        command,
+        expanded_command,
         invocation.shellname.clone(),
         invocation.working_directory.clone(),
         invocation.hostname.clone(),
@@ -252,9 +258,11 @@ where
     }
 
     let id = uuid::Uuid::now_v7().to_string();
+    let command = crate::tokenize::normalize_command_whitespace(&invocation.command);
+    let expanded = crate::tokenize::normalize_command_whitespace(&invocation.expanded_command);
     batch_params.push(libsql::Value::Text(id));
-    batch_params.push(libsql::Value::Text(invocation.command));
-    batch_params.push(libsql::Value::Text(invocation.expanded_command));
+    batch_params.push(libsql::Value::Text(command));
+    batch_params.push(libsql::Value::Text(expanded));
     batch_params.push(libsql::Value::Text(invocation.shellname));
     batch_params.push(match invocation.working_directory {
       Some(v) => libsql::Value::Text(v),
@@ -599,6 +607,13 @@ pub async fn update_stats_for_invocation(conn: &Connection, invocation: &Invocat
       let prev_workspace_root =
         resolve_workspace_root(prev.working_directory.as_deref(), None);
 
+      let prev_head = {
+        let tokens = tokenize_index(prev.shellname.as_str(), &prev_command);
+        extract_command_stats_parts(&prev_command, &tokens)
+          .map(|parts| parts.head)
+          .or_else(|| extract_command_parts(&prev_command, &tokens).map(|parts| parts.head))
+      };
+
       conn
         .execute(
         "INSERT INTO transition_stats (prev_command, prev_exit_status, next_command, freq, last_seen)
@@ -626,6 +641,35 @@ pub async fn update_stats_for_invocation(conn: &Connection, invocation: &Invocat
         )
         .await?;
 
+      if let Some(prev_head) = prev_head.as_deref() {
+        conn
+          .execute(
+            "INSERT INTO transition_head_stats (prev_head, prev_exit_status, next_command, freq, last_seen)
+             VALUES (?, ?, ?, 1, ?)
+             ON CONFLICT(prev_head, prev_exit_status, next_command) DO UPDATE SET
+               freq = freq + 1,
+               last_seen = MAX(last_seen, excluded.last_seen)",
+            (
+              prev_head.to_string(),
+              prev_status,
+              stats_command.to_string(),
+              now,
+            ),
+          )
+          .await?;
+
+        conn
+          .execute(
+            "INSERT INTO transition_head_stats (prev_head, prev_exit_status, next_command, freq, last_seen)
+             VALUES (?, NULL, ?, 1, ?)
+             ON CONFLICT(prev_head, prev_exit_status, next_command) DO UPDATE SET
+               freq = freq + 1,
+               last_seen = MAX(last_seen, excluded.last_seen)",
+            (prev_head.to_string(), stats_command.to_string(), now),
+          )
+          .await?;
+      }
+
       conn
         .execute(
         "INSERT INTO workspace_transition_stats (workspace_root, prev_command, prev_exit_status, next_command, freq, last_seen)
@@ -651,13 +695,48 @@ pub async fn update_stats_for_invocation(conn: &Connection, invocation: &Invocat
              freq = freq + 1,
              last_seen = MAX(last_seen, excluded.last_seen)",
           (
-            prev_workspace_root,
+            prev_workspace_root.clone(),
             prev_command.to_string(),
             stats_command.to_string(),
             now,
           ),
         )
         .await?;
+
+      if let Some(prev_head) = prev_head.as_deref() {
+        conn
+          .execute(
+            "INSERT INTO workspace_transition_head_stats (workspace_root, prev_head, prev_exit_status, next_command, freq, last_seen)
+             VALUES (?, ?, ?, ?, 1, ?)
+             ON CONFLICT(workspace_root, prev_head, prev_exit_status, next_command) DO UPDATE SET
+               freq = freq + 1,
+               last_seen = MAX(last_seen, excluded.last_seen)",
+            (
+              prev_workspace_root.clone(),
+              prev_head.to_string(),
+              prev_status,
+              stats_command.to_string(),
+              now,
+            ),
+          )
+          .await?;
+
+        conn
+          .execute(
+            "INSERT INTO workspace_transition_head_stats (workspace_root, prev_head, prev_exit_status, next_command, freq, last_seen)
+             VALUES (?, ?, NULL, ?, 1, ?)
+             ON CONFLICT(workspace_root, prev_head, prev_exit_status, next_command) DO UPDATE SET
+               freq = freq + 1,
+               last_seen = MAX(last_seen, excluded.last_seen)",
+            (
+              prev_workspace_root,
+              prev_head.to_string(),
+              stats_command.to_string(),
+              now,
+            ),
+          )
+          .await?;
+      }
     }
 
     let raw_json = serde_json::to_string(&raw_tokens)?;

@@ -64,8 +64,8 @@ async fn run_embedded(
 
   let report = rebuild_stats(&db.conn, None).await?;
   eprintln!(
-    "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}, phase_stats={}",
-    report.commands, report.transitions, report.contexts, report.token_cache, report.phase_stats
+    "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}",
+    report.commands, report.transitions, report.contexts, report.token_cache
   );
 
   if !no_sequences {

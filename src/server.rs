@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::{UnixListener, UnixStream};
 use tokio::sync::mpsc;
+use tokio::sync::oneshot;
 use tokio::time::timeout;
 use tracing::{debug, info, warn};
 
@@ -42,6 +43,14 @@ const DEFAULT_TIMEOUT_MS: u64 = 1_000;
 // We use the server for long-running operations (import/index) over a local UDS.
 // Default to a very large timeout to avoid client disconnects during indexing.
 const LONG_TIMEOUT_MS: u64 = 86_400_000;
+const RECORD_TIMEOUT_MS: u64 = 300;
+
+type RecordResult = std::result::Result<(), String>;
+
+struct RecordMessage {
+  invocation: Invocation,
+  respond_to: oneshot::Sender<RecordResult>,
+}
 
 fn db_busy_timeout_ms() -> u64 {
   std::env::var("ZAGE_DB_BUSY_TIMEOUT_MS")
@@ -52,6 +61,7 @@ fn db_busy_timeout_ms() -> u64 {
 
 fn response_timeout_ms(request: &Request) -> u64 {
   match request {
+    Request::Record { .. } => RECORD_TIMEOUT_MS,
     Request::Suggest { timeout_ms, .. } => timeout_ms.unwrap_or(DEFAULT_TIMEOUT_MS),
     Request::Yank { .. } => LONG_TIMEOUT_MS,
     #[cfg(feature = "pprof")]
@@ -97,6 +107,7 @@ pub enum Request {
     recent_limit: usize,
     use_sequences: bool,
     prefer_full_line: bool,
+    include_debug: bool,
     timeout_ms: Option<u64>,
   },
   Import {
@@ -175,7 +186,99 @@ pub enum Response {
 pub struct Suggestion {
   pub command: String,
   pub score: f32,
+  pub breakdown: ScoreBreakdown,
+  pub debug: Option<SuggestionDebug>,
   pub source: SuggestionSource,
+}
+
+#[derive(Debug, Archive, Serialize, Deserialize)]
+#[archive(check_bytes)]
+pub struct ScoreBreakdown {
+  pub recency: f32,
+  pub session_recency: f32,
+  pub frequency: f32,
+  pub transition: f32,
+  pub context: f32,
+  pub sequence: f32,
+  pub similarity: f32,
+  pub embedding_retrieval: f32,
+  pub online_model: f32,
+}
+
+#[derive(Debug, Archive, Serialize, Deserialize)]
+#[archive(check_bytes)]
+pub struct SuggestionDebug {
+  pub blend: BlendDebug,
+  pub candidate: CandidateDebug,
+  pub pipeline: PipelineDebug,
+}
+
+#[derive(Debug, Archive, Serialize, Deserialize)]
+#[archive(check_bytes)]
+pub struct PipelineDebug {
+  pub added_transition: u32,
+  pub added_session: u32,
+  pub added_embedding: u32,
+  pub added_context: u32,
+  pub added_workspace: u32,
+  pub added_head: u32,
+  pub added_sequence: u32,
+  pub added_template: u32,
+  pub added_recent: u32,
+  pub added_global: u32,
+
+  pub total_candidates: u32,
+  pub conditional_candidates: u32,
+
+  pub pruned_before: u32,
+  pub pruned_after: u32,
+  pub pruned_kept_conditional: u32,
+}
+
+#[derive(Debug, Archive, Serialize, Deserialize)]
+#[archive(check_bytes)]
+pub struct BlendDebug {
+  pub model_gate: f32,
+  pub model_alpha: f32,
+  pub blend_model_weight: f32,
+  pub blend_frecency_weight: f32,
+  pub blend_sequence_weight: f32,
+  pub blend_tier1_weight: f32,
+
+  pub model_feature: f32,
+  pub frecency_feature: f32,
+  pub sequence_feature: f32,
+  pub tier1_feature: f32,
+
+  pub model_contrib: f32,
+  pub frecency_contrib: f32,
+  pub sequence_contrib: f32,
+  pub tier1_contrib: f32,
+}
+
+#[derive(Debug, Archive, Serialize, Deserialize)]
+#[archive(check_bytes)]
+pub struct CandidateDebug {
+  pub freq: i64,
+  pub workspace_freq: i64,
+  pub last_seen: i64,
+
+  pub transition_freq: i64,
+  pub workspace_transition_freq: i64,
+  pub transition_exit_status_match: bool,
+
+  pub context_freq: i64,
+  pub context_cwd_match: bool,
+  pub context_host_match: bool,
+  pub context_user_match: bool,
+
+  pub session_freq: i64,
+  pub session_last_seen: i64,
+
+  pub from_embedding: bool,
+  pub sequence_confidence: f32,
+  pub sequence_lift: f32,
+  pub sequence_prefix_len: u32,
 }
 
 #[derive(Debug, Archive, Serialize, Deserialize)]
@@ -328,22 +431,20 @@ pub async fn run_server(db_config: &DbConfig) -> Result<()> {
     });
   }
 
-  let (record_tx, mut record_rx) = mpsc::channel::<Invocation>(128);
+  let (record_tx, mut record_rx) = mpsc::channel::<RecordMessage>(128);
   let conn_writer = pool.clone();
   tokio::spawn(async move {
-    let mut buffer: Vec<Invocation> = Vec::new();
+    let mut train_buffer: Vec<Invocation> = Vec::new();
     let mut tick = tokio::time::interval(Duration::from_millis(200));
     loop {
       tokio::select! {
-        Some(invocation) = record_rx.recv() => {
-          buffer.push(invocation);
-          if buffer.len() >= 64 {
-            flush_records(&conn_writer, &mut buffer).await;
-          }
+        Some(msg) = record_rx.recv() => {
+          let result = process_record(&conn_writer, &mut train_buffer, msg.invocation).await;
+          let _ = msg.respond_to.send(result);
         }
         _ = tick.tick() => {
-          if !buffer.is_empty() {
-            flush_records(&conn_writer, &mut buffer).await;
+          if !train_buffer.is_empty() {
+            flush_training(&conn_writer, &mut train_buffer).await;
           }
         }
       }
@@ -549,7 +650,7 @@ fn launchd_listener() -> Result<Option<UnixListener>> {
 async fn handle_client(
   mut stream: UnixStream,
   pool: Arc<ConnectionPool>,
-  record_tx: mpsc::Sender<Invocation>,
+  record_tx: mpsc::Sender<RecordMessage>,
 ) -> Result<()> {
   loop {
     let mut size_buf = [0u8; 4];
@@ -598,7 +699,7 @@ fn request_kind(request: &Request) -> &'static str {
 async fn handle_request(
   request: Request,
   pool: &Arc<ConnectionPool>,
-  record_tx: &mpsc::Sender<Invocation>,
+  record_tx: &mpsc::Sender<RecordMessage>,
 ) -> Response {
   match request {
     Request::Ping => Response::Pong,
@@ -817,12 +918,26 @@ async fn handle_request(
         end_unix_timestamp: Some(end_timestamp),
         session_id: session_id as i64,
       };
-      if record_tx.send(invocation).await.is_err() {
+      let (tx, rx) = oneshot::channel::<RecordResult>();
+      if record_tx
+        .send(RecordMessage {
+          invocation,
+          respond_to: tx,
+        })
+        .await
+        .is_err()
+      {
         return Response::Error {
           message: "ingestion queue closed".to_string(),
         };
       }
-      Response::Ack
+      match rx.await {
+        Ok(Ok(())) => Response::Ack,
+        Ok(Err(message)) => Response::Error { message },
+        Err(_) => Response::Error {
+          message: "ingestion worker exited".to_string(),
+        },
+      }
     }
     Request::Feedback {
       shown_id,
@@ -871,6 +986,7 @@ async fn handle_request(
       recent_limit,
       use_sequences,
       prefer_full_line,
+      include_debug,
       timeout_ms: _,
     } => {
       let config = SuggestConfig {
@@ -884,6 +1000,7 @@ async fn handle_request(
         use_sequences,
         recent_limit,
         prefer_full_line,
+        include_debug,
       };
       match pool.get().await {
         Ok(conn) => {
@@ -1027,8 +1144,8 @@ async fn handle_import(conn: &Connection, request: ImportRequest) -> Result<Vec<
   let token_seq_report = analyze_token_sequences(conn, SequenceConfig::default()).await?;
   let token_seq_dur = token_seq_start.elapsed();
   lines.push(format!(
-    "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}, phase_stats={}",
-    report.commands, report.transitions, report.contexts, report.token_cache, report.phase_stats
+    "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}",
+    report.commands, report.transitions, report.contexts, report.token_cache
   ));
   lines.push(format!(
     "Command sequence stats: sequences={}, bigrams={}, trigrams={}",
@@ -1063,8 +1180,8 @@ async fn handle_index(
 ) -> Result<Vec<String>> {
   let report = rebuild_stats(conn, max_commands).await?;
   let mut lines = vec![format!(
-    "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}, phase_stats={}",
-    report.commands, report.transitions, report.contexts, report.token_cache, report.phase_stats
+    "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}",
+    report.commands, report.transitions, report.contexts, report.token_cache
   )];
 
   if with_sequences {
@@ -1141,8 +1258,8 @@ async fn handle_yank(
 
   let report = rebuild_stats(conn, None).await?;
   lines.push(format!(
-    "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}, phase_stats={}",
-    report.commands, report.transitions, report.contexts, report.token_cache, report.phase_stats
+    "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}",
+    report.commands, report.transitions, report.contexts, report.token_cache
   ));
 
   if with_sequences {
@@ -1304,6 +1421,73 @@ fn map_suggestions(items: &[InternalSuggestion]) -> Vec<Suggestion> {
     .map(|item| Suggestion {
       command: item.command.clone(),
       score: item.score as f32,
+      breakdown: ScoreBreakdown {
+        recency: item.breakdown.recency as f32,
+        session_recency: item.breakdown.session_recency as f32,
+        frequency: item.breakdown.frequency as f32,
+        transition: item.breakdown.transition as f32,
+        context: item.breakdown.context as f32,
+        sequence: item.breakdown.sequence as f32,
+        similarity: item.breakdown.similarity as f32,
+        embedding_retrieval: item.breakdown.embedding_retrieval as f32,
+        online_model: item.breakdown.online_model as f32,
+      },
+      debug: item.debug.as_ref().map(|debug| SuggestionDebug {
+        blend: BlendDebug {
+          model_gate: debug.blend.model_gate as f32,
+          model_alpha: debug.blend.model_alpha as f32,
+          blend_model_weight: debug.blend.blend_model_weight as f32,
+          blend_frecency_weight: debug.blend.blend_frecency_weight as f32,
+          blend_sequence_weight: debug.blend.blend_sequence_weight as f32,
+          blend_tier1_weight: debug.blend.blend_tier1_weight as f32,
+          model_feature: debug.blend.model_feature as f32,
+          frecency_feature: debug.blend.frecency_feature as f32,
+          sequence_feature: debug.blend.sequence_feature as f32,
+          tier1_feature: debug.blend.tier1_feature as f32,
+          model_contrib: debug.blend.model_contrib as f32,
+          frecency_contrib: debug.blend.frecency_contrib as f32,
+          sequence_contrib: debug.blend.sequence_contrib as f32,
+          tier1_contrib: debug.blend.tier1_contrib as f32,
+        },
+        candidate: CandidateDebug {
+          freq: debug.candidate.freq,
+          workspace_freq: debug.candidate.workspace_freq,
+          last_seen: debug.candidate.last_seen,
+          transition_freq: debug.candidate.transition_freq,
+          workspace_transition_freq: debug.candidate.workspace_transition_freq,
+          transition_exit_status_match: debug.candidate.transition_exit_status_match,
+          context_freq: debug.candidate.context_freq,
+          context_cwd_match: debug.candidate.context_cwd_match,
+          context_host_match: debug.candidate.context_host_match,
+          context_user_match: debug.candidate.context_user_match,
+          session_freq: debug.candidate.session_freq,
+          session_last_seen: debug.candidate.session_last_seen,
+          from_embedding: debug.candidate.from_embedding,
+          sequence_confidence: debug.candidate.sequence_confidence as f32,
+          sequence_lift: debug.candidate.sequence_lift as f32,
+          sequence_prefix_len: u32::try_from(debug.candidate.sequence_prefix_len)
+            .unwrap_or(u32::MAX),
+        },
+        pipeline: PipelineDebug {
+          added_transition: u32::try_from(debug.pipeline.added_transition).unwrap_or(u32::MAX),
+          added_session: u32::try_from(debug.pipeline.added_session).unwrap_or(u32::MAX),
+          added_embedding: u32::try_from(debug.pipeline.added_embedding).unwrap_or(u32::MAX),
+          added_context: u32::try_from(debug.pipeline.added_context).unwrap_or(u32::MAX),
+          added_workspace: u32::try_from(debug.pipeline.added_workspace).unwrap_or(u32::MAX),
+          added_head: u32::try_from(debug.pipeline.added_head).unwrap_or(u32::MAX),
+          added_sequence: u32::try_from(debug.pipeline.added_sequence).unwrap_or(u32::MAX),
+          added_template: u32::try_from(debug.pipeline.added_template).unwrap_or(u32::MAX),
+          added_recent: u32::try_from(debug.pipeline.added_recent).unwrap_or(u32::MAX),
+          added_global: u32::try_from(debug.pipeline.added_global).unwrap_or(u32::MAX),
+          total_candidates: u32::try_from(debug.pipeline.total_candidates).unwrap_or(u32::MAX),
+          conditional_candidates: u32::try_from(debug.pipeline.conditional_candidates)
+            .unwrap_or(u32::MAX),
+          pruned_before: u32::try_from(debug.pipeline.pruned_before).unwrap_or(u32::MAX),
+          pruned_after: u32::try_from(debug.pipeline.pruned_after).unwrap_or(u32::MAX),
+          pruned_kept_conditional: u32::try_from(debug.pipeline.pruned_kept_conditional)
+            .unwrap_or(u32::MAX),
+        },
+      }),
       source: suggestion_source(item),
     })
     .collect()
@@ -1329,39 +1513,47 @@ fn suggestion_source(item: &InternalSuggestion) -> SuggestionSource {
   best
 }
 
-async fn flush_records(pool: &Arc<ConnectionPool>, buffer: &mut Vec<Invocation>) {
-  if buffer.is_empty() {
+async fn process_record(
+  pool: &Arc<ConnectionPool>,
+  train_buffer: &mut Vec<Invocation>,
+  invocation: Invocation,
+) -> RecordResult {
+  let conn = match pool.get().await {
+    Ok(conn) => conn,
+    Err(err) => return Err(format!("failed to acquire connection: {err}")),
+  };
+  match insert_invocation(&conn, &invocation).await {
+    Ok(true) => {
+      if let Err(err) = update_stats_for_invocation(&conn, &invocation).await {
+        warn!(error = ?err, "failed updating stats for invocation");
+      }
+      train_buffer.push(invocation);
+      Ok(())
+    }
+    Ok(false) => Ok(()),
+    Err(err) => Err(format!("failed to record invocation: {err}")),
+  }
+}
+
+async fn flush_training(pool: &Arc<ConnectionPool>, train_buffer: &mut Vec<Invocation>) {
+  if train_buffer.is_empty() {
     return;
   }
   let mut pending = Vec::new();
-  std::mem::swap(buffer, &mut pending);
+  std::mem::swap(train_buffer, &mut pending);
   let conn = match pool.get().await {
     Ok(conn) => conn,
     Err(err) => {
       warn!("failed to acquire connection: {}", err);
+      train_buffer.extend(pending);
       return;
     }
   };
-  let mut inserted = Vec::new();
-  for invocation in pending {
-    match insert_invocation(&conn, &invocation).await {
-      Ok(true) => {
-        let _ = update_stats_for_invocation(&conn, &invocation).await;
-        inserted.push(invocation);
-      }
-      Ok(false) => {}
-      Err(err) => {
-        warn!(error = ?err, "failed to record invocation");
-      }
-    }
-  }
-  if !inserted.is_empty()
-    && let Err(err) = train_online_model(&conn, &inserted).await
-  {
+  if let Err(err) = train_online_model(&conn, &pending).await {
     warn!(error = ?err, "online model training failed");
   }
   pool.sync().await;
-  debug!("flushed ingestion batch");
+  debug!("flushed training batch");
 }
 
 #[cfg(test)]

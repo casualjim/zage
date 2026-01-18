@@ -356,6 +356,7 @@ async fn fetch_arg_candidates(
         embedding_retrieval: 0.0,
         online_model: 0.0,
       },
+      debug: None,
     });
   }
 
@@ -423,6 +424,7 @@ async fn fetch_arg_candidates_any(
         embedding_retrieval: 0.0,
         online_model: 0.0,
       },
+      debug: None,
     });
   }
 
@@ -502,6 +504,7 @@ async fn fetch_env_candidates(
         embedding_retrieval: 0.0,
         online_model: 0.0,
       },
+      debug: None,
     });
   }
 
@@ -580,6 +583,7 @@ async fn fetch_env_key_candidates(
         embedding_retrieval: 0.0,
         online_model: 0.0,
       },
+      debug: None,
     });
   }
 
@@ -658,6 +662,7 @@ async fn fetch_flag_candidates(
         embedding_retrieval: 0.0,
         online_model: 0.0,
       },
+      debug: None,
     });
   }
 

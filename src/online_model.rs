@@ -10,7 +10,6 @@ pub struct OnlineContextInput<'a> {
   pub cwd: Option<&'a str>,
   pub hostname: Option<&'a str>,
   pub username: Option<&'a str>,
-  pub phase: Option<&'a str>,
   pub git_branch: Option<&'a str>,
   pub exit_status: Option<i64>,
   pub session_id: Option<i64>,
@@ -35,9 +34,6 @@ pub fn context_tokens(input: OnlineContextInput<'_>) -> Vec<String> {
   if let Some(user) = input.username.filter(|v| !v.is_empty()) {
     out.push(format!("ctx:user={user}"));
   }
-  if let Some(phase) = input.phase.filter(|v| !v.is_empty()) {
-    out.push(format!("ctx:phase={phase}"));
-  }
   if let Some(branch) = input.git_branch.filter(|v| !v.is_empty()) {
     out.push(format!("ctx:git_branch={branch}"));
   }
@@ -51,7 +47,7 @@ pub fn context_tokens(input: OnlineContextInput<'_>) -> Vec<String> {
   out
 }
 
-pub fn context_tokens_from_invocation(inv: &Invocation, phase: Option<&str>) -> Vec<String> {
+pub fn context_tokens_from_invocation(inv: &Invocation) -> Vec<String> {
   let workspace_root = inv.workspace.as_ref().map(|w| w.root.as_str());
   let git_branch = inv.workspace.as_ref().and_then(|w| w.git_branch.as_deref());
   let cwd = inv.working_directory.as_deref();
@@ -66,7 +62,6 @@ pub fn context_tokens_from_invocation(inv: &Invocation, phase: Option<&str>) -> 
     cwd,
     hostname,
     username,
-    phase,
     git_branch,
     exit_status,
     session_id,
@@ -229,7 +224,6 @@ mod tests {
       cwd: Some("/workspace/crate"),
       hostname: Some("host"),
       username: Some("user"),
-      phase: None,
       git_branch: None,
       exit_status: Some(2),
       session_id: Some(42),
@@ -237,22 +231,6 @@ mod tests {
     });
     assert!(tokens.iter().any(|t| t.starts_with("ctx:timebucket=")));
     assert!(tokens.contains(&"ctx:workspace_root=/workspace".to_string()));
-  }
-
-  #[test]
-  fn context_tokens_include_phase_when_present() {
-    let tokens = context_tokens(OnlineContextInput {
-      workspace_root: None,
-      cwd: None,
-      hostname: None,
-      username: None,
-      phase: Some("build"),
-      git_branch: None,
-      exit_status: None,
-      session_id: None,
-      unix_timestamp: None,
-    });
-    assert!(tokens.contains(&"ctx:phase=build".to_string()));
   }
 
   #[test]

@@ -4,14 +4,14 @@ use libsql::{Connection, Value};
 
 use crate::Result;
 use crate::sequence::candidates_from_sequences;
-use crate::tokenize::normalize_command_whitespace;
+use crate::tokenize::{extract_command_stats_parts, normalize_command_whitespace, tokenize_index};
 
-use super::phase_support::{PhaseSignal, command_head_for_phase};
 use super::sql::query_prepared;
 use crate::core::Candidate;
 
 pub(crate) async fn add_transition_candidates(
   conn: &Connection,
+  shellname: &str,
   last_command: &str,
   last_exit_status: Option<i64>,
   workspace_root: &str,
@@ -25,7 +25,7 @@ pub(crate) async fn add_transition_candidates(
 
   for last in variants {
     if !workspace_root.is_empty() {
-      let found = fetch_transition_candidates(
+      let mut found_workspace = fetch_transition_candidates(
         conn,
         TransitionQuery::new(
           "workspace_transition_stats",
@@ -38,8 +38,8 @@ pub(crate) async fn add_transition_candidates(
         candidates,
       )
       .await?;
-      if !found {
-        let _ = fetch_transition_candidates(
+      if !found_workspace {
+        found_workspace = fetch_transition_candidates(
           conn,
           TransitionQuery::new(
             "workspace_transition_stats",
@@ -52,6 +52,44 @@ pub(crate) async fn add_transition_candidates(
           candidates,
         )
         .await?;
+      }
+      if found_workspace {
+        continue;
+      }
+
+      let tokens = tokenize_index(shellname, last);
+      if let Some(parts) = extract_command_stats_parts(last, &tokens) {
+        let mut found_workspace = fetch_transition_head_candidates(
+          conn,
+          TransitionQuery::new(
+            "workspace_transition_head_stats",
+            Some(workspace_root),
+            parts.head.as_str(),
+            last_exit_status,
+            true,
+            last_exit_status.is_some(),
+          ),
+          candidates,
+        )
+        .await?;
+        if !found_workspace {
+          found_workspace = fetch_transition_head_candidates(
+            conn,
+            TransitionQuery::new(
+              "workspace_transition_head_stats",
+              Some(workspace_root),
+              parts.head.as_str(),
+              None,
+              true,
+              false,
+            ),
+            candidates,
+          )
+          .await?;
+        }
+        if found_workspace {
+          continue;
+        }
       }
     }
 
@@ -75,6 +113,38 @@ pub(crate) async fn add_transition_candidates(
         candidates,
       )
       .await?;
+    }
+
+    let tokens = tokenize_index(shellname, last);
+    if let Some(parts) = extract_command_stats_parts(last, &tokens) {
+      let found = fetch_transition_head_candidates(
+        conn,
+        TransitionQuery::new(
+          "transition_head_stats",
+          None,
+          parts.head.as_str(),
+          last_exit_status,
+          false,
+          last_exit_status.is_some(),
+        ),
+        candidates,
+      )
+      .await?;
+      if !found {
+        let _ = fetch_transition_head_candidates(
+          conn,
+          TransitionQuery::new(
+            "transition_head_stats",
+            None,
+            parts.head.as_str(),
+            None,
+            false,
+            false,
+          ),
+          candidates,
+        )
+        .await?;
+      }
     }
   }
   Ok(())
@@ -196,6 +266,49 @@ async fn fetch_context_candidates(
   Ok(found)
 }
 
+async fn fetch_transition_head_candidates(
+  conn: &Connection,
+  query: TransitionQuery<'_>,
+  candidates: &mut HashMap<String, Candidate>,
+) -> Result<bool> {
+  let mut sql = format!(
+    "SELECT next_command, freq FROM {} WHERE prev_head = ?",
+    query.table
+  );
+  let mut params: Vec<Value> = vec![Value::from(query.last_command.to_string())];
+
+  if let Some(status) = query.last_exit_status {
+    sql.push_str(" AND prev_exit_status = ?");
+    params.push(Value::from(status));
+  }
+  if let Some(workspace_root) = query.workspace_root {
+    sql.push_str(" AND workspace_root = ?");
+    params.push(Value::from(workspace_root.to_string()));
+  }
+
+  sql.push_str(" ORDER BY freq DESC LIMIT 50");
+
+  let mut rows = query_prepared(conn, &sql, libsql::params_from_iter(params)).await?;
+  let mut found = false;
+  while let Some(row) = rows.next().await? {
+    found = true;
+    let cmd = row.get::<String>(0)?;
+    let freq = row.get::<i64>(1)?;
+    let entry = candidates
+      .entry(cmd.clone())
+      .or_insert_with(|| Candidate::new(&cmd));
+    if query.is_workspace {
+      entry.workspace_transition_freq = entry.workspace_transition_freq.max(freq);
+    } else {
+      entry.transition_freq = entry.transition_freq.max(freq);
+    }
+    if query.status_specific {
+      entry.transition_exit_status_match = true;
+    }
+  }
+  Ok(found)
+}
+
 pub(crate) async fn add_context_candidates(
   conn: &Connection,
   config: &super::SuggestConfig,
@@ -280,45 +393,6 @@ pub(crate) async fn add_workspace_candidates(
   Ok(())
 }
 
-pub(crate) async fn add_phase_candidates(
-  conn: &Connection,
-  session_phase: Option<&PhaseSignal>,
-  workspace_root: &str,
-  candidates: &mut HashMap<String, Candidate>,
-) -> Result<()> {
-  let session_phase = match session_phase {
-    Some(phase) if phase.confidence >= 0.25 => phase,
-    _ => return Ok(()),
-  };
-
-  let mut rows = query_prepared(
-    conn,
-    "SELECT command_head, freq, last_seen FROM phase_stats
-     WHERE phase = ?
-     ORDER BY freq DESC
-     LIMIT 30",
-    libsql::params![session_phase.phase.clone()],
-  )
-  .await?;
-
-  let mut seen_heads: HashSet<String> = HashSet::new();
-  while let Some(row) = rows.next().await? {
-    let head = row.get::<String>(0)?;
-    let freq = row.get::<i64>(1)?;
-    let last_seen = row.get::<i64>(2)?;
-    if !seen_heads.insert(head.clone()) {
-      continue;
-    }
-    add_head_candidates(conn, &[head], workspace_root, candidates).await?;
-    for candidate in candidates.values_mut() {
-      candidate.context_freq += (freq as f64 * session_phase.confidence) as i64;
-      candidate.last_seen = candidate.last_seen.max(last_seen);
-    }
-  }
-
-  Ok(())
-}
-
 pub(crate) async fn add_head_candidates(
   conn: &Connection,
   recent_heads: &[String],
@@ -328,6 +402,7 @@ pub(crate) async fn add_head_candidates(
   for head in recent_heads {
     let like = format!("{head} %");
     if !workspace_root.is_empty() {
+      let mut found_workspace = false;
       let mut rows = query_prepared(
         conn,
         "SELECT command, freq, last_seen FROM workspace_command_stats
@@ -337,6 +412,7 @@ pub(crate) async fn add_head_candidates(
       )
       .await?;
       while let Some(row) = rows.next().await? {
+        found_workspace = true;
         let cmd = row.get::<String>(0)?;
         let freq = row.get::<i64>(1)?;
         let last_seen = row.get::<i64>(2)?;
@@ -345,6 +421,9 @@ pub(crate) async fn add_head_candidates(
           .or_insert_with(|| Candidate::new(&cmd));
         entry.workspace_freq = entry.workspace_freq.max(freq);
         entry.last_seen = entry.last_seen.max(last_seen);
+      }
+      if found_workspace {
+        continue;
       }
     }
 
@@ -397,9 +476,38 @@ pub(crate) async fn add_global_candidates(
 
 pub(crate) async fn add_recent_candidates(
   conn: &Connection,
+  workspace_root: &str,
   candidates: &mut HashMap<String, Candidate>,
   limit: usize,
-) -> Result<()> {
+) -> Result<usize> {
+  let mut added = 0usize;
+  if !workspace_root.is_empty() {
+    let mut rows = query_prepared(
+      conn,
+      "SELECT command, freq, last_seen FROM workspace_command_stats
+       WHERE workspace_root = ?
+       ORDER BY last_seen DESC
+       LIMIT ?",
+      libsql::params![workspace_root.to_string(), limit as i64],
+    )
+    .await?;
+    while let Some(row) = rows.next().await? {
+      let cmd = row.get::<String>(0)?;
+      let freq = row.get::<i64>(1)?;
+      let last_seen = row.get::<i64>(2)?;
+      let was_new = !candidates.contains_key(&cmd);
+      let entry = candidates
+        .entry(cmd.clone())
+        .or_insert_with(|| Candidate::new(&cmd));
+      entry.workspace_freq = entry.workspace_freq.max(freq);
+      entry.last_seen = entry.last_seen.max(last_seen);
+      if was_new {
+        added += 1;
+      }
+    }
+    return Ok(added);
+  }
+
   let mut rows = query_prepared(
     conn,
     "SELECT expanded_command, COUNT(*) as freq, MAX(COALESCE(start_unix_timestamp, 0)) as last_seen
@@ -414,13 +522,52 @@ pub(crate) async fn add_recent_candidates(
     let cmd = row.get::<String>(0)?;
     let freq = row.get::<i64>(1)?;
     let last_seen = row.get::<i64>(2)?;
+    let was_new = !candidates.contains_key(&cmd);
     let entry = candidates
       .entry(cmd.clone())
       .or_insert_with(|| Candidate::new(&cmd));
     entry.freq = entry.freq.max(freq);
     entry.last_seen = entry.last_seen.max(last_seen);
+    if was_new {
+      added += 1;
+    }
   }
-  Ok(())
+  Ok(added)
+}
+
+pub(crate) async fn add_cwd_recent_candidates(
+  conn: &Connection,
+  cwd: &str,
+  candidates: &mut HashMap<String, Candidate>,
+  limit: usize,
+) -> Result<usize> {
+  let mut added = 0usize;
+  let mut rows = query_prepared(
+    conn,
+    "SELECT expanded_command, COUNT(*) as freq, MAX(COALESCE(start_unix_timestamp, 0)) as last_seen
+     FROM shell_history
+     WHERE working_directory = ?
+     GROUP BY expanded_command
+     ORDER BY last_seen DESC
+     LIMIT ?",
+    libsql::params![cwd.to_string(), limit as i64],
+  )
+  .await?;
+  while let Some(row) = rows.next().await? {
+    let cmd = row.get::<String>(0)?;
+    let freq = row.get::<i64>(1)?;
+    let last_seen = row.get::<i64>(2)?;
+    let was_new = !candidates.contains_key(&cmd);
+    let entry = candidates
+      .entry(cmd.clone())
+      .or_insert_with(|| Candidate::new(&cmd));
+    entry.freq = entry.freq.max(freq);
+    entry.last_seen = entry.last_seen.max(last_seen);
+    if was_new {
+      added += 1;
+    }
+  }
+  Ok(added)
 }
 
 pub(crate) async fn hydrate_candidate_stats(
@@ -520,7 +667,7 @@ pub(crate) async fn add_sequence_candidates(
   Ok(())
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct TemplateStat {
   value: String,
   freq: i64,
@@ -535,8 +682,9 @@ pub(crate) async fn add_template_candidates(
 ) -> Result<()> {
   let mut heads: HashSet<String> = HashSet::new();
   for cmd in candidates.keys() {
-    if let Some(head) = command_head_for_phase(shellname, cmd) {
-      heads.insert(head);
+    let tokens = tokenize_index(shellname, cmd);
+    if let Some(parts) = extract_command_stats_parts(cmd, &tokens) {
+      heads.insert(parts.head);
     }
   }
   if heads.is_empty() {
@@ -545,8 +693,97 @@ pub(crate) async fn add_template_candidates(
 
   let mut added = 0usize;
   for head in heads {
+    let (args0_raw, args0_workspace) =
+      fetch_template_args(conn, workspace_root, &head, 0, 3).await?;
+    let mut args0 = args0_raw;
+    if !head.contains(' ') && !args0.is_empty() {
+      let mut promoted = Vec::new();
+      args0.retain(|stat| {
+        let probe = format!("{} {}", head, stat.value);
+        let tokens = tokenize_index(shellname, &probe);
+        if let Some(parts) = extract_command_stats_parts(&probe, &tokens)
+          && parts.head == probe
+        {
+          promoted.push(stat.clone());
+          false
+        } else {
+          true
+        }
+      });
+
+      for sub in promoted {
+        let subhead = format!("{} {}", head, sub.value);
+        let (flags, flags_workspace) =
+          fetch_template_flags(conn, workspace_root, &subhead, 3).await?;
+        let (sub_args0, sub_args0_workspace) =
+          fetch_template_args(conn, workspace_root, &subhead, 0, 3).await?;
+        let (sub_args1, sub_args1_workspace) =
+          fetch_template_args(conn, workspace_root, &subhead, 1, 2).await?;
+
+        let mut base = subhead.clone();
+        let mut flags_freq = 0i64;
+        let mut flags_last_seen = 0i64;
+        if !flags.is_empty() {
+          base.push(' ');
+          base.push_str(
+            &flags
+              .iter()
+              .map(|stat| stat.value.clone())
+              .collect::<Vec<_>>()
+              .join(" "),
+          );
+          for stat in &flags {
+            flags_freq += stat.freq;
+            flags_last_seen = flags_last_seen.max(stat.last_seen);
+          }
+          add_template_candidate(
+            candidates,
+            &base,
+            flags_freq,
+            flags_last_seen,
+            flags_workspace,
+          );
+        }
+
+        for arg0 in &sub_args0 {
+          let mut cmd = base.clone();
+          if !cmd.is_empty() {
+            cmd.push(' ');
+          }
+          cmd.push_str(&arg0.value);
+          let freq = flags_freq + arg0.freq;
+          let last_seen = flags_last_seen.max(arg0.last_seen);
+          add_template_candidate(
+            candidates,
+            &cmd,
+            freq,
+            last_seen,
+            flags_workspace || sub_args0_workspace,
+          );
+
+          for arg1 in &sub_args1 {
+            let mut cmd = cmd.clone();
+            cmd.push(' ');
+            cmd.push_str(&arg1.value);
+            let freq = freq + arg1.freq;
+            let last_seen = last_seen.max(arg1.last_seen);
+            add_template_candidate(
+              candidates,
+              &cmd,
+              freq,
+              last_seen,
+              flags_workspace || sub_args0_workspace || sub_args1_workspace,
+            );
+            added += 1;
+            if added > 50 {
+              return Ok(());
+            }
+          }
+        }
+      }
+    }
+
     let (flags, flags_workspace) = fetch_template_flags(conn, workspace_root, &head, 3).await?;
-    let (args0, args0_workspace) = fetch_template_args(conn, workspace_root, &head, 0, 3).await?;
     let (args1, args1_workspace) = fetch_template_args(conn, workspace_root, &head, 1, 2).await?;
 
     let mut base = head.clone();
@@ -641,6 +878,9 @@ async fn fetch_template_flags(
   limit: usize,
 ) -> Result<(Vec<TemplateStat>, bool)> {
   let workspace_flags = fetch_flag_stats(conn, workspace_root, head, limit).await?;
+  if !workspace_root.is_empty() {
+    return Ok((workspace_flags, true));
+  }
   if !workspace_flags.is_empty() {
     return Ok((workspace_flags, true));
   }
@@ -681,16 +921,19 @@ async fn fetch_template_args(
   limit: usize,
 ) -> Result<(Vec<TemplateStat>, bool)> {
   let workspace_args = fetch_arg_stats(conn, workspace_root, head, index, limit).await?;
+  if !workspace_root.is_empty() {
+    if !workspace_args.is_empty() {
+      return Ok((workspace_args, true));
+    }
+    let workspace_any = fetch_arg_stats_any(conn, workspace_root, head, limit).await?;
+    return Ok((workspace_any, true));
+  }
   if !workspace_args.is_empty() {
     return Ok((workspace_args, true));
   }
   let global_args = fetch_arg_stats(conn, "", head, index, limit).await?;
   if !global_args.is_empty() {
     return Ok((global_args, false));
-  }
-  let workspace_any = fetch_arg_stats_any(conn, workspace_root, head, limit).await?;
-  if !workspace_any.is_empty() {
-    return Ok((workspace_any, true));
   }
   let global_any = fetch_arg_stats_any(conn, "", head, limit).await?;
   Ok((global_any, false))

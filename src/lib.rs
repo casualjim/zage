@@ -9,7 +9,6 @@ pub mod db;
 pub mod embeddings;
 pub mod indexer;
 pub mod online_model;
-pub mod phase;
 pub mod predict;
 #[cfg(feature = "pprof")]
 mod profile;

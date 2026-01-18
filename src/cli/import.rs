@@ -174,8 +174,8 @@ async fn run_embedded(
       token_sequences_start.elapsed().as_secs_f64()
     );
     eprintln!(
-      "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}, phase_stats={}",
-      report.commands, report.transitions, report.contexts, report.token_cache, report.phase_stats
+      "Indexed stats: commands={}, transitions={}, contexts={}, token_cache={}",
+      report.commands, report.transitions, report.contexts, report.token_cache
     );
     eprintln!(
       "Command sequence stats: sequences={}, bigrams={}, trigrams={}",
