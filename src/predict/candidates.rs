@@ -1,4 +1,4 @@
-use std::collections::{HashMap, HashSet};
+use std::collections::HashMap;
 
 use libsql::{Connection, Value};
 
@@ -199,7 +199,7 @@ async fn fetch_transition_candidates(
     params.push(Value::from(workspace_root.to_string()));
   }
 
-  sql.push_str(" ORDER BY freq DESC LIMIT 50");
+  sql.push_str(" ORDER BY freq DESC, next_command ASC LIMIT 50");
 
   let mut rows = query_prepared(conn, &sql, libsql::params_from_iter(params)).await?;
   let mut found = false;
@@ -245,7 +245,7 @@ async fn fetch_context_candidates(
     params.push(Value::from(username.to_string()));
   }
   // context_stats is keyed by (command, cwd, hostname, username); session_id is tracked elsewhere
-  sql.push_str(" ORDER BY freq DESC LIMIT 50");
+  sql.push_str(" ORDER BY freq DESC, command ASC LIMIT 50");
 
   let mut rows = query_prepared(conn, &sql, libsql::params_from_iter(params)).await?;
   let mut found = false;
@@ -286,7 +286,7 @@ async fn fetch_transition_head_candidates(
     params.push(Value::from(workspace_root.to_string()));
   }
 
-  sql.push_str(" ORDER BY freq DESC LIMIT 50");
+  sql.push_str(" ORDER BY freq DESC, next_command ASC LIMIT 50");
 
   let mut rows = query_prepared(conn, &sql, libsql::params_from_iter(params)).await?;
   let mut found = false;
@@ -348,7 +348,7 @@ pub(crate) async fn add_session_candidates(
      FROM shell_history
      WHERE session_id = ?
      GROUP BY expanded_command
-     ORDER BY last_seen DESC
+     ORDER BY last_seen DESC, expanded_command ASC
      LIMIT 200",
     libsql::params![session_id],
   )
@@ -376,7 +376,7 @@ pub(crate) async fn add_workspace_candidates(
     conn,
     "SELECT command, freq, last_seen FROM workspace_command_stats
      WHERE workspace_root = ?
-     ORDER BY freq DESC LIMIT 50",
+     ORDER BY freq DESC, command ASC LIMIT 50",
     libsql::params![workspace_root.to_string()],
   )
   .await?;
@@ -407,7 +407,7 @@ pub(crate) async fn add_head_candidates(
         conn,
         "SELECT command, freq, last_seen FROM workspace_command_stats
          WHERE workspace_root = ? AND (command = ? OR command LIKE ?)
-         ORDER BY freq DESC LIMIT 20",
+         ORDER BY freq DESC, command ASC LIMIT 20",
         libsql::params![workspace_root.to_string(), head.clone(), like.clone()],
       )
       .await?;
@@ -430,8 +430,8 @@ pub(crate) async fn add_head_candidates(
     let mut rows = query_prepared(
       conn,
       "SELECT command, freq, last_seen FROM command_stats
-       WHERE command = ? OR command LIKE ?
-       ORDER BY freq DESC LIMIT 20",
+     WHERE command = ? OR command LIKE ?
+     ORDER BY freq DESC, command ASC LIMIT 20",
       libsql::params![head.clone(), like.clone()],
     )
     .await?;
@@ -457,7 +457,7 @@ pub(crate) async fn add_global_candidates(
 ) -> Result<()> {
   let mut rows = query_prepared(
     conn,
-    "SELECT command, freq, last_seen FROM command_stats ORDER BY freq DESC LIMIT ?",
+    "SELECT command, freq, last_seen FROM command_stats ORDER BY freq DESC, command ASC LIMIT ?",
     libsql::params![limit as i64],
   )
   .await?;
@@ -486,7 +486,7 @@ pub(crate) async fn add_recent_candidates(
       conn,
       "SELECT command, freq, last_seen FROM workspace_command_stats
        WHERE workspace_root = ?
-       ORDER BY last_seen DESC
+       ORDER BY last_seen DESC, command ASC
        LIMIT ?",
       libsql::params![workspace_root.to_string(), limit as i64],
     )
@@ -513,7 +513,7 @@ pub(crate) async fn add_recent_candidates(
     "SELECT expanded_command, COUNT(*) as freq, MAX(COALESCE(start_unix_timestamp, 0)) as last_seen
      FROM shell_history
      GROUP BY expanded_command
-     ORDER BY last_seen DESC
+     ORDER BY last_seen DESC, expanded_command ASC
      LIMIT ?",
     libsql::params![limit as i64],
   )
@@ -548,7 +548,7 @@ pub(crate) async fn add_cwd_recent_candidates(
      FROM shell_history
      WHERE working_directory = ?
      GROUP BY expanded_command
-     ORDER BY last_seen DESC
+     ORDER BY last_seen DESC, expanded_command ASC
      LIMIT ?",
     libsql::params![cwd.to_string(), limit as i64],
   )
@@ -579,7 +579,8 @@ pub(crate) async fn hydrate_candidate_stats(
     return Ok(());
   }
 
-  let commands: Vec<String> = candidates.keys().cloned().collect();
+  let mut commands: Vec<String> = candidates.keys().cloned().collect();
+  commands.sort();
   let chunk_size = 200usize;
 
   for chunk in commands.chunks(chunk_size) {
@@ -680,13 +681,15 @@ pub(crate) async fn add_template_candidates(
   shellname: &str,
   candidates: &mut HashMap<String, Candidate>,
 ) -> Result<()> {
-  let mut heads: HashSet<String> = HashSet::new();
-  for cmd in candidates.keys() {
-    let tokens = tokenize_index(shellname, cmd);
-    if let Some(parts) = extract_command_stats_parts(cmd, &tokens) {
-      heads.insert(parts.head);
-    }
-  }
+  let mut heads = candidates
+    .keys()
+    .filter_map(|cmd| {
+      let tokens = tokenize_index(shellname, cmd);
+      extract_command_stats_parts(cmd, &tokens).map(|parts| parts.head)
+    })
+    .collect::<Vec<_>>();
+  heads.sort();
+  heads.dedup();
   if heads.is_empty() {
     return Ok(());
   }
@@ -898,7 +901,7 @@ async fn fetch_flag_stats(
     conn,
     "SELECT flag_raw, freq, last_seen FROM flag_stats
      WHERE workspace_root = ? AND command_head = ?
-     ORDER BY freq DESC LIMIT ?",
+     ORDER BY freq DESC, flag_raw ASC LIMIT ?",
     libsql::params![workspace_root.to_string(), head.to_string(), limit as i64],
   )
   .await?;
@@ -950,7 +953,7 @@ async fn fetch_arg_stats(
     conn,
     "SELECT arg_raw, freq, last_seen FROM arg_stats
      WHERE workspace_root = ? AND command_head = ? AND arg_index = ?
-     ORDER BY freq DESC LIMIT ?",
+     ORDER BY freq DESC, arg_raw ASC LIMIT ?",
     libsql::params![
       workspace_root.to_string(),
       head.to_string(),
@@ -980,7 +983,7 @@ async fn fetch_arg_stats_any(
     conn,
     "SELECT arg_raw, freq, last_seen FROM arg_stats_any
      WHERE workspace_root = ? AND command_head = ?
-     ORDER BY freq DESC LIMIT ?",
+     ORDER BY freq DESC, arg_raw ASC LIMIT ?",
     libsql::params![workspace_root.to_string(), head.to_string(), limit as i64],
   )
   .await?;

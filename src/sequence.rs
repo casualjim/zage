@@ -454,7 +454,7 @@ pub async fn candidates_from_sequences(
         "SELECT sequence_json, support, confidence, lift, sequence_len
          FROM sequence_stats
          WHERE prefix_json = ? AND sequence_len = ?
-         ORDER BY lift DESC
+         ORDER BY lift DESC, confidence DESC, support DESC, sequence_json ASC
          LIMIT ?",
         libsql::params![prefix_json, seq_len, limit as i64],
       )

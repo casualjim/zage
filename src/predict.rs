@@ -412,7 +412,13 @@ fn prune_candidates_for_sequences(
     .count();
 
   if conditional_count >= max_pool {
-    entries.sort_by(|a, b| b.1.total_cmp(&a.1));
+    entries.sort_by(|a, b| {
+      let score_cmp = b.1.total_cmp(&a.1);
+      if score_cmp != std::cmp::Ordering::Equal {
+        return score_cmp;
+      }
+      a.0.cmp(&b.0)
+    });
     let keep: HashSet<String> = entries
       .into_iter()
       .filter(|(_, _, conditional)| *conditional)
@@ -423,7 +429,13 @@ fn prune_candidates_for_sequences(
     candidates.retain(|cmd, _| keep.contains(cmd));
   } else {
     // Keep all conditional candidates, then fill the remaining pool by "best available" fallback.
-    entries.sort_by(|a, b| b.1.total_cmp(&a.1));
+    entries.sort_by(|a, b| {
+      let score_cmp = b.1.total_cmp(&a.1);
+      if score_cmp != std::cmp::Ordering::Equal {
+        return score_cmp;
+      }
+      a.0.cmp(&b.0)
+    });
     let mut keep: HashSet<String> = entries
       .iter()
       .filter(|(_, _, conditional)| *conditional)

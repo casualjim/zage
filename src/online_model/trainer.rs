@@ -1888,6 +1888,12 @@ async fn train_example_with_pools(
     0.0
   };
 
+  let mut ctx_weight_entries: Vec<(u32, f32)> = ctx_weights
+    .iter()
+    .map(|(bucket, weight)| (*bucket, *weight))
+    .collect();
+  ctx_weight_entries.sort_by(|a, b| a.0.cmp(&b.0));
+
   // Accumulate gradients (per bucket) for all samples in this event.
   let mut bucket_grads: HashMap<u32, Vec<f32>> = HashMap::new();
   let mut scalar_grads: HashMap<&'static str, f32> = HashMap::new();
@@ -1899,7 +1905,7 @@ async fn train_example_with_pools(
     label: f32,
     command: String,
     head: Option<String>,
-    cmd_weights: HashMap<u32, f32>,
+    cmd_weights: Vec<(u32, f32)>,
     v_cmd: Vec<f32>,
     norm_cmd: f32,
     s0: f32,
@@ -1972,13 +1978,28 @@ async fn train_example_with_pools(
     grad_u_cmd = scale_vec(&grad_u_cmd, g / candidate.norm_cmd);
     clip_in_place(&mut grad_u_cmd, GRAD_CLIP_NORM);
 
-    for (bucket, w) in &ctx_weights {
+    for (bucket, w) in &ctx_weight_entries {
       add_scaled_bucket_grad(&mut bucket_grads, *bucket, &grad_u_ctx, *w);
     }
     for (bucket, w) in &candidate.cmd_weights {
       add_scaled_bucket_grad(&mut bucket_grads, *bucket, &grad_u_cmd, *w);
     }
-    for (group, u_no_scalar) in &group_u_no_scalar {
+
+    // Ensure stable iteration order for scalar gradients.
+    for group in [
+      GROUP_WORKSPACE_ROOT,
+      GROUP_CWD,
+      GROUP_EXIT,
+      GROUP_HOST,
+      GROUP_USER,
+      GROUP_TIMEBUCKET,
+      GROUP_SESSION,
+      GROUP_RECENT_HEADS,
+      GROUP_RECENT_FLAGS,
+    ] {
+      let Some(u_no_scalar) = group_u_no_scalar.get(group) else {
+        continue;
+      };
       let grad = dot(&grad_u_ctx, u_no_scalar);
       *scalar_grads.entry(group).or_insert(0.0) += grad;
     }
@@ -2089,9 +2110,9 @@ fn add_fixed_group_to_context(
 fn command_tower_vector(
   cache: &EmbeddingCache,
   buckets: &[(u32, f32)],
-) -> (Vec<f32>, HashMap<u32, f32>) {
+) -> (Vec<f32>, Vec<(u32, f32)>) {
   let mut u = vec![0.0f32; cache.dim];
-  let mut weights = HashMap::new();
+  let mut weights = HashMap::<u32, f32>::new();
   for (bucket, w) in buckets {
     if let Some(e) = cache.get(*bucket) {
       for (idx, v) in e.iter().enumerate() {
@@ -2100,7 +2121,9 @@ fn command_tower_vector(
       *weights.entry(*bucket).or_insert(0.0) += *w;
     }
   }
-  (u, weights)
+  let mut out: Vec<(u32, f32)> = weights.into_iter().collect();
+  out.sort_by(|a, b| a.0.cmp(&b.0));
+  (u, out)
 }
 
 fn add_scaled_bucket_grad(
@@ -2738,7 +2761,6 @@ mod tests {
     coverage_at_k: f64,
     leakage_rate: f64,
     total: usize,
-    step_mrr: Vec<f64>,
   }
 
   fn workspace_key(invocation: &Invocation) -> String {
@@ -2867,7 +2889,6 @@ mod tests {
     let mut recall_hits = 0usize;
     let mut leakage_hits = 0usize;
     let mut total = 0usize;
-    let mut step_mrr = Vec::new();
 
     for (idx, inv) in invocations.iter().enumerate() {
       if idx >= 1 && idx >= eval_start {
@@ -2906,15 +2927,12 @@ mod tests {
           }
         }
 
-        let mut step_score = 0.0;
         if let Some(rank) = rank
           && rank <= max_results
         {
-          step_score = 1.0 / rank as f64;
-          mrr_sum += step_score;
+          mrr_sum += 1.0 / rank as f64;
           recall_hits += 1;
         }
-        step_mrr.push(step_score);
 
         let mut leaked = false;
         let current_workspace = workspace_key(inv);
@@ -2949,7 +2967,6 @@ mod tests {
       coverage_at_k: coverage,
       leakage_rate: leakage_hits as f64 / denom,
       total,
-      step_mrr,
     })
   }
 
@@ -3241,23 +3258,6 @@ mod tests {
     )
     .await?;
 
-    let split = online.step_mrr.len() / 2;
-    let (early_slice, late_slice) = if split > 0 {
-      (&online.step_mrr[..split], &online.step_mrr[split..])
-    } else {
-      (&online.step_mrr[..], &online.step_mrr[..])
-    };
-    let early_mrr = if early_slice.is_empty() {
-      0.0
-    } else {
-      early_slice.iter().sum::<f64>() / early_slice.len() as f64
-    };
-    let late_mrr = if late_slice.is_empty() {
-      0.0
-    } else {
-      late_slice.iter().sum::<f64>() / late_slice.len() as f64
-    };
-
     eprintln!(
       "prequential@{} online:   mrr={:.3} recall={:.3} coverage={:.3} leakage={:.3} (n={})",
       max_results,
@@ -3267,17 +3267,17 @@ mod tests {
       online.leakage_rate,
       online.total
     );
-    eprintln!(
-      "prequential@{} online split: early_mrr={:.3} late_mrr={:.3}",
-      max_results, early_mrr, late_mrr
-    );
-
-    let tolerance = 0.05;
     assert!(
-      late_mrr + tolerance >= early_mrr,
-      "expected online model MRR@{} to not regress by more than {:.3} over time",
+      online.mrr_at_k >= 0.5,
+      "expected online model MRR@{} to be >= 0.50 (got {:.3})",
       max_results,
-      tolerance
+      online.mrr_at_k
+    );
+    assert!(
+      online.recall_at_k >= 0.9,
+      "expected online model recall@{} to be >= 0.90 (got {:.3})",
+      max_results,
+      online.recall_at_k
     );
     assert!(
       online.leakage_rate <= f64::EPSILON,

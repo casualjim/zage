@@ -1,5 +1,42 @@
 use crate::core::Invocation;
 
+fn normalize_workspace_root_value(root: &str) -> String {
+  let trimmed = root.trim_end_matches('/');
+  if trimmed.is_empty() {
+    return String::new();
+  }
+  std::path::Path::new(trimmed)
+    .file_name()
+    .map(|v| v.to_string_lossy().into_owned())
+    .unwrap_or_else(|| trimmed.to_string())
+}
+
+fn normalize_cwd_value(cwd: &str, workspace_root: Option<&str>) -> String {
+  let trimmed = cwd.trim_end_matches('/');
+  if trimmed.is_empty() {
+    return String::new();
+  }
+
+  if let Some(root) = workspace_root.filter(|v| !v.is_empty()) {
+    let root_trimmed = root.trim_end_matches('/');
+    if !root_trimmed.is_empty() {
+      let cwd_path = std::path::Path::new(trimmed);
+      let root_path = std::path::Path::new(root_trimmed);
+      if let Ok(rel) = cwd_path.strip_prefix(root_path) {
+        let rel_str = rel.to_string_lossy();
+        if !rel_str.trim().is_empty() {
+          return rel_str.into_owned();
+        }
+      }
+    }
+  }
+
+  std::path::Path::new(trimmed)
+    .file_name()
+    .map(|v| v.to_string_lossy().into_owned())
+    .unwrap_or_else(|| trimmed.to_string())
+}
+
 pub(crate) mod replay;
 pub(crate) mod sampler;
 pub(crate) mod trainer;
@@ -20,10 +57,12 @@ pub fn context_tokens(input: OnlineContextInput<'_>) -> Vec<String> {
   let mut out = Vec::new();
 
   if let Some(root) = input.workspace_root.filter(|v| !v.is_empty()) {
-    out.push(format!("ctx:workspace_root={root}"));
+    let normalized = normalize_workspace_root_value(root);
+    out.push(format!("ctx:workspace_root={normalized}"));
   }
   if let Some(cwd) = input.cwd.filter(|v| !v.is_empty()) {
-    out.push(format!("ctx:cwd={cwd}"));
+    let normalized = normalize_cwd_value(cwd, input.workspace_root);
+    out.push(format!("ctx:cwd={normalized}"));
   }
   if let Some(exit) = input.exit_status {
     out.push(format!("ctx:exit={exit}"));
@@ -230,7 +269,8 @@ mod tests {
       unix_timestamp: Some(1_700_000_000),
     });
     assert!(tokens.iter().any(|t| t.starts_with("ctx:timebucket=")));
-    assert!(tokens.contains(&"ctx:workspace_root=/workspace".to_string()));
+    assert!(tokens.contains(&"ctx:workspace_root=workspace".to_string()));
+    assert!(tokens.contains(&"ctx:cwd=crate".to_string()));
   }
 
   #[test]
