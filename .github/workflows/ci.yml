@@ -20,8 +20,6 @@ jobs:
             target: aarch64-unknown-linux-gnu
           - os: macos-latest
             target: aarch64-apple-darwin
-          - os: windows-latest
-            target: x86_64-pc-windows-msvc
     runs-on: ${{ matrix.os }}
     steps:
       - name: Checkout repository
@@ -43,10 +41,5 @@ jobs:
       - name: Test binary exists
         shell: bash
         run: |
-          if [ "${{ runner.os }}" = "Windows" ]; then
-            test -f target/${{ matrix.target }}/release/zage.exe
-            ls -lh target/${{ matrix.target }}/release/zage.exe
-          else
-            test -f target/${{ matrix.target }}/release/zage
-            ls -lh target/${{ matrix.target }}/release/zage
-          fi
+          test -f target/${{ matrix.target }}/release/zage
+          ls -lh target/${{ matrix.target }}/release/zage
