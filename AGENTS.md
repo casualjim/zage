@@ -133,22 +133,22 @@ mcp__rust-lsp__completion "crates/slipstreamd/src/routes.rs" 42 20
 - Never ignore errors - propagate or handle explicitly
 
 ## Commit Messages
-- Write clear, descriptive commit messages in plain English
-- Do NOT use conventional commits, semantic commits, or any commit prefixes (no "feat:", "fix:", "refactor:", etc.)
-- Focus on WHAT changed and WHY, not the type of change
+- **MUST use conventional commits** - automated releases depend on them
+- Format: `<type>: <description>` where type is one of: feat, fix, refactor, chore, docs, test, perf, style
+- Include `bump:major`, `bump:minor`, or `bump:patch` in PR title/body for version bumps
 - First line should be a clear summary (50-72 chars recommended)
 - Use the body for detailed explanation if needed
-- Reference issue IDs when relevant (e.g., "Closes: slipstream-24")
+- Reference issue IDs when relevant (e.g., "Closes: #123")
 
 Good examples:
-- "Split search into dedicated Searcher service"
-- "Add reranking provider for DeepInfra Qwen3-Reranker"
-- "Fix flaky test by increasing tolerance for timing variance"
+- "feat: Add reranking provider for DeepInfra Qwen3-Reranker"
+- "fix: Stabilize online prediction scoring and tests"
+- "refactor: Split search into dedicated Searcher service"
 
 Bad examples:
-- "refactor(embedding): Split search into dedicated Searcher service"
-- "feat: add reranking provider"
-- "fix: flaky test"
+- "Split search into dedicated Searcher service" (missing type)
+- "Add reranking provider" (missing type prefix)
+- "flaky test fix" (missing type prefix)
 
 ## SUPER IMPORTANT
 - Do NOT run git commands that can result in loss of work unilaterally. ALWAYS get approval from the user for git checkout/reset/restore/revert/...
