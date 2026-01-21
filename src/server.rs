@@ -616,7 +616,7 @@ fn launchd_listener() -> Result<Option<UnixListener>> {
   use std::ffi::CString;
   use std::ptr;
 
-  extern "C" {
+  unsafe extern "C" {
     fn launch_activate_socket(
       name: *const libc::c_char,
       fds: *mut *mut libc::c_int,
