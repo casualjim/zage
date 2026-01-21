@@ -1,12 +1,15 @@
 [tools]
 "cargo:cargo-nextest" = "latest"
 "cargo:cargo-sort" = "latest"
+"cargo:cargo-release" = "latest"
+"cargo:cargo-dist" = "latest"
 hk = "latest"
 pkl = "latest"
 rust =  { version = "latest", profile = "default", components = "llvm-tools,rustfmt,clippy" }
 shellcheck = "latest"
 taplo = "latest"
 "ubi:cargo-bins/cargo-binstall" = "latest"
+"ubi:orhun/git-cliff" = "latest"
 
 [tasks.pre-commit]
 run = "hk run pre-commit"

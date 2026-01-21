@@ -4,7 +4,15 @@ version = "0.1.0"
 edition = "2024"
 description = "Shell history indexing and next-command suggestions with an online model"
 license = "MIT"
-repository = "https://git.wagyu.icu/casualjim/zage"
+repository = "https://github.com/casualjim/zage"
+homepage = "https://github.com/casualjim/zage"
+
+[package.metadata.release]
+sign-commit = false
+sign-tag = false
+publish = false
+allow-branch = ["main"]
+pre-release-commit-message = "chore: Release {{crate_name}} version {{version}}"
 
 [features]
 tier1-tests = ["tempfile"]
