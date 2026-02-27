@@ -26,6 +26,22 @@ export ZAGE_COMPLETION_FORMAT="zsh"
 # Force zage to be the only autosuggest strategy when set to 1
 : ${ZAGE_AUTOSUGGEST_ONLY:="0"}
 
+# Clear suggestions during bracketed paste to prevent accidental acceptance
+# We need to handle this after zsh-autosuggestions loads, so use a deferred hook
+_zage_setup_bracketed_paste_clear() {
+  emulate -L zsh
+  add-zsh-hook -d precmd _zage_setup_bracketed_paste_clear
+  if (( ${+ZSH_AUTOSUGGEST_CLEAR_WIDGETS} )); then
+    if (( ${ZSH_AUTOSUGGEST_CLEAR_WIDGETS[(I)bracketed-paste]} == 0 )); then
+      ZSH_AUTOSUGGEST_CLEAR_WIDGETS+=(bracketed-paste)
+      if [[ -n "$ZAGE_ZSH_DEBUG" ]]; then
+        print -r -- "[zage-hook] added bracketed-paste to clear widgets" >> "$ZAGE_ZSH_DEBUG"
+      fi
+    fi
+  fi
+}
+add-zsh-hook precmd _zage_setup_bracketed_paste_clear
+
 # State for suggestion feedback.
 _ZAGE_LAST_SUGGESTION=""
 _ZAGE_LAST_SUGGESTION_AT=""
