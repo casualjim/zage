@@ -3,7 +3,7 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use color_eyre::eyre::{Result, eyre};
-use dirs::home_dir;
+use directories::BaseDirs;
 use tracing::{debug, info};
 
 use crate::cli::BackendRef;
@@ -96,7 +96,10 @@ async fn run_embedded(
     normalize_input_path(path)?
   } else {
     debug!("No file specified, falling back to default path");
-    let mut path = home_dir().ok_or_else(|| eyre!("Cannot find home directory"))?;
+    let mut path = BaseDirs::new()
+      .ok_or_else(|| eyre!("Cannot find home directory"))?
+      .home_dir()
+      .to_path_buf();
     let filename = match shell {
       Shell::Zsh => ".zsh_history",
       Shell::Bash => ".bash_history",

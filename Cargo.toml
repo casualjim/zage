@@ -20,17 +20,17 @@ pprof = ["dep:pprof"]
 
 [dependencies]
 bstr = { version = "1.12.1", features = ["serde"] }
-clap = { version = "4.5.54", features = ["derive", "env", "string", "unicode"] }
+clap = { version = "4", features = ["derive", "env", "string", "unicode"] }
 color-eyre = "0.6"
-confique = { version = "0.4.0", features = ["toml"] }
-deadpool = "0.12.3"
+confique = { version = "0.4", features = ["toml"] }
+deadpool = "0.13"
 deadpool-libsql = "0.1.0"
-dirs = "6.0.0"
+directories = "6.0.0"
 dotnet-lens = "0.1.1"
 foldhash = "0.2.0"
 hostname = "0.4.2"
 human-panic = "2.0"
-humantime = "2.1"
+humantime = "2"
 itertools = "0.14.0"
 jiff = "0.2.18"
 libc = "0.2"
@@ -43,11 +43,11 @@ rkyv = { version = "0.7.46", features = ["validation"] }
 serde = { version = "1.0.228", features = ["derive"] }
 serde_json = "1.0.149"
 serde_yaml = "0.9"
-tempfile = { version = "3.24.0", optional = true }
+tempfile = { version = "3", optional = true }
 thiserror = "2"
 tokio = { version = "1", features = ["io-util", "macros", "net", "rt-multi-thread", "sync", "time"] }
 toml = "0.9"
-toml_edit = { version = "0.22", features = ["serde"] }
+toml_edit = { version = "0.23", features = ["serde"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter", "fmt"] }
 tree-sitter = "0.26.3"

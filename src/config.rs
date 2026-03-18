@@ -5,6 +5,7 @@ use std::str::FromStr;
 use clap::Args;
 use confique::Config as _;
 use confique::Layer as _;
+use directories::BaseDirs;
 use serde::Deserialize;
 
 use crate::{Result, ZageError};
@@ -191,7 +192,7 @@ impl AppConfig {
       builder = builder.file(path);
     }
 
-    if let Some(dir) = dirs::config_dir() {
+    if let Some(dir) = BaseDirs::new().map(|dirs| dirs.config_dir().to_path_buf()) {
       builder = add_existing_files(builder, xdg_config_candidates(&dir));
     }
 
@@ -288,8 +289,8 @@ fn dynamic_defaults() -> Result<<AppConfig as confique::Config>::Layer> {
 }
 
 fn default_db_path() -> Result<PathBuf> {
-  dirs::data_dir()
-    .map(|v| v.join("zage/zage.db"))
+  BaseDirs::new()
+    .map(|dirs| dirs.data_dir().join("zage/zage.db"))
     .ok_or_else(|| ZageError::ConfigError("Could not determine data directory".to_string()))
 }
 
