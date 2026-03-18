@@ -11,6 +11,8 @@ use crate::server::{self, Request, Response};
 use crate::shell_history::{get_hostname, normalize_shellname};
 use crate::tokenize::tokenize;
 
+const DEFAULT_AUTOSUGGEST_TIMEOUT_MS: u64 = 150;
+
 pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
   let SuggestArgs {
     count,
@@ -68,9 +70,7 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
   let prefix = current_line.as_ref().filter(|value| !value.is_empty());
   let server_suggestions = match &backend {
     BackendRef::Server => {
-      let timeout_ms = timeout
-        .map(|duration| Duration::from(duration).as_millis())
-        .map(|millis| u64::try_from(millis).unwrap_or(u64::MAX));
+      let timeout_ms = resolve_timeout_ms(timeout, autosuggest);
       let request = Request::Suggest {
         current_line: prefix.cloned(),
         working_directory: cwd.clone(),
@@ -235,6 +235,13 @@ pub async fn run(backend: BackendRef<'_>, args: SuggestArgs) -> Result<()> {
   }
 
   Ok(())
+}
+
+fn resolve_timeout_ms(timeout: Option<humantime::Duration>, autosuggest: bool) -> Option<u64> {
+  timeout
+    .map(|duration| Duration::from(duration).as_millis())
+    .map(|millis| u64::try_from(millis).unwrap_or(u64::MAX))
+    .or_else(|| autosuggest.then_some(DEFAULT_AUTOSUGGEST_TIMEOUT_MS))
 }
 
 fn format_zsh_item(word: &str, desc: Option<&str>) -> String {
@@ -413,4 +420,33 @@ fn format_suggestion_debug(suggestion: &Suggestion, always_show_score: bool) -> 
     suggestion.breakdown.similarity,
     suggestion.breakdown.online_model
   )
+}
+
+#[cfg(test)]
+mod tests {
+  use super::*;
+
+  #[test]
+  fn autosuggest_uses_short_default_timeout() {
+    assert_eq!(
+      resolve_timeout_ms(None, true),
+      Some(DEFAULT_AUTOSUGGEST_TIMEOUT_MS)
+    );
+  }
+
+  #[test]
+  fn explicit_timeout_overrides_autosuggest_default() {
+    assert_eq!(
+      resolve_timeout_ms(
+        Some(humantime::Duration::from(Duration::from_secs(2))),
+        true
+      ),
+      Some(2_000)
+    );
+  }
+
+  #[test]
+  fn non_autosuggest_keeps_existing_default() {
+    assert_eq!(resolve_timeout_ms(None, false), None);
+  }
 }

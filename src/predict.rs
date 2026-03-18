@@ -155,6 +155,129 @@ fn apply_prefix_spacing(prefix: &str, normalized_prefix: &str, suggestions: &mut
   }
 }
 
+#[derive(Debug, Default, Clone)]
+struct CompletionConstraints {
+  head: Option<String>,
+  flags: Vec<String>,
+  args: Vec<String>,
+  partial_raw: Option<String>,
+  partial_norm: Option<String>,
+  partial_is_head: bool,
+  partial_is_flag: bool,
+}
+
+impl CompletionConstraints {
+  fn is_unconstrained(&self) -> bool {
+    self.head.is_none()
+      && self.flags.is_empty()
+      && self.args.is_empty()
+      && self.partial_raw.is_none()
+      && self.partial_norm.is_none()
+  }
+}
+
+fn ordered_args_prefix_match(prefix_args: &[String], candidate_args: &[String]) -> bool {
+  prefix_args
+    .iter()
+    .enumerate()
+    .all(|(idx, arg)| candidate_args.get(idx) == Some(arg))
+}
+
+fn command_matches_completion_constraints(
+  shellname: &str,
+  command: &str,
+  constraints: &CompletionConstraints,
+) -> bool {
+  if constraints.is_unconstrained() {
+    return true;
+  }
+
+  let tokens = tokenize_index(shellname, command);
+  let Some(parts) = extract_command_parts(command, &tokens) else {
+    return false;
+  };
+
+  if let Some(expected_head) = constraints.head.as_deref()
+    && !constraints.partial_is_head
+    && parts.head != expected_head
+  {
+    return false;
+  }
+
+  if !constraints.flags.iter().all(|flag| {
+    parts
+      .flags
+      .iter()
+      .any(|candidate_flag| candidate_flag == flag)
+  }) {
+    return false;
+  }
+
+  let candidate_args = parts
+    .args
+    .iter()
+    .map(|arg| arg.normalized.clone())
+    .collect::<Vec<_>>();
+  if !ordered_args_prefix_match(&constraints.args, &candidate_args) {
+    return false;
+  }
+
+  if constraints.partial_is_flag {
+    // Keep flag matching permissive to preserve existing completion behavior
+    // when the current token could be either a complete flag or an in-progress one.
+    return true;
+  }
+
+  if constraints.partial_is_head {
+    if let Some(partial_raw) = constraints.partial_raw.as_deref() {
+      if partial_raw.is_empty() {
+        return true;
+      }
+      return parts.head.starts_with(partial_raw);
+    }
+    return true;
+  }
+
+  if let Some(partial_norm) = constraints.partial_norm.as_deref() {
+    if partial_norm.is_empty() {
+      return true;
+    }
+    let partial_index = constraints.args.len();
+    return candidate_args
+      .get(partial_index)
+      .map(|candidate| candidate.starts_with(partial_norm))
+      .unwrap_or(false);
+  }
+
+  true
+}
+
+fn command_or_alias_matches_completion_constraints(
+  shellname: &str,
+  command: &str,
+  expanded_command: Option<&str>,
+  aliases: &HashMap<String, String>,
+  constraints: &CompletionConstraints,
+) -> bool {
+  if command_matches_completion_constraints(shellname, command, constraints) {
+    return true;
+  }
+
+  if let Some(expanded) = expanded_command
+    && command_matches_completion_constraints(shellname, expanded, constraints)
+  {
+    return true;
+  }
+
+  aliases.iter().any(|(alias, expansion)| {
+    alias_for_command(alias, expansion, command)
+      .map(|alias_command| {
+        command_matches_completion_constraints(shellname, &alias_command, constraints)
+      })
+      .unwrap_or(false)
+  })
+}
+
 async fn fetch_command_counts(
   conn: &Connection,
   commands: &[String],
@@ -1301,44 +1424,69 @@ async fn completion_candidates(
     config.max_results
   };
   let token_priors = token_sequence_predictions(conn, prefix_norm).await?;
-  let (prefix_flags, prefix_args) = {
+  let completion_constraints = {
     let tokens = tokenize_index(shellname.as_str(), prefix);
-    let ends_with_space = prefix
-      .chars()
-      .last()
-      .map(|c| c.is_whitespace())
-      .unwrap_or(false);
-    extract_command_parts(prefix, &tokens)
-      .map(|parts| {
-        let mut flags = parts.flags;
-        let mut args = parts
-          .args
-          .iter()
-          .map(|arg| arg.normalized.clone())
-          .collect::<Vec<_>>();
-        if !ends_with_space
-          && let Some(last) = tokens.last()
-          && matches!(
-            last.kind,
-            TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment
-          )
-        {
-          let partial_norm = last.normalized.clone();
-          if last.raw.starts_with('-') {
-            if last.raw.len() == 1 {
-              if let Some(pos) = flags.iter().position(|flag| flag == &last.raw) {
-                flags.remove(pos);
-              } else if let Some(pos) = args.iter().position(|arg| arg == &partial_norm) {
-                args.remove(pos);
+    let has_complex_operators = tokens
+      .iter()
+      .any(|token| matches!(token.kind, TokenKind::Operator) && !matches!(token.raw.as_str(), "="));
+    if has_complex_operators {
+      CompletionConstraints::default()
+    } else {
+      let ends_with_space = prefix
+        .chars()
+        .last()
+        .map(|c| c.is_whitespace())
+        .unwrap_or(false);
+      extract_command_parts(prefix, &tokens)
+        .map(|parts| {
+          let has_no_suffix_tokens = parts.args.is_empty() && parts.flags.is_empty();
+          let head = Some(parts.head);
+          let mut flags = parts.flags;
+          let mut args = parts
+            .args
+            .iter()
+            .map(|arg| arg.normalized.clone())
+            .collect::<Vec<_>>();
+          let mut partial_raw = None;
+          let mut partial_norm = None;
+          let mut partial_is_head = false;
+          let mut partial_is_flag = false;
+          if !ends_with_space
+            && let Some(last) = tokens.last()
+            && matches!(
+              last.kind,
+              TokenKind::Word | TokenKind::Quoted | TokenKind::Variable | TokenKind::Assignment
+            )
+          {
+            partial_raw = Some(last.raw.clone());
+            partial_norm = Some(last.normalized.clone());
+            partial_is_head = has_no_suffix_tokens;
+            partial_is_flag = last.raw.starts_with('-');
+            let partial_norm = last.normalized.clone();
+            if last.raw.starts_with('-') {
+              if last.raw.len() == 1 {
+                if let Some(pos) = flags.iter().position(|flag| flag == &last.raw) {
+                  flags.remove(pos);
+                } else if let Some(pos) = args.iter().position(|arg| arg == &partial_norm) {
+                  args.remove(pos);
+                }
               }
+            } else if let Some(pos) = args.iter().position(|arg| arg == &partial_norm) {
+              args.remove(pos);
             }
-          } else if let Some(pos) = args.iter().position(|arg| arg == &partial_norm) {
-            args.remove(pos);
           }
-        }
-        (flags, args)
-      })
-      .unwrap_or_default()
+          CompletionConstraints {
+            head,
+            flags,
+            args,
+            partial_raw,
+            partial_norm,
+            partial_is_head,
+            partial_is_flag,
+          }
+        })
+        .unwrap_or_default()
+    }
   };
 
   let mut env_suggestions = None;
@@ -1380,33 +1528,14 @@ async fn completion_candidates(
         if normalize_prefix_for_match(&suggestion.command).trim_end() == trimmed_prefix {
           return false;
         }
-        if prefix_flags.is_empty() && prefix_args.is_empty() {
+        if completion_constraints.is_unconstrained() {
           return true;
         }
-        let tokens = tokenize_index(shellname.as_str(), &suggestion.command);
-        let Some(parts) = extract_command_parts(&suggestion.command, &tokens) else {
-          return false;
-        };
-        if !prefix_flags
-          .iter()
-          .all(|flag| parts.flags.iter().any(|cand| cand == flag))
-        {
-          return false;
-        }
-        if !prefix_args.is_empty() {
-          let candidate_args = parts
-            .args
-            .iter()
-            .map(|arg| arg.normalized.clone())
-            .collect::<Vec<_>>();
-          if !prefix_args
-            .iter()
-            .all(|arg| candidate_args.iter().any(|cand| cand == arg))
-          {
-            return false;
-          }
-        }
-        true
+        command_matches_completion_constraints(
+          shellname.as_str(),
+          &suggestion.command,
+          &completion_constraints,
+        )
       });
       if arg_suggestions.is_empty() {
         // fall through to normal completion candidates
@@ -1416,7 +1545,10 @@ async fn completion_candidates(
         let last_char = prefix.chars().last();
         let ends_with_space = last_char.map(|c| c.is_whitespace()).unwrap_or(false);
         let ends_with_quote = matches!(last_char, Some('"') | Some('\''));
-        if prefer_full_line || (ends_with_space && !prefix_flags.is_empty()) || ends_with_quote {
+        if prefer_full_line
+          || (ends_with_space && !completion_constraints.flags.is_empty())
+          || ends_with_quote
+        {
           arg_suggestions_for_merge = Some(arg_suggestions);
         } else {
           apply_prefix_spacing(prefix, &normalized_prefix, &mut arg_suggestions);
@@ -1509,6 +1641,15 @@ async fn completion_candidates(
     if !matches_prefix {
       continue;
     }
+    if !command_or_alias_matches_completion_constraints(
+      shellname.as_str(),
+      &command,
+      expanded.as_deref(),
+      aliases,
+      &completion_constraints,
+    ) {
+      continue;
+    }
     let norm_tokens = normalized_tokens(expanded_for_score);
     let similarity = token_similarity(prefix_norm, &norm_tokens);
     let prefix_score = if command.starts_with(&normalized_match_prefix) {
@@ -1582,7 +1723,7 @@ async fn completion_candidates(
   }
 
   if scored.is_empty() {
-    if prefix_flags.is_empty() && prefix_args.is_empty() {
+    if completion_constraints.is_unconstrained() {
       let mut merged = env_suggestions.unwrap_or_default();
       if let Some(mut arg_suggestions) = arg_suggestions_for_merge.take() {
         merged.append(&mut arg_suggestions);
@@ -1600,48 +1741,16 @@ async fn completion_candidates(
       let command = row.get::<String>(0)?;
       let freq = row.get::<i64>(1)?;
       let last_seen = row.get::<i64>(2)?;
-      if !prefix_flags.is_empty() {
-        let tokens = tokenize_index(shellname.as_str(), &command);
-        let Some(parts) = extract_command_parts(&command, &tokens) else {
-          continue;
-        };
-        if !prefix_flags
-          .iter()
-          .all(|flag| parts.flags.iter().any(|cand| cand == flag))
-        {
-          continue;
-        }
-        if !prefix_args.is_empty() {
-          let candidate_args = parts
-            .args
-            .iter()
-            .map(|arg| arg.normalized.clone())
-            .collect::<Vec<_>>();
-          if !prefix_args
-            .iter()
-            .all(|arg| candidate_args.iter().any(|cand| cand == arg))
-          {
-            continue;
-          }
-        }
-      } else if !prefix_args.is_empty() {
-        let tokens = tokenize_index(shellname.as_str(), &command);
-        let Some(parts) = extract_command_parts(&command, &tokens) else {
-          continue;
-        };
-        let candidate_args = parts
-          .args
-          .iter()
-          .map(|arg| arg.normalized.clone())
-          .collect::<Vec<_>>();
-        if !prefix_args
-          .iter()
-          .all(|arg| candidate_args.iter().any(|cand| cand == arg))
-        {
-          continue;
-        }
-      }
       let expanded = expand_alias(&command, aliases);
+      if !command_or_alias_matches_completion_constraints(
+        shellname.as_str(),
+        &command,
+        expanded.as_deref(),
+        aliases,
+        &completion_constraints,
+      ) {
+        continue;
+      }
       let expanded_for_score = expanded.as_deref().unwrap_or(&command);
       let norm_tokens = normalized_tokens(expanded_for_score);
       let similarity = token_similarity(prefix_norm, &norm_tokens);
@@ -2382,6 +2491,61 @@ mod tests {
         .any(|s| s.command == format!("{prefix}locked"))
     );
     assert!(suggestions.iter().all(|s| s.command.starts_with(prefix)));
+  }
+
+  #[tokio::test]
+  async fn completion_fallback_respects_partial_arg_position() {
+    let tmp = tempfile::NamedTempFile::new().unwrap();
+    let db = open_db(tmp.path()).await.unwrap();
+    init(&db.conn).await.unwrap();
+
+    db.conn
+      .execute(
+        "INSERT INTO command_stats (command, freq, last_seen) VALUES (?, ?, ?)",
+        ("git checkout --track origin/main", 12i64, 100i64),
+      )
+      .await
+      .unwrap();
+    db.conn
+      .execute(
+        "INSERT INTO command_stats (command, freq, last_seen) VALUES (?, ?, ?)",
+        ("git checkout main", 5i64, 90i64),
+      )
+      .await
+      .unwrap();
+
+    let cwd = tempfile::tempdir().unwrap();
+    let runtime = SuggestRuntime {
+      aliases: HashMap::new(),
+      weights: RankingWeights::default(),
+      recency_half_life: ranking::DEFAULT_RECENCY_HALF_LIFE_SECONDS,
+      now: 1_000,
+    };
+    let prefix = "git checkout ma";
+    let config = SuggestConfig {
+      max_results: 10,
+      recent_limit: 10,
+      prefix: Some(prefix.to_string()),
+      cwd: Some(cwd.path().to_string_lossy().into_owned()),
+      hostname: None,
+      username: None,
+      session_id: None,
+      shellname: Some("zsh".to_string()),
+      use_sequences: false,
+      prefer_full_line: true,
+      include_debug: false,
+    };
+
+    let suggestions = suggest_with_runtime(&db.conn, config, &runtime, None)
+      .await
+      .unwrap();
+
+    assert!(suggestions.iter().any(|s| s.command == "git checkout main"));
+    assert!(
+      !suggestions
+        .iter()
+        .any(|s| s.command == "git checkout --track origin/main")
+    );
   }
 
   #[tokio::test]
