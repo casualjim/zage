@@ -1,8 +1,18 @@
+## [0.1.4] - 2026-03-18
+
+### 🚜 Refactor
+
+- Replace dirs with directories
 ## [0.1.3] - 2026-03-18
 
 ### 🐛 Bug Fixes
 
 - Prevent autosuggest hangs during path completion
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.3 [ci skip]
+- Release zage version 0.1.3
 ## [0.1.2] - 2026-01-23
 
 ### 📚 Documentation
