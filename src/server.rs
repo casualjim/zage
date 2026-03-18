@@ -6,6 +6,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use deadpool::managed::{Manager as DeadpoolManager, Object, Pool, RecycleError, RecycleResult};
+use directories::BaseDirs;
 use libsql::{Connection, Database};
 use rkyv::{Archive, Deserialize, Serialize};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -1289,8 +1290,10 @@ fn parse_shell(shell: &str) -> Result<Shell> {
 }
 
 fn default_history_path(shell: &str) -> Result<PathBuf> {
-  let mut path =
-    dirs::home_dir().ok_or_else(|| ZageError::ConfigError("missing home dir".to_string()))?;
+  let mut path = BaseDirs::new()
+    .ok_or_else(|| ZageError::ConfigError("missing home dir".to_string()))?
+    .home_dir()
+    .to_path_buf();
   let filename = match parse_shell(shell)? {
     Shell::Zsh => ".zsh_history",
     Shell::Bash => ".bash_history",

@@ -2,6 +2,8 @@ use std::fs;
 use std::path::PathBuf;
 use std::process::Command;
 
+use directories::BaseDirs;
+
 use crate::{Result, ZageError};
 
 const SYSTEMD_SERVICE_NAME: &str = "zage.service";
@@ -59,10 +61,26 @@ fn run_command_maybe(program: &str, args: &[&str]) -> Result<bool> {
   Ok(output.status.success())
 }
 
+fn user_config_dir() -> Result<PathBuf> {
+  Ok(
+    BaseDirs::new()
+      .ok_or_else(|| ZageError::ConfigError("missing config dir".to_string()))?
+      .config_dir()
+      .to_path_buf(),
+  )
+}
+
+fn user_home_dir() -> Result<PathBuf> {
+  Ok(
+    BaseDirs::new()
+      .ok_or_else(|| ZageError::ConfigError("missing home dir".to_string()))?
+      .home_dir()
+      .to_path_buf(),
+  )
+}
+
 fn install_systemd_user() -> Result<()> {
-  let unit_dir = dirs::config_dir()
-    .ok_or_else(|| ZageError::ConfigError("missing config dir".to_string()))?
-    .join("systemd/user");
+  let unit_dir = user_config_dir()?.join("systemd/user");
   fs::create_dir_all(&unit_dir)?;
   let service_path = unit_dir.join(SYSTEMD_SERVICE_NAME);
   let socket_path = unit_dir.join(SYSTEMD_SOCKET_NAME);
@@ -107,9 +125,7 @@ WantedBy=default.target\n",
 }
 
 fn uninstall_systemd_user() -> Result<()> {
-  let unit_dir = dirs::config_dir()
-    .ok_or_else(|| ZageError::ConfigError("missing config dir".to_string()))?
-    .join("systemd/user");
+  let unit_dir = user_config_dir()?.join("systemd/user");
   let service_path = unit_dir.join(SYSTEMD_SERVICE_NAME);
   let socket_path = unit_dir.join(SYSTEMD_SOCKET_NAME);
 
@@ -133,8 +149,7 @@ fn uninstall_systemd_user() -> Result<()> {
 }
 
 fn install_launchd() -> Result<()> {
-  let home_dir =
-    dirs::home_dir().ok_or_else(|| ZageError::ConfigError("missing home dir".to_string()))?;
+  let home_dir = user_home_dir()?;
   let plist_dir = home_dir.join("Library/LaunchAgents");
   fs::create_dir_all(&plist_dir)?;
   let plist_path = plist_dir.join(format!("{LAUNCHD_LABEL}.plist"));
@@ -200,8 +215,7 @@ fn install_launchd() -> Result<()> {
 }
 
 fn uninstall_launchd() -> Result<()> {
-  let home_dir =
-    dirs::home_dir().ok_or_else(|| ZageError::ConfigError("missing home dir".to_string()))?;
+  let home_dir = user_home_dir()?;
   let plist_path = home_dir
     .join("Library/LaunchAgents")
     .join(format!("{LAUNCHD_LABEL}.plist"));
