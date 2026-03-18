@@ -1,6 +1,6 @@
 [package]
 name = "zage"
-version = "0.1.3"
+version = "0.1.4"
 edition = "2024"
 description = "Shell history indexing and next-command suggestions with an online model"
 license = "MIT"
