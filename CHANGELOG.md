@@ -1,8 +1,18 @@
+## [0.1.3] - 2026-03-18
+
+### 🐛 Bug Fixes
+
+- Prevent autosuggest hangs during path completion
 ## [0.1.2] - 2026-01-23
 
 ### 📚 Documentation
 
 - Mandate conventional commits for automated releases
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.2 [ci skip]
+- Release zage version 0.1.2
 ## [0.1.1] - 2026-01-21
 
 ### 🚀 Features
