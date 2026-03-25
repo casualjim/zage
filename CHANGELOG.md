@@ -1,8 +1,18 @@
+## [0.1.5] - 2026-03-25
+
+### 🐛 Bug Fixes
+
+- Recover stale user service state
 ## [0.1.4] - 2026-03-18
 
 ### 🚜 Refactor
 
 - Replace dirs with directories
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.4 [ci skip]
+- Release zage version 0.1.4
 ## [0.1.3] - 2026-03-18
 
 ### 🐛 Bug Fixes
