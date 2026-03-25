@@ -248,60 +248,70 @@ where
     Ok(changed as usize)
   }
 
-  for mut invocation in invocations {
-    if invocation.expanded_command.is_empty() {
-      invocation.expanded_command = invocation.command.clone();
+  let write_result: Result<()> = async {
+    for mut invocation in invocations {
+      if invocation.expanded_command.is_empty() {
+        invocation.expanded_command = invocation.command.clone();
+      }
+
+      if batch_count >= batch_rows {
+        inserted += flush_shell_history_batch(conn, &mut batch_params, &mut batch_count).await?;
+      }
+
+      let id = uuid::Uuid::now_v7().to_string();
+      let command = crate::tokenize::normalize_command_whitespace(&invocation.command);
+      let expanded = crate::tokenize::normalize_command_whitespace(&invocation.expanded_command);
+      batch_params.push(libsql::Value::Text(id));
+      batch_params.push(libsql::Value::Text(command));
+      batch_params.push(libsql::Value::Text(expanded));
+      batch_params.push(libsql::Value::Text(invocation.shellname));
+      batch_params.push(match invocation.working_directory {
+        Some(v) => libsql::Value::Text(v),
+        None => libsql::Value::Null,
+      });
+      batch_params.push(match invocation.hostname {
+        Some(v) => libsql::Value::Text(v),
+        None => libsql::Value::Null,
+      });
+      batch_params.push(match invocation.username {
+        Some(v) => libsql::Value::Text(v),
+        None => libsql::Value::Null,
+      });
+      batch_params.push(match invocation.exit_status {
+        Some(v) => libsql::Value::Integer(v),
+        None => libsql::Value::Null,
+      });
+      batch_params.push(match invocation.start_unix_timestamp {
+        Some(v) => libsql::Value::Integer(v),
+        None => libsql::Value::Null,
+      });
+      batch_params.push(match invocation.end_unix_timestamp {
+        Some(v) => libsql::Value::Integer(v),
+        None => libsql::Value::Null,
+      });
+      batch_params.push(libsql::Value::Integer(invocation.session_id));
+
+      batch_count += 1;
+      processed += 1;
+      if processed.is_multiple_of(progress_interval) {
+        inserted += flush_shell_history_batch(conn, &mut batch_params, &mut batch_count).await?;
+        info!(
+          "Imported {} history entries ({} inserted)",
+          processed, inserted
+        );
+      }
     }
 
-    if batch_count >= batch_rows {
-      inserted += flush_shell_history_batch(conn, &mut batch_params, &mut batch_count).await?;
-    }
+    inserted += flush_shell_history_batch(conn, &mut batch_params, &mut batch_count).await?;
+    Ok(())
+  }
+  .await;
 
-    let id = uuid::Uuid::now_v7().to_string();
-    let command = crate::tokenize::normalize_command_whitespace(&invocation.command);
-    let expanded = crate::tokenize::normalize_command_whitespace(&invocation.expanded_command);
-    batch_params.push(libsql::Value::Text(id));
-    batch_params.push(libsql::Value::Text(command));
-    batch_params.push(libsql::Value::Text(expanded));
-    batch_params.push(libsql::Value::Text(invocation.shellname));
-    batch_params.push(match invocation.working_directory {
-      Some(v) => libsql::Value::Text(v),
-      None => libsql::Value::Null,
-    });
-    batch_params.push(match invocation.hostname {
-      Some(v) => libsql::Value::Text(v),
-      None => libsql::Value::Null,
-    });
-    batch_params.push(match invocation.username {
-      Some(v) => libsql::Value::Text(v),
-      None => libsql::Value::Null,
-    });
-    batch_params.push(match invocation.exit_status {
-      Some(v) => libsql::Value::Integer(v),
-      None => libsql::Value::Null,
-    });
-    batch_params.push(match invocation.start_unix_timestamp {
-      Some(v) => libsql::Value::Integer(v),
-      None => libsql::Value::Null,
-    });
-    batch_params.push(match invocation.end_unix_timestamp {
-      Some(v) => libsql::Value::Integer(v),
-      None => libsql::Value::Null,
-    });
-    batch_params.push(libsql::Value::Integer(invocation.session_id));
-
-    batch_count += 1;
-    processed += 1;
-    if processed.is_multiple_of(progress_interval) {
-      inserted += flush_shell_history_batch(conn, &mut batch_params, &mut batch_count).await?;
-      info!(
-        "Imported {} history entries ({} inserted)",
-        processed, inserted
-      );
-    }
+  if let Err(err) = write_result {
+    let _ = conn.execute("ROLLBACK", ()).await;
+    return Err(err);
   }
 
-  inserted += flush_shell_history_batch(conn, &mut batch_params, &mut batch_count).await?;
   conn.execute("COMMIT", ()).await?;
   info!(
     "Imported {} history entries ({} inserted)",

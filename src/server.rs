@@ -377,6 +377,7 @@ impl ConnectionPool {
       .get()
       .await
       .map_err(|err| ZageError::ConfigError(err.to_string()))?;
+    let _ = conn.execute("ROLLBACK", ()).await;
     let _ = apply_pragma(
       &conn,
       &format!("PRAGMA busy_timeout={}", db_busy_timeout_ms()),

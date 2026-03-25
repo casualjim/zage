@@ -79,6 +79,10 @@ fn user_home_dir() -> Result<PathBuf> {
   )
 }
 
+fn launchd_socket_path() -> PathBuf {
+  PathBuf::from("/tmp/zage.sock")
+}
+
 fn install_systemd_user() -> Result<()> {
   let unit_dir = user_config_dir()?.join("systemd/user");
   fs::create_dir_all(&unit_dir)?;
@@ -154,6 +158,7 @@ fn install_launchd() -> Result<()> {
   fs::create_dir_all(&plist_dir)?;
   let plist_path = plist_dir.join(format!("{LAUNCHD_LABEL}.plist"));
   let plist_path_str = plist_path.to_string_lossy().into_owned();
+  let socket_path = launchd_socket_path();
   let zage_bin = zage_binary()?;
   let uid = uzers::get_current_uid();
   let gui_target = format!("gui/{uid}");
@@ -201,6 +206,9 @@ fn install_launchd() -> Result<()> {
     "launchctl",
     &["bootout", &gui_target, plist_path_str.as_str()],
   )?;
+  if socket_path.exists() {
+    fs::remove_file(&socket_path)?;
+  }
   if !run_command_maybe(
     "launchctl",
     &["bootstrap", &gui_target, plist_path_str.as_str()],
@@ -220,6 +228,7 @@ fn uninstall_launchd() -> Result<()> {
     .join("Library/LaunchAgents")
     .join(format!("{LAUNCHD_LABEL}.plist"));
   let plist_path_str = plist_path.to_string_lossy().into_owned();
+  let socket_path = launchd_socket_path();
   let uid = uzers::get_current_uid();
   let gui_target = format!("gui/{uid}");
 
@@ -229,6 +238,9 @@ fn uninstall_launchd() -> Result<()> {
       &["bootout", &gui_target, plist_path_str.as_str()],
     )?;
     let _ = run_command_maybe("launchctl", &["unload", "-w", plist_path_str.as_str()])?;
+    if socket_path.exists() {
+      fs::remove_file(&socket_path)?;
+    }
     fs::remove_file(&plist_path)?;
   }
   Ok(())
