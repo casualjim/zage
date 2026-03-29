@@ -1,8 +1,18 @@
+## [0.1.6] - 2026-03-29
+
+### ◀️ Revert
+
+- Restore original zsh autosuggest integration
 ## [0.1.5] - 2026-03-25
 
 ### 🐛 Bug Fixes
 
 - Recover stale user service state
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.5 [ci skip]
+- Release zage version 0.1.5
 ## [0.1.4] - 2026-03-18
 
 ### 🚜 Refactor
