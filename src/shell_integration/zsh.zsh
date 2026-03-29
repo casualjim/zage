@@ -25,9 +25,6 @@ export ZAGE_COMPLETION_FORMAT="zsh"
 : ${ZAGE_AUTOSUGGEST_DISABLE:="0"}
 # Force zage to be the only autosuggest strategy when set to 1
 : ${ZAGE_AUTOSUGGEST_ONLY:="0"}
-# Keep autosuggest fetches short so ZLE stays responsive.
-: ${ZAGE_AUTOSUGGEST_TIMEOUT:="${ZAGE_SUGGEST_TIMEOUT:-150ms}"}
-
 # Clear suggestions during bracketed paste to prevent accidental acceptance
 # We need to handle this after zsh-autosuggestions loads, so use a deferred hook
 _zage_setup_bracketed_paste_clear() {
@@ -50,44 +47,16 @@ _ZAGE_LAST_SUGGESTION_AT=""
 _ZAGE_LAST_SUGGESTION_ID=""
 _ZAGE_LAST_SUGGESTION_PWD=""
 
-_zage_buffer_looks_path_like() {
-    emulate -L zsh
-    local buffer="$1"
-
-    if [[ -z "$buffer" || "$buffer[-1]" == [[:space:]] ]]; then
-      return 1
-    fi
-
-    local -a tokens
-    tokens=(${(z)buffer})
-    [[ ${#tokens[@]} -gt 0 ]] || return 1
-
-    local token="${tokens[-1]}"
-
-    [[ "$token" == "~"* || "$token" == */* || "$token" == "." || "$token" == ".." ]]
-}
-
 # Provide a zsh-autosuggestions strategy backed by zage
 _zsh_autosuggest_strategy_zage() {
     emulate -L zsh
     local prefix="$BUFFER"
     local output
 
-    if _zage_buffer_looks_path_like "$prefix"; then
-      suggestion=""
-      if [[ -n "$ZAGE_ZSH_DEBUG" ]]; then
-        print -r -- "[zage-autosuggest] skipped path-like token buffer=$prefix" >> "$ZAGE_ZSH_DEBUG"
-      fi
-      return
-    fi
-
-    local -a cmd
-    cmd=(zage suggest --autosuggest --count 5 --timeout "$ZAGE_AUTOSUGGEST_TIMEOUT")
-
     if [[ -z "$prefix" ]]; then
-      output="$("${cmd[@]}" 2>/dev/null)"
+      output="$(zage suggest --autosuggest --count 5 2>/dev/null)"
     else
-      output="$("${cmd[@]}" --current-line "$prefix" 2>/dev/null)"
+      output="$(zage suggest --autosuggest --count 5 --current-line "$prefix" 2>/dev/null)"
     fi
 
     if [[ -n "$output" && "$output" == "$prefix"* && "$output" != "$prefix" ]]; then
