@@ -1,12 +1,12 @@
 # Online Next-Command Prediction (Prior Art → Concrete Design)
 
-This doc summarizes relevant prior art on “next shell/CLI command prediction” and distills it into a concrete, lightweight **online learning** design aligned with zage’s goals:
+This doc summarizes relevant prior art on "next shell/CLI command prediction" and distills it into a concrete, lightweight **online learning** design aligned with zage's goals:
 
 - **Sequence effects** (e.g., after `git add` suggest `git commit`) *but conditioned on workspace/cwd/exit*.
 - **Soft semantic similarity / generalization** (flag reorder, different filenames, similar subcommands).
 - **Higher-order context interactions** (workspace_root + cwd + exit_status + recent commands; host/user/time/session as low-weight signals).
 
-The intent is to replace “heavy offline training” with an **always-on model** that learns immediately from `record` events and stays strongly context-bound.
+The intent is to replace "heavy offline training" with an **always-on model** that learns immediately from `record` events and stays strongly context-bound.
 
 ---
 
@@ -14,7 +14,7 @@ The intent is to replace “heavy offline training” with an **always-on model*
 
 - **Invocation**: a row in `shell_history` (a single executed command).
 - **Command (unique)**: a distinct command line (represented in zage by `command_stats.command`, derived from `shell_history.expanded_command`).
-- **Workspace root**: zage’s notion of a project/workspace root (often a git repo root, but not always).
+- **Workspace root**: zage's notion of a project/workspace root (often a git repo root, but not always).
 - **Context**: structured fields + recent history window. Priority (high → low): `workspace_root > cwd > exit_status > host > user > time-of-day > session`.
 
 ---
@@ -23,7 +23,7 @@ The intent is to replace “heavy offline training” with an **always-on model*
 
 ### Korvemaker & Greiner (AAAI 2000): adaptive UNIX command prediction is hard
 
-Paper: “Predicting UNIX Command Lines: Adjusting to User Patterns” (AAAI 2000). PDF mirror:
+Paper: "Predicting UNIX Command Lines: Adjusting to User Patterns" (AAAI 2000). PDF mirror:
 
 `https://papersdb.cs.ualberta.ca/~papersdb/uploaded_files/712/paper_korvemaker00predicting.pdf`
 
@@ -31,13 +31,13 @@ Key takeaways:
 
 - A relatively simple adaptive model can predict next commands surprisingly often, but **it is difficult to squeeze out large additional gains** in an offline setting.
 - The target distribution is **non-stationary** (goals shift; workflows start/stop).
-- They explore “mixture of experts” ideas: different “experts” specialize on different slices/signals.
+- They explore "mixture of experts" ideas: different "experts" specialize on different slices/signals.
 
 Distilled implication for zage:
 
 - Prefer **online adaptation** and **context partitioning/backoff** over a single global model.
-- Don’t treat “session boundaries” as hard gates; treat them as *features* and *backoff hints*.
-- Favor “cheap signals that track non-stationarity” (online weights, decays, per-context statistics).
+- Don't treat "session boundaries" as hard gates; treat them as *features* and *backoff hints*.
+- Favor "cheap signals that track non-stationarity" (online weights, decays, per-context statistics).
 
 ### Korvemaker (MSc thesis 2001): more depth on Unix command line prediction
 
@@ -47,15 +47,15 @@ Thesis landing page (includes DOI):
 
 Key takeaways:
 
-- Reinforces the core difficulty: offline “big model” improvements tend to be marginal because user behavior shifts.
+- Reinforces the core difficulty: offline "big model" improvements tend to be marginal because user behavior shifts.
 
 Distilled implication for zage:
 
-- Make “learning” incremental and cheap so we can update continuously and avoid long retrains.
+- Make "learning" incremental and cheap so we can update continuously and avoid long retrains.
 
-### “Generalized command-lines” (1995): normalize syntax to generalize + correct errors
+### "Generalized command-lines" (1995): normalize syntax to generalize + correct errors
 
-Paper: “Command-line prediction and error correction using generalized command-line” (1995, Elsevier/ScienceDirect):
+Paper: "Command-line prediction and error correction using generalized command-line" (1995, Elsevier/ScienceDirect):
 
 `https://www.sciencedirect.com/science/article/pii/S0921264706801930`
 
@@ -70,11 +70,11 @@ Distilled implication for zage:
   - `head:*`
   - **position-independent** `flag:*` set (sorted/dedup)
   - a bounded set of **normalized** `arg:*` (paths/ids/branches normalized)
-  - optional “template”/slot tokens where appropriate
+  - optional "template"/slot tokens where appropriate
 
 ### Seq2Seq Unix command prediction (2020): deep models exist, but are heavy
 
-Paper: “Seq2Seq and Joint Learning Based Unix Command Line Prediction System” (arXiv:2006.11558):
+Paper: "Seq2Seq and Joint Learning Based Unix Command Line Prediction System" (arXiv:2006.11558):
 
 `https://arxiv.org/abs/2006.11558`
 
@@ -84,28 +84,28 @@ Key takeaways:
 
 Distilled implication for zage:
 
-- We do **not** want a heavyweight encoder trained offline if we want “instant learning”.
-- However, this supports the idea that “learned representations” can help beyond string matching.
+- We do **not** want a heavyweight encoder trained offline if we want "instant learning".
+- However, this supports the idea that "learned representations" can help beyond string matching.
 
 ### SimCURL (2022): command sequences are rich signal; session dropout is a useful trick
 
-Paper: “SimCURL: Simple Contrastive User Representation Learning from Command Sequences” (arXiv:2207.14760):
+Paper: "SimCURL: Simple Contrastive User Representation Learning from Command Sequences" (arXiv:2207.14760):
 
 `https://arxiv.org/abs/2207.14760`
 
 Key takeaways:
 
-- Even noisy “command sequences” encode intent and can support downstream tasks.
+- Even noisy "command sequences" encode intent and can support downstream tasks.
 - They introduce **session dropout** as augmentation (drop some steps to avoid overfitting to exact sequences).
 
 Distilled implication for zage:
 
 - Use **windows** and **backoff** rather than rigid dependence on exact last-N.
-- Consider “drop some recent commands” as a regularizer for online learning.
+- Consider "drop some recent commands" as a regularizer for online learning.
 
 ### SHREC (2024): workflows can be modeled as graphs (useful for SRE-like operations)
 
-Paper: “SHREC: a SRE Behaviour Knowledge Graph Model for Shell Command Recommendations” (arXiv:2408.05592):
+Paper: "SHREC: a SRE Behaviour Knowledge Graph Model for Shell Command Recommendations" (arXiv:2408.05592):
 
 `https://arxiv.org/abs/2408.05592`
 
@@ -116,11 +116,11 @@ Key takeaways:
 Distilled implication for zage:
 
 - Keep the **sequence/transition layer** (bigrams/trigrams/backoff) as a strong candidate source.
-- Don’t rely on graphs alone to solve semantic generalization (flags/args/etc.).
+- Don't rely on graphs alone to solve semantic generalization (flags/args/etc.).
 
 ### CmdCaliper (EMNLP 2024): semantic command-line embeddings are a real thing
 
-Paper: “CmdCaliper: A Semantic-Aware Command-Line Embedding Model and Dataset for Security Research” (arXiv:2411.01176; EMNLP 2024):
+Paper: "CmdCaliper: A Semantic-Aware Command-Line Embedding Model and Dataset for Security Research" (arXiv:2411.01176; EMNLP 2024):
 
 `https://arxiv.org/abs/2411.01176`
 
@@ -130,8 +130,8 @@ ACL anthology:
 
 Key takeaways:
 
-- Domain-specific command-line embeddings can outperform generic sentence embeddings on “similar command” tasks.
-- These models are still fairly large and not ideal for “always-on online learning”.
+- Domain-specific command-line embeddings can outperform generic sentence embeddings on "similar command" tasks.
+- These models are still fairly large and not ideal for "always-on online learning".
 
 Distilled implication for zage:
 
@@ -139,7 +139,7 @@ Distilled implication for zage:
 
 ### ShIOEnv (2025): exit status / IO matter; constrain invalid commands (grammar masking)
 
-Paper: “ShIOEnv: A CLI Behavior-Capturing Environment …” (arXiv:2505.18374):
+Paper: "ShIOEnv: A CLI Behavior-Capturing Environment ..." (arXiv:2505.18374):
 
 `https://arxiv.org/abs/2505.18374`
 
@@ -153,21 +153,123 @@ Distilled implication for zage:
 - Exit status should be an explicit feature/training signal.
 - Keep **hard constraints** (prefix match, syntax validity, dedupe) outside the model.
 
+### Davison & Hirsh (AAAI 1997 Workshop): C4.5 achieves ~38.5% macro-average accuracy
+- Papers:
+  - "Experiments in UNIX Command Prediction" — `https://www.cse.lehigh.edu/~brian/pubs/1997/aaai/`
+  - "Toward an Adaptive Command Line Interface" (HCI '97) — `https://www.cse.lehigh.edu/~brian/pubs/1997/hci/`
+  - Full technical report — `https://www.cse.lehigh.edu/~brian/pubs/1997/mltr41/mltr41.pdf`
+
+Key takeaways:
+- Collected shell data by modifying tcsh to log sessions.
+- Compared multiple approaches; C4.5 decision tree was best without domain knowledge at **38.5% macro-average**.
+- This baseline proved remarkably hard to beat (see Korvemaker & Greiner 2000).
+
+Distilled implication for zage:
+- ~38-42% accuracy is the "reasonable baseline" for next-command prediction; any model should be compared against this.
+- The gap between statistical methods and neural methods is smaller than in most NLP tasks.
+
+### Schonlau et al. (2001): SEA Masquerade Dataset + Detection Methods
+- Paper: "Computer Intrusion: Detecting Masquerades" — `https://projecteuclid.org/journals/statistical-science/volume-16/issue-1/Computer-Intrusion-Detecting-Masquerades/10.1214/ss/998929476.pdf`
+
+Key takeaways:
+- Formalized masquerade detection and evaluated six schemes:
+  - **Bayes One-Step Markov** (DuMouchel, 1999): transition probabilities + Bayes factor; 69.3% detection at 6.7% false alarm — best classical result.
+  - **Uniqueness**: ~50% of commands are unique to individual users — frequency analysis alone is surprisingly effective.
+  - **Compression**: data compression ratio as anomaly signal.
+- Dataset: 50 users, 15k commands each, command-name-only (truncated).
+
+Distilled implication for zage:
+- The Bayes One-Step Markov approach is essentially what we're building with bigram/trigram transition stats, just dressed up in embedding language.
+- The "uniqueness" finding supports cold-start strategies: rare commands carry high information content.
+
+### Maxion & Townsend (2002–2003): Enriched Command Lines Dramatically Outperform Truncated
+- Papers:
+  - "Masquerade Detection Using Truncated Command Lines" (DSN 2002) — `https://www.cs.cmu.edu/~maxion/pubs/MaxionTownsend02.pdf`
+  - "Masquerade Detection Using Enriched Command Lines" (DSN 2003) — `https://www.cs.cmu.edu/~maxion/pubs/MaxionDSN03.pdf`
+
+Key takeaways:
+- Truncated command lines (names only, stripped of flags/args/pipes) throw away most of the signal.
+- **Enriched command lines** (preserving flags, arguments, shell grammar) improved detection by **56%** (39.4% → 61.5% at ~1% false alarm).
+- This was one of the strongest empirical demonstrations that structural information in command lines matters enormously.
+
+Distilled implication for zage:
+- Our "generalized command line" representation (head + flag set + normalized args) is directly validated by this work.
+- Never fall back to command-name-only modeling; the args/flags carry more discriminative power than the head.
+
+### Durant & Smith (2002): Decision Tables/Trees Confirm Diminishing Returns
+- Paper: "Predicting UNIX commands using decision tables and decision trees" (DATA 2002) — `https://www.witpress.com/Secure/elibrary/papers/DATA02/DATA02042FU.pdf`
+
+Key takeaways:
+- 40% accuracy with decision tables, 42% with boosted decision trees (on small history sessions).
+- Confirms Davison & Hirsh's baseline; shows ensemble methods provide only marginal gains.
+
+Distilled implication for zage:
+- Another data point that model sophistication has diminishing returns; features and context matter more.
+
+### Singh et al. (2021): Semantic Deficit and KB-Augmented Embeddings
+- Paper: "Predictive Approaches for the UNIX Command Line" — `https://link.springer.com/article/10.1007/s11042-020-10109-y`
+
+Key takeaways:
+- Compared LSTM, BERT, and knowledge-base-augmented embeddings for UNIX command prediction.
+- All models suffer from **"semantic deficit"** — command data lacks the rich textual context NLP models expect.
+- Augmenting with curated knowledge base (man page descriptions) helps.
+- Structural normalization of commands significantly improves generalization.
+
+Distilled implication for zage:
+- Raw command text is a poor input for off-the-shelf NLP models; our structural normalization is essential.
+- Man-page descriptions could be a useful auxiliary signal for embeddings (similar to knowledge-base augmentation).
+- Stanford NL2Bash work found models consistently get the wrong starting binary but predict the remainder well — command heads may need separate treatment from arguments.
+
+### CL4SRec (SIGIR 2021): Contrastive Augmentations for Sequential Recommendation
+- Paper: `https://arxiv.org/abs/2010.14395`
+
+Key takeaways:
+- Introduced three data augmentations for sequential recommendation: **item cropping**, **item masking**, **item reordering**.
+- SimCURL's "session dropout" is essentially a domain-specific version of CL4SRec's cropping.
+- Contrastive learning from augmented views produces better user representations.
+
+Distilled implication for zage:
+- Our session dropout for replay augmentation is well-grounded in the recsys literature.
+- Item masking (drop a command from the middle of a session) could be another useful augmentation.
+
+### Verbeek & Hassani (CoopIS 2024): Online Continual Learning for Next-Activity Prediction
+- Paper: `https://research.tue.nl/en/publications/handling-catastrophic-forgetting-online-continual-learning-for-ne`
+
+Key takeaways:
+- Directly studies next-activity prediction under non-stationarity (the core zage problem).
+- Evaluates replay buffer strategies; **per-context replay buffers** are most effective.
+- EMA weight averaging provides stability without high computational cost.
+
+Distilled implication for zage:
+- Our per-workspace replay buffers are validated by this work.
+- EMA for inference weights is worth implementing for stability.
+
+### Gros / AInix (2019): Ambiguity-Aware NL→Shell
+- Thesis: `https://www.cs.utexas.edu/~ml/papers/gros.thesis19.pdf`
+
+Key takeaways:
+- Produces ambiguous parses with multiple interpretations, then resolves interactively.
+- Relevant because shell commands are risky — wrong suggestions can be catastrophic.
+
+Distilled implication for zage:
+- Confidence gating isn't just about accuracy — it's about safety. When uncertain, don't suggest.
+- Presenting multiple candidates (rather than one top-1) is a reasonable UX for high-stakes commands.
+
 ---
 
 ## Additional Prior Art (New)
 
-These are more implementation-adjacent / “what engineers actually ship” references that match our constraints (local, fast, explainable, privacy-sensitive):
+These are more implementation-adjacent / "what engineers actually ship" references that match our constraints (local, fast, explainable, privacy-sensitive):
 
-- **NeuroShell / Intelligent Unix Shell (2023–2024, open source)**: hybrid approaches combining n-grams/Markov + similarity scoring for suggestions/typo correction, emphasizing local execution and explainable scoring.
+- **NeuroShell / Intelligent Unix Shell (2023-2024, open source)**: hybrid approaches combining n-grams/Markov + similarity scoring for suggestions/typo correction, emphasizing local execution and explainable scoring.
   - `https://github.com/Anshika-111105/Intelligent-Unix-Shell`
-- **ShellSuggest (2023–2024, open source)**: next-word prediction for Linux terminal commands (LM framing for shell completion).
+- **ShellSuggest (2023-2024, open source)**: next-word prediction for Linux terminal commands (LM framing for shell completion).
   - `https://thedotproduct.github.io/shell-suggest-lang-model/`
 - **First Shell Command Prediction Model (Jesse Claven)**: practical blog write-up of a transformer/time-series approach for shell command prediction.
   - `https://www.j-e-s-s-e.com/blog/first-shell-command-prediction-model`
 - **LOTLDetector (2025, security detection)**: multi-view command-line embeddings (Token2Vec/Rule2Vec/Similarity2Vec) fused with CNN; evidence that multi-view representations work.
   - `https://link.springer.com/article/10.1186/s42400-025-00531-w`
-- **Netflix Generative Recommenders (2024–2025, recsys practice)**: sampled-softmax efficiency, continuous training, calibration/metrics thinking (MRR).
+- **Netflix Generative Recommenders (2024-2025, recsys practice)**: sampled-softmax efficiency, continuous training, calibration/metrics thinking (MRR).
   - `https://netflixtechblog.medium.com/towards-generalizable-and-efficient-large-scale-generative-recommenders-a7db648aa257`
 - **DenseRec (2025, recsys)**: dual pathway embeddings (ID-based + content-based) with probabilistic mixing for cold-start.
   - `https://www.linkedin.com/posts/singhsidhukuldeep_solving-the-cold-start-problem-in-sequential-activity-7407955404971859968-FNZ6`
@@ -182,7 +284,7 @@ These are more implementation-adjacent / “what engineers actually ship” refe
 - **Cold-start overview (auxiliary features / settings)**: cold-start settings and how side-info helps.
   - `https://www.sciencedirect.com/science/article/abs/pii/S0950705126000249`
 
-Even when these aren’t “next shell command prediction” papers, the techniques directly map to our goals (next-item prediction + context + cold-start + online updates).
+Even when these aren't "next shell command prediction" papers, the techniques directly map to our goals (next-item prediction + context + cold-start + online updates).
 
 ---
 
@@ -197,7 +299,7 @@ We want a model that:
 3) Scores candidates by **dot product** (or cosine) plus small bias terms.
 4) Updates parameters **online** on every `record` (or micro-batches) using negative sampling.
 
-This is intentionally “word2vec/item2vec-like” rather than a Transformer:
+This is intentionally "word2vec/item2vec-like" rather than a Transformer:
 
 - Training per update is ~O((1+K)·D) where K is number of negatives and D is embedding dim.
 - No expensive batch×batch logits matrix.
@@ -207,7 +309,7 @@ This is intentionally “word2vec/item2vec-like” rather than a Transformer:
 
 ## Concrete v1 Decisions (So This Is Implementable)
 
-This section pins down defaults so we don’t get stuck in “design feels plausible” territory.
+This section pins down defaults so we don't get stuck in "design feels plausible" territory.
 
 ### Targets
 
@@ -224,11 +326,11 @@ This section pins down defaults so we don’t get stuck in “design feels plaus
 
 We will implement **FastText-style subword hashing** in v1:
 
-- Character n-grams: 3–6
+- Character n-grams: 3-6
 - Bucket count: **131,072** (2^17), with sign hashing
-- Hash function: stable 64-bit hash with good avalanche (reuse zage’s stable hash utility)
+- Hash function: stable 64-bit hash with good avalanche (reuse zage's stable hash utility)
 
-Rationale: shell token space is huge (paths/branches/tooling). We must not require “rebuild vocab”.
+Rationale: shell token space is huge (paths/branches/tooling). We must not require "rebuild vocab".
 
 ### Replay buffers (forgetting mitigation)
 
@@ -255,9 +357,9 @@ We will learn a small set of **group scalars** online (instead of hard-coding al
 We will suppress embedding-driven suggestions when uncertain:
 
 - Margin gate: if `top1 - top2 < 0.05`, down-weight learned score and rely more on tier-1/frecency.
-- Absolute gate: if `top1 < 0.0` (post-calibration), don’t inject embedding-based candidates.
+- Absolute gate: if `top1 < 0.0` (post-calibration), don't inject embedding-based candidates.
 
-This ensures “model on” never performs worse than “model off”.
+This ensures "model on" never performs worse than "model off".
 
 ### Calibration / blending with priors
 
@@ -279,13 +381,13 @@ Embeddings capture associations, not raw text. They may still leak sensitive pat
 
 For an invocation `(shellname, expanded_command)`:
 
-- Tokenize using zage’s existing shell-aware tokenizer.
+- Tokenize using zage's existing shell-aware tokenizer.
 - Extract structured parts:
   - `head:<cmd>`
   - `flag:<flag>` (collect all flags, sort+dedup to make them **position-independent**)
   - `arg:<normalized>` (cap to M args; normalize paths/ids/branches, etc.)
 - Optional structural tokens (if useful, but not required for v1):
-  - `shape:pipe`, `shape:redir`, `shape:assign`, `shape:subshell`, …
+  - `shape:pipe`, `shape:redir`, `shape:assign`, `shape:subshell`, ...
 
 These tokens are used to compute a command embedding.
 
@@ -323,7 +425,7 @@ Two towers that share the same token vocabulary:
 - Score:
   - `score(ctx, cmd) = v_ctx · v_cmd + b_cmd + b_head + b_ctx_bucket`
 
-Where per-token weights are **initial priors**, and group scalars are learned online (see “Concrete v1 Decisions”):
+Where per-token weights are **initial priors**, and group scalars are learned online (see "Concrete v1 Decisions"):
 
 - `ctx:workspace_root` weight > `ctx:cwd` > `ctx:exit` > `ctx:host` > `ctx:user` > `ctx:timebucket` > `ctx:session`.
 - `flag:*` tokens weight is non-zero and position-independent (flags must matter).
@@ -337,7 +439,7 @@ On each new `record` event we get an example:
 
 We update embeddings with a binary logistic objective using K negatives:
 
-- Sample negatives from a mixed pool that intentionally includes “hard negatives”:
+- Sample negatives from a mixed pool that intentionally includes "hard negatives":
   - same `head:*`
   - same workspace/cwd (if available)
   - globally frequent commands
@@ -349,7 +451,7 @@ Loss (conceptual):
   - maximize `σ(score(ctx, c+))`
   - minimize `σ(score(ctx, c-))`
 
-This is the classic “skip-gram with negative sampling” pattern, applied to next-command prediction.
+This is the classic "skip-gram with negative sampling" pattern, applied to next-command prediction.
 
 ### Where frecency fits
 
@@ -368,7 +470,7 @@ The online model score should be the primary rank signal once warmed up.
 
 ## Critical Failure Modes (and Concrete Mitigations)
 
-This section addresses the major risks called out in review so we don’t ship a design that “sounds plausible” but fails in practice.
+This section addresses the major risks called out in review so we don't ship a design that "sounds plausible" but fails in practice.
 
 ### 1) Catastrophic forgetting / non-stationarity
 
@@ -379,14 +481,14 @@ Problem:
 Mitigations (pick at least one; ideally two):
 
 - **Replay buffer**: keep a reservoir-sampled buffer of past `(context, next_command)` events and train each update on:
-  - 1 new event + R replay events (e.g., R=1–8).
-- **Per-context replay**: maintain separate buffers per `workspace_root` (and optionally per `cwd`), so switching projects immediately replays that project’s past.
+  - 1 new event + R replay events (e.g., R=1-8).
+- **Per-context replay**: maintain separate buffers per `workspace_root` (and optionally per `cwd`), so switching projects immediately replays that project's past.
 - **Decayed learning rate / Adagrad**: reduces step sizes for frequently-updated parameters; helps stabilize common tokens/commands.
-- **Weight averaging**: maintain EMA (“shadow weights”) of embeddings and use EMA for inference to damp oscillation.
+- **Weight averaging**: maintain EMA ("shadow weights") of embeddings and use EMA for inference to damp oscillation.
 
 What we are explicitly *not* doing (v1):
 
-- Heavy continual-learning methods (EWC, LwF) unless replay + Adagrad still isn’t stable enough.
+- Heavy continual-learning methods (EWC, LwF) unless replay + Adagrad still isn't stable enough.
 
 ### 2) Cold-start and OOV tokens/commands
 
@@ -397,23 +499,23 @@ Problem:
 Mitigations (commit to one):
 
 - **FastText-style subword hashing**:
-  - Represent each token using character n-grams (e.g., 3–6) hashed into fixed buckets.
+  - Represent each token using character n-grams (e.g., 3-6) hashed into fixed buckets.
   - Command embedding becomes the sum of its token n-gram embeddings.
-  - This makes new commands partially “understandable” immediately.
+  - This makes new commands partially "understandable" immediately.
 - **Dual pathway (DenseRec-style)**:
   - Maintain both:
     - ID-based embedding for known `command_stats.command` (fast, high quality when seen)
     - content-based embedding from tokens/subwords (works for unseen commands)
-  - During training/inference, mix them (learned or heuristic) based on “how much history exists for this command”.
+  - During training/inference, mix them (learned or heuristic) based on "how much history exists for this command".
 
-We should not require a “rebuild vocab” step.
+We should not require a "rebuild vocab" step.
 
 ### 3) Negative sampling strategy (popularity bias + bias correction)
 
 Problem:
 
-- If we sample “globally frequent commands” as negatives too aggressively, we suppress common-but-correct suggestions.
-- If we don’t correct for the sampling distribution, scores become miscalibrated.
+- If we sample "globally frequent commands" as negatives too aggressively, we suppress common-but-correct suggestions.
+- If we don't correct for the sampling distribution, scores become miscalibrated.
 
 Mitigations:
 
@@ -423,28 +525,28 @@ Mitigations:
   - 20% from recent window (recency hard negatives)
   - 10% global, frequency-weighted with exponent 0.75 (word2vec-style)
 - Use a **sampled-softmax / log-Q correction**:
-  - Train on `logits = score(ctx, cmd) - log(Q(cmd))` so training isn’t biased toward the sampler.
+  - Train on `logits = score(ctx, cmd) - log(Q(cmd))` so training isn't biased toward the sampler.
 
 Related reading:
 
-- “Correct and Weight” (implicit feedback; negative sampling bias): `https://arxiv.org/abs/2601.04291`
-- “Correcting the LogQ Correction” (notes subtle bias in standard log-Q correction): `https://arxiv.org/abs/2507.09331`
+- "Correct and Weight" (implicit feedback; negative sampling bias): `https://arxiv.org/abs/2601.04291`
+- "Correcting the LogQ Correction" (notes subtle bias in standard log-Q correction): `https://arxiv.org/abs/2507.09331`
 
 ### 4) Multi-step workflows and interleaving
 
 Problem:
 
 - Real workflows are not pure bigrams and are often interleaved.
-- “Context → next command” can still learn these, but only if the context representation preserves enough structure.
+- "Context → next command" can still learn these, but only if the context representation preserves enough structure.
 
 Mitigations:
 
 - Include last-N commands in context, but avoid collapsing everything into a single bag:
-  - Add lightweight structure tokens: `prev0:head:*`, `prev1:head:*`, … for heads (or for a small subset like heads + top flags).
+  - Add lightweight structure tokens: `prev0:head:*`, `prev1:head:*`, ... for heads (or for a small subset like heads + top flags).
   - Keep flags position-independent *within a command*, not across the entire window.
-- Add “phase/workflow” as explicit context tokens (derived from zage phases/sequences), not as a separate heuristic scoring system.
+- Add "phase/workflow" as explicit context tokens (derived from zage phases/sequences), not as a separate heuristic scoring system.
 
-If this still isn’t sufficient, the next step is a tiny sequence encoder (e.g., GRU over the last N command embeddings), still trained online with negative sampling.
+If this still isn't sufficient, the next step is a tiny sequence encoder (e.g., GRU over the last N command embeddings), still trained online with negative sampling.
 
 ### 5) Fixed context weights vs learned importance
 
@@ -455,17 +557,17 @@ Problem:
 Mitigations:
 
 - Learn a small set of **group scalars** online:
-  - one scalar per context group (`workspace_root`, `cwd`, `exit`, `host`, …)
-  - optionally per “phase/workflow” token group
-- Or learn a small “gating” function (tiny linear layer) that weights groups based on the current context.
+  - one scalar per context group (`workspace_root`, `cwd`, `exit`, `host`, ...)
+  - optionally per "phase/workflow" token group
+- Or learn a small "gating" function (tiny linear layer) that weights groups based on the current context.
 
 The key is: keep it tiny enough to update online and store in DB.
 
 ### 6) Exit status: feature, not label
 
-Exit status should be treated as context, not “this command was wrong”.
+Exit status should be treated as context, not "this command was wrong".
 
-- `exit!=0` often means “retry the same command with flags” or “run the fix step”.
+- `exit!=0` often means "retry the same command with flags" or "run the fix step".
 - So `ctx:exit=1` should allow the model to learn patterns like:
   - `cargo test` (exit 101) → `cargo test -- --nocapture`
   - `git push` (exit) → `git pull --rebase`
@@ -474,15 +576,15 @@ Exit status should be treated as context, not “this command was wrong”.
 
 Recommendations:
 
-- Start with D=64–128 for online.
+- Start with D=64-128 for online.
 - Use Adagrad or RMSProp (per-parameter adaption) to avoid constant retuning.
 - If using hashing buckets:
   - collisions are expected; mitigate by:
     - larger bucket count
     - sign hashing
-    - keeping “ID-based” embeddings for frequent commands (dual pathway)
+    - keeping "ID-based" embeddings for frequent commands (dual pathway)
 - Use gradient clipping to avoid exploding updates on rare events.
-- If we use Adagrad, consider periodic accumulator rescaling or switch to RMSProp to avoid “learning rate goes to ~0 forever” for very frequent features.
+- If we use Adagrad, consider periodic accumulator rescaling or switch to RMSProp to avoid "learning rate goes to ~0 forever" for very frequent features.
 
 ### 8) Ranking and calibration (combining with frecency)
 
@@ -491,12 +593,12 @@ Dot products are not probabilities; we need a stable, interpretable blend with p
 Recommended:
 
 - Use a log-linear blend:
-  - `final = α * model_score + β * log(frecency_prior) + γ * sequence_score + …`
+  - `final = α * model_score + β * log(frecency_prior) + γ * sequence_score + ...`
 - Learn `α/β/γ` (or at least `α`) online using acceptance feedback, or set them conservatively and expose them as config.
 
 ### 9) Evaluation: non-stationary + ranking metrics
 
-Replace “single chronological split” with:
+Replace "single chronological split" with:
 
 - rolling-window evaluation (prequential): train on past, evaluate on next chunk, slide forward.
 - ranking metrics:
@@ -505,12 +607,12 @@ Replace “single chronological split” with:
   - Coverage@K (diversity / not always predicting `ls`)
   - Context leakage rate (define as: top-K contains commands whose dominant workspace/cwd != current)
 
-### 10) Implicit negative feedback (“undo”, Ctrl-C, rejects)
+### 10) Implicit negative feedback ("undo", Ctrl-C, rejects)
 
 We do **not** use implicit negatives in v1:
 
 - Only **accepted suggestions** are logged and used for training.
-- No “rejected/ignored” outcomes, and no time-window matching.
+- No "rejected/ignored" outcomes, and no time-window matching.
 - Ctrl-C and other aborts are ignored (no-op).
 
 If we want negatives later, it must be explicit and UX-supported; we will not infer it from timing.
@@ -563,7 +665,7 @@ Keep a staged pipeline approach:
 
 ### One embedding space (avoid conflicts)
 
-If we keep sqlite-vec similarity search, we should avoid “two embedding spaces” that disagree.
+If we keep sqlite-vec similarity search, we should avoid "two embedding spaces" that disagree.
 
 Rule:
 
@@ -592,11 +694,11 @@ Update the model on:
 - micro-batches (flush every N records), or
 - a background worker in the daemon
 
-This should be fast enough on CPU if D is small (e.g., 64–128) and K is modest (8–32).
+This should be fast enough on CPU if D is small (e.g., 64-128) and K is modest (8-32).
 
 ---
 
-## Evaluation Plan (What “good” looks like)
+## Evaluation Plan (What "good" looks like)
 
 ### Offline (repeatable)
 
@@ -617,13 +719,13 @@ Track:
 
 - acceptance rate (did the user execute a suggested command soon after?)
 - time-to-next-command reduction (optional)
-- “context leakage” events (suggestions from unrelated workspace/cwd)
+- "context leakage" events (suggestions from unrelated workspace/cwd)
 
 ---
 
 ## Why this satisfies the goals
 
-- **Sequence effects**: context vector includes last-N; negative sampling can include “same head” to make sequences discriminative.
+- **Sequence effects**: context vector includes last-N; negative sampling can include "same head" to make sequences discriminative.
 - **Soft semantic similarity**: generalized tokens + learned token embeddings make reorder/different filenames map close.
 - **Higher-order interactions**: context tokens (workspace_root/cwd/exit) are first-class; the model can learn their interactions because they participate in the same embedding space.
 
