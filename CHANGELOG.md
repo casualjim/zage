@@ -1,4 +1,14 @@
+## [0.1.7] - 2026-04-05
+
+### 📚 Documentation
+
+- Add next-command-prediction-specific prior art
 ## [0.1.6] - 2026-03-29
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.6 [ci skip]
+- Release zage version 0.1.6
 
 ### ◀️ Revert
 
