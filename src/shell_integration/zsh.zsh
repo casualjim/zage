@@ -53,6 +53,11 @@ _zsh_autosuggest_strategy_zage() {
     local prefix="$BUFFER"
     local output
 
+    if [[ "$prefix" == :* ]]; then
+      suggestion=""
+      return
+    fi
+
     if [[ -z "$prefix" ]]; then
       output="$(zage suggest --autosuggest --count 5 2>/dev/null)"
     else
