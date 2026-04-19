@@ -1,8 +1,18 @@
+## [0.1.8] - 2026-04-19
+
+### 🐛 Bug Fixes
+
+- *(zsh)* Suppress autosuggest on : commands
 ## [0.1.7] - 2026-04-05
 
 ### 📚 Documentation
 
 - Add next-command-prediction-specific prior art
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.7 [ci skip]
+- Release zage version 0.1.7
 ## [0.1.6] - 2026-03-29
 
 ### ⚙️ Miscellaneous Tasks
