@@ -1,8 +1,18 @@
+## [0.1.9] - 2026-07-12
+
+### 🐛 Bug Fixes
+
+- *(shell)* Honor ZAGE_ALIAS_FILE over populating ZAGE_ALIASES env
 ## [0.1.8] - 2026-04-19
 
 ### 🐛 Bug Fixes
 
 - *(zsh)* Suppress autosuggest on : commands
+
+### ⚙️ Miscellaneous Tasks
+
+- Update changelog for v0.1.8 [ci skip]
+- Release zage version 0.1.8
 ## [0.1.7] - 2026-04-05
 
 ### 📚 Documentation
