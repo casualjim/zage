@@ -4135,7 +4135,7 @@ dependencies = [
 
 [[package]]
 name = "zage"
-version = "0.1.8"
+version = "0.1.9"
 dependencies = [
  "assert_cmd",
  "bstr",
