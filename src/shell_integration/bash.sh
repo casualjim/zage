@@ -17,7 +17,11 @@ fi
 export ZAGE_SESSION_ID=$$
 
 # Capture aliases from the running shell for completion scoring
-if [[ -z "$ZAGE_ALIASES" ]]; then
+# Prefer a file when ZAGE_ALIAS_FILE is set (keeps the environment small);
+# otherwise fall back to the ZAGE_ALIASES environment variable.
+if [[ -n "$ZAGE_ALIAS_FILE" ]]; then
+    alias -p > "$ZAGE_ALIAS_FILE"
+elif [[ -z "$ZAGE_ALIASES" ]]; then
     ZAGE_ALIASES="$(alias -p)"
     export ZAGE_ALIASES
 fi
